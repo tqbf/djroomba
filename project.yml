@@ -1,0 +1,42 @@
+name: DJRoomba
+
+options:
+  bundleIdPrefix: org.sockpuppet
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "14.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: KK7E9G89GW
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+
+targets:
+  DJRoomba:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: DJRoomba
+    settings:
+      base:
+        PRODUCT_NAME: DJRoomba
+        PRODUCT_BUNDLE_IDENTIFIER: org.sockpuppet.djroomba
+        INFOPLIST_FILE: DJRoomba/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: DJRoomba/DJRoomba.entitlements
+        LSAPPLICATIONCATEGORYTYPE: public.app-category.music
+
+schemes:
+  DJRoomba:
+    build:
+      targets:
+        DJRoomba: all
+    run:
+      config: Debug
