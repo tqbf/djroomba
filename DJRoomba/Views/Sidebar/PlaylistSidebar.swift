@@ -1,13 +1,11 @@
 import SwiftUI
-import MusicKit
 
-/// The app's primary navigation: the user's library playlists. Loading,
-/// error, and empty states are inline (no modal alerts).
+/// Routes the sidebar between loading / error / empty / populated. The
+/// populated list (sections, filtering, focus) lives in `PlaylistSidebarList`.
 struct PlaylistSidebar: View {
     @Environment(MusicController.self) private var controller
 
     var body: some View {
-        @Bindable var controller = controller
         Group {
             if controller.library.isLoading && controller.library.summaries.isEmpty {
                 ProgressView("Loading playlists…")
@@ -30,15 +28,7 @@ struct PlaylistSidebar: View {
                     description: Text("No playlists were found in your Apple Music library.")
                 )
             } else {
-                List(selection: $controller.selectedPlaylistID) {
-                    Section("Library Playlists") {
-                        ForEach(controller.library.summaries) { summary in
-                            PlaylistSidebarRow(summary: summary)
-                                .tag(summary.id)
-                        }
-                    }
-                }
-                .listStyle(.sidebar)
+                PlaylistSidebarList()
             }
         }
         .navigationTitle("Playlists")

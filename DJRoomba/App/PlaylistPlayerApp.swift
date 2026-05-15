@@ -38,6 +38,14 @@ struct PlaylistPlayerApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
+
+            CommandGroup(after: .sidebar) {
+                Button("Playlists", action: controller.requestSidebarFocus)
+                    .keyboardShortcut("1", modifiers: .command)
+
+                Button("Focus Playlist Sidebar", action: controller.requestSidebarFocus)
+                    .keyboardShortcut("l", modifiers: .command)
+            }
         }
     }
 }

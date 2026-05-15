@@ -14,6 +14,21 @@ final class MusicController {
     let playback = PlaybackService()
 
     @ObservationIgnored private let preferences = UserPreferencesStore()
+    @ObservationIgnored private let favoritesStore = FavoritesStore()
+    @ObservationIgnored private let recentsStore = RecentlyPlayedStore()
+
+    /// Observable mirrors of the persisted app state (the stores can't be
+    /// `@Observable` themselves).
+    private(set) var favoriteIDs: Set<String> = []
+    private(set) var recentIDs: [String] = []
+
+    /// Bumped by the ⌘L / ⌘1 commands; the sidebar observes this to take
+    /// keyboard focus (commands are app-scoped, so this bridges to the view).
+    private(set) var focusSidebarRequest = 0
+
+    func requestSidebarFocus() {
+        focusSidebarRequest &+= 1
+    }
 
     /// Sidebar selection. App-local state — drives lazy detail load and is
     /// persisted so it survives relaunch (if the playlist still exists).
@@ -43,6 +58,8 @@ final class MusicController {
     private func startAuthorizedSession() async {
         subscription.start()
         playback.startMonitoring()
+        favoriteIDs = favoritesStore.load()
+        recentIDs = recentsStore.load()
         await library.load()
         restoreSelection()
     }
@@ -86,6 +103,43 @@ final class MusicController {
         }
     }
 
+    // MARK: - Favorites & recents (app state)
+
+    func isFavorite(_ summary: PlaylistSummary) -> Bool {
+        favoriteIDs.contains(summary.id.rawValue)
+    }
+
+    func toggleFavorite(_ summary: PlaylistSummary) {
+        let key = summary.id.rawValue
+        if favoriteIDs.contains(key) {
+            favoriteIDs.remove(key)
+        } else {
+            favoriteIDs.insert(key)
+        }
+        favoritesStore.save(favoriteIDs)
+    }
+
+    private func recordRecentlyPlayed(_ id: MusicItemID) {
+        recentIDs = recentsStore.record(id.rawValue, into: recentIDs)
+    }
+
+    /// Library playlists sorted by name (the service already sorts; this is
+    /// the source the sidebar sections derive from).
+    var libraryPlaylists: [PlaylistSummary] {
+        library.summaries
+    }
+
+    var favoritePlaylists: [PlaylistSummary] {
+        library.summaries.filter { favoriteIDs.contains($0.id.rawValue) }
+    }
+
+    /// Recently played, in recency order, limited to playlists still present.
+    var recentPlaylists: [PlaylistSummary] {
+        recentIDs.compactMap { raw in
+            library.summaries.first { $0.id.rawValue == raw }
+        }
+    }
+
     // MARK: - Playback capability
 
     /// Library browsing always works; catalog playback needs a subscription.
@@ -105,11 +159,13 @@ final class MusicController {
 
     func playSelectedPlaylist() async {
         guard let detail = detailService.detail, !detail.isEmpty else { return }
+        recordRecentlyPlayed(detail.id)
         await playback.play(playlist: detail)
     }
 
     func play(_ row: TrackRow) async {
         guard let detail = detailService.detail else { return }
+        recordRecentlyPlayed(detail.id)
         await playback.play(playlist: detail, startingAt: row)
     }
 

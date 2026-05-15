@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PlaylistSidebarRow: View {
     let summary: PlaylistSummary
+    let isFavorite: Bool
 
     var body: some View {
         HStack(spacing: 10) {
@@ -17,6 +18,12 @@ struct PlaylistSidebarRow: View {
                 }
             }
             Spacer(minLength: 0)
+            if isFavorite {
+                Image(systemName: "star.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.yellow)
+                    .accessibilityLabel("Favorite")
+            }
         }
         .padding(.vertical, 2)
     }

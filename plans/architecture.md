@@ -1,6 +1,46 @@
 # Architecture
 
-## Layers
+## Local-first pivot (post-M2)
+
+The app became a local-first manager. **SQLite (GRDB) is the source of
+truth.** Apple Music is read-only import + the playback engine. New layering:
+
+```
+Views ─observe─▶ MusicController (@Observable @MainActor)
+                     │ owns
+   ┌─────────────────┼───────────────────────────────────┐
+   │ MusicAuthorizationService / MusicSubscriptionService │ ── MusicKit
+   │ ImportService   (MusicKit read ─▶ upsert SQLite)     │ ──▶ Apple Music
+   │ LibraryStore    (GRDB; reads/writes the DB)           │
+   │ PlaybackService (ApplicationMusicPlayer)              │ ── MusicKit
+   │ PlaybackResolver(MusicItemID ─▶ Song/Track at play)   │ ── MusicKit
+   └───────────────────────────────────┬───────────────────┘
+                                        ▼
+                         SQLite (GRDB): imported snapshot,
+                         app playlists, play counts, favorites,
+                         recents, prefs  — the source of truth
+```
+
+Key changes vs M1/M2:
+- `PlaylistLibraryService` / `PlaylistDetailService` no longer the source of
+  truth — they become part of `ImportService`. The sidebar/detail read from
+  `LibraryStore` (SQLite), not from live MusicKit collections.
+- Models no longer carry the live MusicKit object (`PlaylistSummary.playlist`,
+  `TrackRow.track`). SQLite rows store the catalog/library `MusicItemID`;
+  `PlaybackResolver` re-fetches `Song`/`Track` by id just before building the
+  `ApplicationMusicPlayer.Queue`. (Risk: id namespace mismatch — see
+  `plans/musickit-notes.md`; resolve library ids via `MusicLibraryRequest`,
+  catalog ids via `MusicCatalogResourceRequest`.)
+- `FavoritesStore`/`RecentlyPlayedStore`/`UserPreferencesStore` (UserDefaults)
+  are superseded by SQLite tables in M3 (keep the small prefs in UserDefaults
+  if cheaper; favorites/recents move to the DB).
+- One-way only: **no write-back to Apple.** App playlists/play-counts never
+  leave SQLite.
+
+Schema, import pipeline, and playback resolution detail live in
+`plans/data-and-import.md`.
+
+## Layers (original M1/M2 — being re-pointed at SQLite)
 
 ```
 Views  ──observe──▶  MusicController (@Observable @MainActor)

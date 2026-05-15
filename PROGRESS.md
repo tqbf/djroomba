@@ -1,62 +1,92 @@
 # Progress
 
-> Read `PLAN.md` then this file to get up to speed. Newest entries on top.
+> Resume protocol: read `PLAN.md` (decisions + milestone index) then this
+> file. `plans/roadmap.md` is the forward plan; `plans/risks-and-challenges.md`
+> is the live risk register. Newest status on top.
 
-## Status: Milestone 1 — code complete, build-verified, runtime unverified
+## Current status: planning consolidated — Phase 1 (access validation) is next
 
-### Done
-- Planning docs: `PLAN.md`, `plans/architecture.md`, `plans/project-setup.md`,
-  `plans/musickit-notes.md`, `plans/milestone-1.md`, `plans/typography.md`.
-- Skills consulted: `swiftui-pro` (pre + post code review), `macos-design`,
-  `typography-designer`. Decisions captured in `plans/`.
-- XcodeGen project (`project.yml`), Info.plist (`NSAppleMusicUsageDescription`),
-  entitlements (sandbox + network client), `.gitignore`. Scaffold built clean.
-- Milestone 1 implemented end to end:
-  - Models: PlaylistSource, PlaylistSummary, PlaylistDetail, TrackRow,
-    PlayerStateSnapshot, UserPlaylistMetadata.
-  - Music: MusicAuthorizationService, MusicSubscriptionService,
-    PlaylistLibraryService (paginated), PlaylistDetailService (lazy + cached),
-    PlaybackService (thin ApplicationMusicPlayer wrapper), MusicController
-    coordinator, MusicContext + MusicCommand (M3 boundary scaffolded).
-  - Persistence: UserPreferencesStore (last-selected playlist).
-  - Views: RootView, AuthorizationView, MainShellView (NavigationSplitView +
-    bottom NowPlayingBar), PlaylistSidebar/Row, PlaylistDetailView,
-    PlaylistHeaderView, TrackTableView (native Table, double-click/Return →
-    play from track), NowPlayingBar, TransportControls, ArtworkThumbnail.
-- **Build verified**: `xcodebuild ... CODE_SIGNING_ALLOWED=NO build` →
-  BUILD SUCCEEDED, no errors or Swift warnings (Swift 6 strict concurrency).
-- `swiftui-pro` post-code pass applied: extracted duplicated artwork into a
-  reusable `ArtworkThumbnail` struct; moved button logic out of view bodies
-  into methods (AuthorizationView, PlaylistDetailView). Re-verified clean.
+The project pivoted to **local-first** (SQLite-owned library, native MusicKit
+as import + playback only). All planning docs are written and consolidated.
+No Phase-1+ code started yet — by design, Phase 1 is a validation gate.
 
-### Known caveats / NOT verified
-- **Runtime playback is unverified.** CLI builds disable code signing (only a
-  "Developer ID Application" cert exists; no Mac Development cert). Actually
-  running the app + exercising MusicKit auth/library/playback requires running
-  from Xcode signed into the Apple ID **and** the `org.sockpuppet.djroomba`
-  App ID having MusicKit enabled. See `plans/project-setup.md`. The First
-  Milestone "definition of done" is met in code; live playback has not been
-  exercised here and should not be claimed as verified.
-- `nonisolated(unsafe)` on `ApplicationMusicPlayer.shared` in PlaybackService:
-  MusicKit isn't Sendable-audited and its async transport is `nonisolated`;
-  all our access is MainActor-serialized so this is sound (see
-  `plans/musickit-notes.md`). Revisit when MusicKit gains Sendable.
-- `PlaylistSummary.trackCount` and `isEditable` are `nil` (a library request
-  doesn't load tracks; editability isn't cleanly exposed on macOS 14). The
-  sidebar tolerates this; counts show in the detail header instead.
-- Playlist `description` not surfaced yet (API shape uncertainty) — left nil.
-- SourceKit shows stale "cannot find type" diagnostics across files; ignore —
-  every real `swiftc` build passes. They clear with a fresh index.
-- No unit tests yet (swiftui-pro hygiene gap) — candidate for M2.
+## Decisions locked
 
-### Next (Milestone 2 — "Make it pleasant")
-- Favorites + Recently Played sections; FavoritesStore/RecentlyPlayedStore.
-- Playlist filtering + in-playlist track filtering (⌘F).
-- Persist window/sidebar state; full keyboard map + focus management.
-- Improve empty/loading/error polish; add `#Preview`s; add a test target.
+- **Identity:** native MusicKit, system Apple Account ("Option A"). No in-app
+  login. User has an ADC membership and has used MusicKit before.
+- **Local store:** SQLite via **GRDB** (SPM through XcodeGen).
+- **Data ownership:** app owns playlists, play counts, favorites, recents,
+  metadata in SQLite. One-way import from Apple. **No write-back to Apple.**
+- **Playback:** native `ApplicationMusicPlayer`, in-process; stored
+  `MusicItemID`s re-resolved at play time. Requires active subscription.
+- **Tooling/identity:** XcodeGen; macOS 14 min (built on Xcode 26.4 / Swift
+  6.3); app "DJ Roomba" / `org.sockpuppet.djroomba` / team `KK7E9G89GW`.
 
-### Process notes
-- No commits yet (repo had no history). Will not commit/push or merge without
-  being asked; **never merge to `main`** (CLAUDE.md). Build with:
-  `xcodegen generate && xcodebuild -project DJRoomba.xcodeproj -scheme DJRoomba
-  -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
+## Done to date
+
+**Scaffold & M1 ("Play a library playlist") — code complete.**
+XcodeGen project, Info.plist (`NSAppleMusicUsageDescription`), sandbox+network
+entitlements, `.gitignore`. Full model/service/view layer: authorization,
+subscription, paginated library load, lazy+cached detail, thin
+`ApplicationMusicPlayer` wrapper, `MusicController` coordinator,
+`MusicContext`/`MusicCommand` boundary scaffold; SwiftUI shell
+(NavigationSplitView + native Table + persistent now-playing bar +
+transport), reusable `ArtworkThumbnail`. Build verified clean (Swift 6 strict
+concurrency). `swiftui-pro` pre/post review applied. **Committed to `main`
+as `ff3294f`.**
+
+**M2 ("Make it pleasant") — code complete, build-verified, NOT committed.**
+`FavoritesStore`/`RecentlyPlayedStore` (UserDefaults; observable mirrors on
+the controller), sidebar refactored into router + list + section + row,
+Favorites / Recently Played / Library sections, favorite toggle + star,
+`.searchable` playlist & track filtering (⌘F), Return-to-play on sidebar,
+⌘L/⌘1 focus, `@SceneStorage` sidebar collapse. Build clean; `swiftui-pro`
+pass applied. Held uncommitted intentionally before the pivot (can commit as
+a checkpoint on request).
+
+**Runtime evaluation (ad-hoc signed build, computer-use).**
+- ✅ Auth flow verified end to end (AuthorizationView → Allow → system prompt
+  → approved → authorized shell). M1 auth step is runtime-verified.
+- ✅ Native layout, empty states, now-playing bar, window chrome, type
+  hierarchy, Playback menu (Space/⌘→/⌘←/⌘R), View menu (⌘1/⌘L) — all good.
+- ⚠️ `MusicLibraryRequest<Playlist>` returned **empty, no error** — the Mac
+  had never synced the account's library + ad-hoc build lacks the MusicKit
+  entitlement. Not a code bug. This is what Phase 1 must resolve/validate.
+
+**Architecture pivot + planning (this stretch).**
+Decisions resolved with the user; docs rewritten: `PLAN.md` (decisions +
+recast milestones), `plans/architecture.md` (Local-first pivot section),
+`plans/data-and-import.md` (GRDB rationale, schema, import, resolver),
+`plans/roadmap.md` (end-to-end 5-phase plan, Phase 1 = access-validation
+gate), `plans/risks-and-challenges.md` (live risk register). Memory updated:
+`djroomba-local-first-pivot`, `djroomba-musickit-identity-reality`,
+`user-prefers-prose-questions`.
+
+## Verified vs NOT verified (be honest)
+
+- Verified: builds (signing-disabled) clean through M1+M2; auth flow live;
+  UI/states/menus/shortcuts live.
+- NOT verified: real library read, playlist→track loading, actual audio
+  playback, id round-trip, favorites/recents persistence at runtime — all
+  gated on the Phase 1 signed build.
+
+## Next
+
+Execute **`plans/roadmap.md` Phase 1 (ACCESS VALIDATION)** — the hard gate.
+Then Phases 2–5 (local store → import/UI-on-SQLite → app playlists+play
+counts → polish/extension/hardening). M3 tasks (#11–16) map to Phases 2–3.
+
+## Open user actions (block Phase 1 runtime, not planning/Phase-2 prep)
+
+1. Add Apple ID in Xcode → Settings → Accounts.
+2. Confirm MusicKit App Service enabled for `org.sockpuppet.djroomba`.
+3. Sign into Apple Music + enable Sync Library on this Mac.
+
+## Process notes
+
+- M1 committed (`ff3294f`); M2 + pivot docs uncommitted (pending a commit
+  decision). Build: `xcodegen generate && xcodebuild -project
+  DJRoomba.xcodeproj -scheme DJRoomba -configuration Debug -destination
+  'platform=macOS' CODE_SIGNING_ALLOWED=NO build`.
+- Will not commit/push without being asked; **never merge to `main`**
+  (CLAUDE.md).
