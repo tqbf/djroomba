@@ -15,9 +15,17 @@ per phase; Phase 1 exists to retire the 🔴 access/identity/round-trip risks.
 
 ---
 
-## Phase 1 — ACCESS VALIDATION (de-risk first) ⟵ gate
+## Phase 1 — ACCESS VALIDATION (de-risk first) ✅ PASSED 2026-05-15
 
-**Goal:** prove, on this Mac, with a correctly-signed build, the full chain:
+**Result:** Apple Development-signed build read the real library (many
+playlists + artwork), loaded tracks, and **played audio in-app** (verified
+live). M2 recents also verified. Earlier "empty library" was ad-hoc build +
+unsynced library — both fixed. 🔴 access/signing/library risks retired. The
+explicit *id-only re-resolve* round trip (esp. catalog namespace) is carried
+into Phase 2 as the remaining lower risk. Distribution is NOT covered by this
+gate — see Phase 5. Details in PROGRESS.md.
+
+**Goal (original):** prove, on this Mac, with a correctly-signed build, the full chain:
 authorize → real library playlists returned → tracks fetched → a track plays
 in-app via `ApplicationMusicPlayer` → a stored `MusicItemID` can be
 re-resolved to a playable item.
@@ -134,6 +142,10 @@ it; play counts increment and persist; imported data untouched by app edits.
 - Broaden tests; final `swiftui-pro` / `macos-design` / `typography-designer`
   review pass.
 - Optional: catalog search strictly as an import-to-library affordance.
+- **Distribution**: Developer ID signing + Apple notarization so others can
+  run it (end users need NO dev account, but DO need their own Apple Music
+  subscription). Enable the MusicKit App Service on the App ID for the
+  distribution build's entitlement. See risks-and-challenges.md → Distribution.
 
 **Exit criteria:** spec testing checklist exercised; review passes clean;
 docs (PLAN/PROGRESS/plans) current.

@@ -92,6 +92,29 @@ Verify each API at use site.
 version (`from: 7.0.0`); never edit shipped migrations; keep concurrency
 integration explicit. Supply-chain surface to keep in mind.
 
+## Distribution (giving the app to other people)
+
+**🟠 Current builds are development-signed — won't run for others as-is.**
+The validated build is "Apple Development" + a dev provisioning profile
+(device-locked to the developer's registered devices). End users do **not**
+need an Apple Developer account, but a *dev* build will not launch on a
+stranger's Mac. Distribution requires a **Developer ID-signed + notarized**
+build (the user has a "Developer ID Application" cert; notarization uses the
+developer's ADC account — one-time, not the users'). Mac App Store is the
+other option (heavier). Status: open — addressed in roadmap Phase 5.
+
+**🟠 MusicKit App Service IS likely required for distribution builds.**
+Dev signing didn't need it for library read on macOS, but a Developer
+ID/notarized build that uses the MusicKit framework needs the App ID's
+MusicKit App Service enabled so the embedded entitlement is valid. So
+"Step 3" is *deferred, not eliminated*. Validate when building the
+distribution artifact.
+
+**🟡 Each end user needs their own active Apple Music subscription** to play
+full tracks (library browse may still work; the app already explains disabled
+playback). Per-user, unavoidable, not something the developer provides. Each
+user also sees *their own* system-account library (Option A by design).
+
 ## Process & verification
 
 **🟠 Agent can't fully verify runtime.**

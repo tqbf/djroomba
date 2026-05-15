@@ -4,25 +4,45 @@
 > file. `plans/roadmap.md` is the forward plan; `plans/risks-and-challenges.md`
 > is the live risk register. Newest status on top.
 
-## Current status: Phase 1 setup underway — Step 1 (Sync Library) DONE
+## Current status: ✅ PHASE 1 PASSED (2026-05-15) — core viability proven
 
-Walking the user through Phase 1 prerequisites (see roadmap.md Phase 1).
-Setup checklist:
-- [x] **Step 1 — Apple Music + Sync Library on this Mac.** User confirmed
-  done (2026-05-15): signed into Apple Music, Sync Library enabled, cloud
-  playlists visible in Music.app's own sidebar. (Music.app is blocked from
-  computer-use by policy, so this is by user confirmation; not yet observed
-  *in DJ Roomba* — that needs Steps 2–3 + a signed build.)
-- [ ] **Step 2 — Apple ID in Xcode** (Settings → Accounts). Pending.
-- [ ] **Step 3 — MusicKit App Service enabled for `org.sockpuppet.djroomba`**
-  + flip `project.yml` to automatic signing (team KK7E9G89GW). Pending.
-- [ ] **Then:** signed build → run the Phase 1 validation chain (auth → real
-  playlists in DJ Roomba → tracks → in-app playback → id round-trip).
+Ran a properly **Apple Development-signed** build (team KK7E9G89GW, App ID
+`org.sockpuppet.djroomba`) and observed the full chain working live:
 
-"Seeing music in the app itself" status: **NOT yet** — the library is now on
-this Mac, but DJ Roomba can't read it until it's a MusicKit-entitled *signed*
-build (Steps 2–3). Expected playlist count to sanity-check against: _(ask
-user / fill in)_.
+- ✅ Authorization (granted, no re-prompt).
+- ✅ **Real library playlists** load with artwork — large set ('80s Hits
+  Essentials, 2-Tone, 4AD Records: The '80s, 70's Protest Music, 91X
+  Top 91 of 1992/93/94, …).
+- ✅ **Tracks load** for a selected playlist with full metadata
+  ("Backpacking", 52 tracks: ATCQ, De La Soul, The Pharcyde, The Roots…).
+- ✅ **In-app playback works** — pressed Play, "Go Ahead In The Rain — A
+  Tribe Called Quest" streamed in-process (elapsed ticked 0:09 → 0:41),
+  pause works, macOS now-playing indicator lit.
+- ✅ **M2 features verified live**: "Recently Played → Backpacking" section
+  appeared after playing; sidebar/detail/now-playing/filter UI all correct.
+
+Setup checklist (final):
+- [x] Step 1 — Apple Music + Sync Library on this Mac (user, confirmed).
+- [x] Step 2 — Apple ID in Xcode → Accounts (user). Verified: Xcode created
+  the **"Apple Development: Thomas Ptacek (7F2QE7P59D)"** cert + provisioning;
+  `-allowProvisioningUpdates` signed build SUCCEEDED.
+- [x] Step 3 — **NOT required for library read/playback on macOS.** A real
+  Apple Development signature + `NSAppleMusicUsageDescription` + system
+  account + synced library was sufficient. (Enabling the MusicKit App
+  Service for the App ID may still matter for Apple Music *catalog* API
+  / re-resolving catalog-namespace ids / distribution — treat as open,
+  validate when PlaybackResolver hits catalog ids in Phase 2/3.)
+
+`project.yml` already had `CODE_SIGN_STYLE: Automatic` + team KK7E9G89GW
+since M1 — no "signing flip" was needed; ad-hoc was only ever a CLI override.
+
+Earlier "empty library" fully explained: ad-hoc unsigned build **and**
+unsynced library. Both fixed. The 🔴 access/signing/library risks are retired.
+
+**Still to validate (carried to Phase 2 — lower risk now):** the explicit
+*store id → discard object → re-resolve by id → play* round trip, especially
+for catalog-namespace ids. Playback from a live playlist's tracks is proven;
+the id-only resolution path is the remaining unknown for the SQLite design.
 
 The project pivoted to **local-first** (SQLite-owned library, native MusicKit
 as import + playback only). All planning docs are written and consolidated.
