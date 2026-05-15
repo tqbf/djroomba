@@ -4,7 +4,25 @@
 > file. `plans/roadmap.md` is the forward plan; `plans/risks-and-challenges.md`
 > is the live risk register. Newest status on top.
 
-## Current status: planning consolidated — Phase 1 (access validation) is next
+## Current status: Phase 1 setup underway — Step 1 (Sync Library) DONE
+
+Walking the user through Phase 1 prerequisites (see roadmap.md Phase 1).
+Setup checklist:
+- [x] **Step 1 — Apple Music + Sync Library on this Mac.** User confirmed
+  done (2026-05-15): signed into Apple Music, Sync Library enabled, cloud
+  playlists visible in Music.app's own sidebar. (Music.app is blocked from
+  computer-use by policy, so this is by user confirmation; not yet observed
+  *in DJ Roomba* — that needs Steps 2–3 + a signed build.)
+- [ ] **Step 2 — Apple ID in Xcode** (Settings → Accounts). Pending.
+- [ ] **Step 3 — MusicKit App Service enabled for `org.sockpuppet.djroomba`**
+  + flip `project.yml` to automatic signing (team KK7E9G89GW). Pending.
+- [ ] **Then:** signed build → run the Phase 1 validation chain (auth → real
+  playlists in DJ Roomba → tracks → in-app playback → id round-trip).
+
+"Seeing music in the app itself" status: **NOT yet** — the library is now on
+this Mac, but DJ Roomba can't read it until it's a MusicKit-entitled *signed*
+build (Steps 2–3). Expected playlist count to sanity-check against: _(ask
+user / fill in)_.
 
 The project pivoted to **local-first** (SQLite-owned library, native MusicKit
 as import + playback only). All planning docs are written and consolidated.
@@ -76,16 +94,18 @@ Execute **`plans/roadmap.md` Phase 1 (ACCESS VALIDATION)** — the hard gate.
 Then Phases 2–5 (local store → import/UI-on-SQLite → app playlists+play
 counts → polish/extension/hardening). M3 tasks (#11–16) map to Phases 2–3.
 
-## Open user actions (block Phase 1 runtime, not planning/Phase-2 prep)
+## Open user actions (remaining — block Phase 1 runtime)
 
-1. Add Apple ID in Xcode → Settings → Accounts.
-2. Confirm MusicKit App Service enabled for `org.sockpuppet.djroomba`.
-3. Sign into Apple Music + enable Sync Library on this Mac.
+1. ✅ ~~Apple Music + Sync Library on this Mac~~ — done 2026-05-15.
+2. Add Apple ID in Xcode → Settings → Accounts. ← next, handholding
+3. Confirm/enable MusicKit App Service for `org.sockpuppet.djroomba`, then
+   flip `project.yml` to automatic signing + signed build.
 
 ## Process notes
 
-- M1 committed (`ff3294f`); M2 + pivot docs uncommitted (pending a commit
-  decision). Build: `xcodegen generate && xcodebuild -project
+- Committed to `main`: `ff3294f` (M1), `4f0a7f9` (M2 + local-first pivot
+  planning docs). Not pushed. Working tree clean.
+- Build (agent, signing-disabled): `xcodegen generate && xcodebuild -project
   DJRoomba.xcodeproj -scheme DJRoomba -configuration Debug -destination
   'platform=macOS' CODE_SIGNING_ALLOWED=NO build`.
 - Will not commit/push without being asked; **never merge to `main`**
