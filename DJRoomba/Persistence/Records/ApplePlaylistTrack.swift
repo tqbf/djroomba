@@ -1,6 +1,8 @@
 import Foundation
 import GRDB
 
+// MARK: - ApplePlaylistTrack
+
 /// Ordered membership of a `Song` in an imported `ApplePlaylist`.
 ///
 /// Composite primary key `(apple_playlist_id, position)` — position is the
@@ -13,23 +15,27 @@ import GRDB
 /// (the snapshot owns its membership). `song_id` references `song(id)`;
 /// import never deletes songs, so no cascade is needed there.
 struct ApplePlaylistTrack: Codable, Hashable, Sendable {
-    var applePlaylistID: String
-    var songID: String
-    var position: Int
+  enum CodingKeys: String, CodingKey {
+    case applePlaylistID = "apple_playlist_id"
+    case songID = "song_id"
+    case position
+  }
 
-    enum CodingKeys: String, CodingKey {
-        case applePlaylistID = "apple_playlist_id"
-        case songID = "song_id"
-        case position
-    }
+  var applePlaylistID: String
+  var songID: String
+  var position: Int
+
 }
 
-extension ApplePlaylistTrack: FetchableRecord, MutablePersistableRecord {
-    static let databaseTableName = "apple_playlist_track"
+// MARK: FetchableRecord, MutablePersistableRecord
 
-    enum Columns {
-        static let applePlaylistID = Column(CodingKeys.applePlaylistID)
-        static let songID = Column(CodingKeys.songID)
-        static let position = Column(CodingKeys.position)
-    }
+extension ApplePlaylistTrack: FetchableRecord, MutablePersistableRecord {
+  enum Columns {
+    static let applePlaylistID = Column(CodingKeys.applePlaylistID)
+    static let songID = Column(CodingKeys.songID)
+    static let position = Column(CodingKeys.position)
+  }
+
+  static let databaseTableName = "apple_playlist_track"
+
 }

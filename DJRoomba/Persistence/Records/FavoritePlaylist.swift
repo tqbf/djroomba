@@ -1,5 +1,7 @@
 import GRDB
 
+// MARK: - FavoritePlaylist
+
 /// A favorited playlist. Replaces the UserDefaults `FavoritesStore`
 /// (migrated one-shot in Phase 3). `playlistID` is whatever id the `source`
 /// table uses (Apple library `MusicItemID` or app UUID); it is the primary
@@ -9,23 +11,29 @@ import GRDB
 /// by `source`. Integrity is enforced in app code (only favorite a playlist
 /// that exists) and stale rows are harmless (filtered at read/merge time).
 struct FavoritePlaylist: Codable, Identifiable, Hashable, Sendable {
-    /// Apple library `MusicItemID.rawValue` or app playlist UUID. Primary key.
-    var playlistID: String
-    var source: PlaylistSourceKind
+  enum CodingKeys: String, CodingKey {
+    case playlistID = "playlist_id"
+    case source
+  }
 
-    var id: String { playlistID }
+  /// Apple library `MusicItemID.rawValue` or app playlist UUID. Primary key.
+  var playlistID: String
+  var source: PlaylistSourceKind
 
-    enum CodingKeys: String, CodingKey {
-        case playlistID = "playlist_id"
-        case source
-    }
+  var id: String {
+    playlistID
+  }
+
 }
 
-extension FavoritePlaylist: FetchableRecord, MutablePersistableRecord {
-    static let databaseTableName = "favorite_playlist"
+// MARK: FetchableRecord, MutablePersistableRecord
 
-    enum Columns {
-        static let playlistID = Column(CodingKeys.playlistID)
-        static let source = Column(CodingKeys.source)
-    }
+extension FavoritePlaylist: FetchableRecord, MutablePersistableRecord {
+  enum Columns {
+    static let playlistID = Column(CodingKeys.playlistID)
+    static let source = Column(CodingKeys.source)
+  }
+
+  static let databaseTableName = "favorite_playlist"
+
 }

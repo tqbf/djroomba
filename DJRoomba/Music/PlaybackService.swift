@@ -18,199 +18,204 @@ import Observation
 @MainActor
 @Observable
 final class PlaybackService {
-    private(set) var snapshot = PlayerStateSnapshot()
-    private(set) var lastError: String?
 
-    // MusicKit's ApplicationMusicPlayer is not Sendable-audited and its async
-    // transport methods are `nonisolated`, so calling them from this
-    // @MainActor service would "send" a non-Sendable value across actors
-    // under Swift 6. All our access is in fact serialized on the MainActor
-    // (this service + its monitor task), so opting the singleton out of
-    // isolation checking is sound. See plans/musickit-notes.md.
-    @ObservationIgnored nonisolated(unsafe) private let player = ApplicationMusicPlayer.shared
-    @ObservationIgnored private var monitorTask: Task<Void, Never>?
-    @ObservationIgnored private var playlistContextID: String?
+  // MARK: Internal
 
-    func startMonitoring() {
-        guard monitorTask == nil else { return }
-        monitorTask = Task { [weak self] in
-            while !Task.isCancelled {
-                self?.refreshSnapshot()
-                try? await Task.sleep(for: .milliseconds(500))
-            }
-        }
+  private(set) var snapshot = PlayerStateSnapshot()
+  private(set) var lastError: String?
+
+  func startMonitoring() {
+    guard monitorTask == nil else { return }
+    monitorTask = Task { [weak self] in
+      while !Task.isCancelled {
+        self?.refreshSnapshot()
+        try? await Task.sleep(for: .milliseconds(500))
+      }
     }
+  }
 
-    func stopMonitoring() {
-        monitorTask?.cancel()
-        monitorTask = nil
+  func stopMonitoring() {
+    monitorTask?.cancel()
+    monitorTask = nil
+  }
+
+  /// Play a resolved set of `MusicKit.Song`s (already re-fetched by
+  /// `PlaybackResolver`), preserving playlist context, optionally starting
+  /// at a specific song. `playlistContextID` is the app/Apple playlist id.
+  ///
+  /// Returns `true` once the player has **actually entered the playing
+  /// state** (confirmed by polling `player.state.playbackStatus`, not the
+  /// 0.5 s-lagged snapshot) so the caller can record the play against the
+  /// real start signal — the Phase-3 follow-up bug fix. `false` means the
+  /// queue was set but playback did not confirm within the bounded wait
+  /// (error, or interrupted) — the play is then not recorded.
+  @discardableResult
+  func play(
+    songs: [MusicKit.Song],
+    startingAt start: MusicKit.Song?,
+    playlistContextID: String?,
+  ) async -> Bool {
+    self.playlistContextID = playlistContextID
+    return await setQueueAndPlay(songs: songs, startingAt: start)
+  }
+
+  func togglePlayPause() async {
+    do {
+      if player.state.playbackStatus == .playing {
+        player.pause()
+      } else {
+        try await player.play()
+      }
+      lastError = nil
+    } catch {
+      lastError = error.localizedDescription
     }
+    refreshSnapshot()
+  }
 
-    // MARK: - Intents
-
-    /// Play a resolved set of `MusicKit.Song`s (already re-fetched by
-    /// `PlaybackResolver`), preserving playlist context, optionally starting
-    /// at a specific song. `playlistContextID` is the app/Apple playlist id.
-    ///
-    /// Returns `true` once the player has **actually entered the playing
-    /// state** (confirmed by polling `player.state.playbackStatus`, not the
-    /// 0.5 s-lagged snapshot) so the caller can record the play against the
-    /// real start signal — the Phase-3 follow-up bug fix. `false` means the
-    /// queue was set but playback did not confirm within the bounded wait
-    /// (error, or interrupted) — the play is then not recorded.
-    @discardableResult
-    func play(
-        songs: [MusicKit.Song],
-        startingAt start: MusicKit.Song?,
-        playlistContextID: String?
-    ) async -> Bool {
-        self.playlistContextID = playlistContextID
-        return await setQueueAndPlay(songs: songs, startingAt: start)
+  func skipNext() async {
+    do {
+      try await player.skipToNextEntry()
+      lastError = nil
+    } catch {
+      lastError = error.localizedDescription
     }
+    refreshSnapshot()
+  }
 
-    func togglePlayPause() async {
-        do {
-            if player.state.playbackStatus == .playing {
-                player.pause()
-            } else {
-                try await player.play()
-            }
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
+  func skipPrevious() async {
+    do {
+      try await player.skipToPreviousEntry()
+      lastError = nil
+    } catch {
+      lastError = error.localizedDescription
+    }
+    refreshSnapshot()
+  }
+
+  // MARK: Private
+
+  // MusicKit's ApplicationMusicPlayer is not Sendable-audited and its async
+  // transport methods are `nonisolated`, so calling them from this
+  // @MainActor service would "send" a non-Sendable value across actors
+  // under Swift 6. All our access is in fact serialized on the MainActor
+  // (this service + its monitor task), so opting the singleton out of
+  // isolation checking is sound. See plans/musickit-notes.md.
+  @ObservationIgnored nonisolated(unsafe) private let player = ApplicationMusicPlayer.shared
+  @ObservationIgnored private var monitorTask: Task<Void, Never>?
+  @ObservationIgnored private var playlistContextID: String?
+
+  private static func map(
+    _ status: MusicPlayer.PlaybackStatus
+  ) -> PlayerStateSnapshot.Status {
+    switch status {
+    case .playing: .playing
+    case .paused: .paused
+    case .stopped: .stopped
+    case .interrupted: .interrupted
+    case .seekingForward: .seekingForward
+    case .seekingBackward: .seekingBackward
+    @unknown default: .stopped
+    }
+  }
+
+  private func setQueueAndPlay(
+    songs: [MusicKit.Song],
+    startingAt start: MusicKit.Song?,
+  ) async -> Bool {
+    guard !songs.isEmpty else {
+      lastError = "This playlist has no playable tracks."
+      return false
+    }
+    var started = false
+    do {
+      if let start {
+        player.queue = ApplicationMusicPlayer.Queue(for: songs, startingAt: start)
+      } else {
+        player.queue = ApplicationMusicPlayer.Queue(for: songs)
+      }
+      try await player.play()
+      lastError = nil
+      started = await confirmPlaybackStarted()
+
+      // Phase 5 auto-start polish (carried Phase-3/4 follow-up):
+      // on macOS, `player.play()` can resolve while the queue is still
+      // loading and the engine settles to `.paused` — the symptom was
+      // the now-playing bar showing ▶ at 0:05 until the transport was
+      // pressed. One bounded re-issue of `play()` reliably kicks it
+      // into `.playing` without a manual nudge. Idempotent (a player
+      // already playing stays playing); structured concurrency only.
+      if !started, !Task.isCancelled {
+        try await player.play()
+        started = await confirmPlaybackStarted()
+      }
+    } catch {
+      lastError = error.localizedDescription
+    }
+    refreshSnapshot()
+    return started
+  }
+
+  /// `player.play()` resolving does not guarantee the engine has reached
+  /// `.playing` yet (the queue may still be loading), and the now-playing
+  /// snapshot is only refreshed on a ~0.5 s poll — reading it right after
+  /// `play()` (the old bug) saw a stale `.stopped` so plays never recorded
+  /// *and* the UI sat on ▶ until the transport was pressed. Poll the
+  /// player's *own* live status on a short bounded loop, and the instant it
+  /// reports `.playing` publish a fresh snapshot so the now-playing bar
+  /// flips to "playing" immediately (no waiting for the next 0.5 s tick — the
+  /// Phase-5 auto-start immediacy fix). Structured concurrency only; never
+  /// `Task.sleep(nanoseconds:)`.
+  private func confirmPlaybackStarted(
+    timeout: Duration = .milliseconds(2500),
+    poll: Duration = .milliseconds(50),
+  ) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+      if player.state.playbackStatus == .playing {
+        // Reflect the real start the moment it happens, not on the
+        // next lagged poll — the UI must not need a transport nudge.
         refreshSnapshot()
+        return true
+      }
+      // .stopped / .interrupted right after play() usually just means
+      // the queue is still loading; keep waiting until the deadline
+      // rather than failing on the first poll.
+      try? await Task.sleep(for: poll)
+    }
+    let confirmed = player.state.playbackStatus == .playing
+    if confirmed { refreshSnapshot() }
+    return confirmed
+  }
+
+  private func refreshSnapshot() {
+    var snap = PlayerStateSnapshot()
+    snap.status = Self.map(player.state.playbackStatus)
+    snap.elapsed = player.playbackTime
+    snap.playlistContextID = playlistContextID
+
+    if let entry = player.queue.currentEntry {
+      snap.title = entry.title
+      snap.artist = entry.subtitle
+      switch entry.item {
+      case .song(let song):
+        snap.duration = song.duration
+        snap.nowPlayingItemID = song.id.rawValue
+
+      case .musicVideo(let video):
+        snap.duration = video.duration
+        snap.nowPlayingItemID = video.id.rawValue
+
+      case .none:
+        break
+
+      @unknown default:
+        break
+      }
     }
 
-    func skipNext() async {
-        do {
-            try await player.skipToNextEntry()
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-        refreshSnapshot()
-    }
+    snapshot = snap
+  }
 
-    func skipPrevious() async {
-        do {
-            try await player.skipToPreviousEntry()
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-        refreshSnapshot()
-    }
-
-    // MARK: - Internals
-
-    private func setQueueAndPlay(
-        songs: [MusicKit.Song],
-        startingAt start: MusicKit.Song?
-    ) async -> Bool {
-        guard !songs.isEmpty else {
-            lastError = "This playlist has no playable tracks."
-            return false
-        }
-        var started = false
-        do {
-            if let start {
-                player.queue = ApplicationMusicPlayer.Queue(for: songs, startingAt: start)
-            } else {
-                player.queue = ApplicationMusicPlayer.Queue(for: songs)
-            }
-            try await player.play()
-            lastError = nil
-            started = await confirmPlaybackStarted()
-
-            // Phase 5 auto-start polish (carried Phase-3/4 follow-up):
-            // on macOS, `player.play()` can resolve while the queue is still
-            // loading and the engine settles to `.paused` — the symptom was
-            // the now-playing bar showing ▶ at 0:05 until the transport was
-            // pressed. One bounded re-issue of `play()` reliably kicks it
-            // into `.playing` without a manual nudge. Idempotent (a player
-            // already playing stays playing); structured concurrency only.
-            if !started, !Task.isCancelled {
-                try await player.play()
-                started = await confirmPlaybackStarted()
-            }
-        } catch {
-            lastError = error.localizedDescription
-        }
-        refreshSnapshot()
-        return started
-    }
-
-    /// `player.play()` resolving does not guarantee the engine has reached
-    /// `.playing` yet (the queue may still be loading), and the now-playing
-    /// snapshot is only refreshed on a ~0.5 s poll — reading it right after
-    /// `play()` (the old bug) saw a stale `.stopped` so plays never recorded
-    /// *and* the UI sat on ▶ until the transport was pressed. Poll the
-    /// player's *own* live status on a short bounded loop, and the instant it
-    /// reports `.playing` publish a fresh snapshot so the now-playing bar
-    /// flips to "playing" immediately (no waiting for the next 0.5 s tick — the
-    /// Phase-5 auto-start immediacy fix). Structured concurrency only; never
-    /// `Task.sleep(nanoseconds:)`.
-    private func confirmPlaybackStarted(
-        timeout: Duration = .milliseconds(2500),
-        poll: Duration = .milliseconds(50)
-    ) async -> Bool {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while clock.now < deadline {
-            if player.state.playbackStatus == .playing {
-                // Reflect the real start the moment it happens, not on the
-                // next lagged poll — the UI must not need a transport nudge.
-                refreshSnapshot()
-                return true
-            }
-            // .stopped / .interrupted right after play() usually just means
-            // the queue is still loading; keep waiting until the deadline
-            // rather than failing on the first poll.
-            try? await Task.sleep(for: poll)
-        }
-        let confirmed = player.state.playbackStatus == .playing
-        if confirmed { refreshSnapshot() }
-        return confirmed
-    }
-
-    private func refreshSnapshot() {
-        var snap = PlayerStateSnapshot()
-        snap.status = Self.map(player.state.playbackStatus)
-        snap.elapsed = player.playbackTime
-        snap.playlistContextID = playlistContextID
-
-        if let entry = player.queue.currentEntry {
-            snap.title = entry.title
-            snap.artist = entry.subtitle
-            switch entry.item {
-            case .song(let song):
-                snap.duration = song.duration
-                snap.nowPlayingItemID = song.id.rawValue
-            case .musicVideo(let video):
-                snap.duration = video.duration
-                snap.nowPlayingItemID = video.id.rawValue
-            case .none:
-                break
-            @unknown default:
-                break
-            }
-        }
-
-        snapshot = snap
-    }
-
-    private static func map(
-        _ status: MusicPlayer.PlaybackStatus
-    ) -> PlayerStateSnapshot.Status {
-        switch status {
-        case .playing: .playing
-        case .paused: .paused
-        case .stopped: .stopped
-        case .interrupted: .interrupted
-        case .seekingForward: .seekingForward
-        case .seekingBackward: .seekingBackward
-        @unknown default: .stopped
-        }
-    }
 }

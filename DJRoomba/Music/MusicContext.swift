@@ -12,16 +12,18 @@
 /// human-readable without re-querying the store across the boundary — they're
 /// plain `String`s, still no MusicKit types.
 struct MusicContext: Sendable, Equatable {
-    var selectedPlaylistID: String?
-    var selectedPlaylistName: String?
-    var selectedSongID: String?
-    var nowPlayingSongID: String?
-    var nowPlayingTitle: String?
-    var nowPlayingArtist: String?
-    var queuePlaylistID: String?
-    var playbackStatus: PlayerStateSnapshot.Status
+  var selectedPlaylistID: String?
+  var selectedPlaylistName: String?
+  var selectedSongID: String?
+  var nowPlayingSongID: String?
+  var nowPlayingTitle: String?
+  var nowPlayingArtist: String?
+  var queuePlaylistID: String?
+  var playbackStatus: PlayerStateSnapshot.Status
 
-    /// Whether anything is playing right now (convenience for consumers so
-    /// they don't have to know the `Status` enum's cases).
-    var isPlaying: Bool { playbackStatus == .playing }
+  /// Whether anything is playing right now (convenience for consumers so
+  /// they don't have to know the `Status` enum's cases).
+  var isPlaying: Bool {
+    playbackStatus == .playing
+  }
 }

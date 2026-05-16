@@ -1,6 +1,8 @@
 import Foundation
 import GRDB
 
+// MARK: - Song
+
 /// A track imported from Apple Music into the local store.
 ///
 /// The app's stable identity is `id` (a UUID string we mint), *not* the
@@ -18,60 +20,64 @@ import GRDB
 /// Because persistence is Codable-driven, adding a nullable column is a
 /// localized change here — no store-API refactor.
 struct Song: Codable, Identifiable, Hashable, Sendable {
-    /// App-stable identity (UUID string). Primary key.
-    var id: String
-    /// `MusicItemID.rawValue` as imported from MusicKit.
-    var musicItemID: String
-    /// Which MusicKit id space `musicItemID` belongs to.
-    var idNamespace: IDNamespace
-    var title: String
-    var artistName: String
-    var albumTitle: String?
-    /// Duration in seconds. Nullable — MusicKit often omits it on macOS.
-    var duration: Double?
-    var isExplicit: Bool
-    /// A resolved/cached artwork URL string. Nullable.
-    var artworkURL: String?
-    /// When this row was first written / last refreshed by import.
-    var importedAt: Date
+  /// The MusicKit id space an id belongs to. Library and catalog ids are
+  /// not interchangeable; `PlaybackResolver` keys re-fetch on this.
+  enum IDNamespace: String, Codable, Sendable, CaseIterable {
+    case library
+    case catalog
+  }
 
-    /// The MusicKit id space an id belongs to. Library and catalog ids are
-    /// not interchangeable; `PlaybackResolver` keys re-fetch on this.
-    enum IDNamespace: String, Codable, Sendable, CaseIterable {
-        case library
-        case catalog
-    }
+  /// Swift camelCase ⇄ SQLite snake_case. Explicit so the migrated schema
+  /// stays readable SQL and renaming a Swift property never silently
+  /// renames a shipped column.
+  enum CodingKeys: String, CodingKey {
+    case id
+    case musicItemID = "music_item_id"
+    case idNamespace = "id_namespace"
+    case title
+    case artistName = "artist_name"
+    case albumTitle = "album_title"
+    case duration
+    case isExplicit = "is_explicit"
+    case artworkURL = "artwork_url"
+    case importedAt = "imported_at"
+  }
 
-    /// Swift camelCase ⇄ SQLite snake_case. Explicit so the migrated schema
-    /// stays readable SQL and renaming a Swift property never silently
-    /// renames a shipped column.
-    enum CodingKeys: String, CodingKey {
-        case id
-        case musicItemID = "music_item_id"
-        case idNamespace = "id_namespace"
-        case title
-        case artistName = "artist_name"
-        case albumTitle = "album_title"
-        case duration
-        case isExplicit = "is_explicit"
-        case artworkURL = "artwork_url"
-        case importedAt = "imported_at"
-    }
+  /// App-stable identity (UUID string). Primary key.
+  var id: String
+  /// `MusicItemID.rawValue` as imported from MusicKit.
+  var musicItemID: String
+  /// Which MusicKit id space `musicItemID` belongs to.
+  var idNamespace: IDNamespace
+  var title: String
+  var artistName: String
+  var albumTitle: String?
+  /// Duration in seconds. Nullable — MusicKit often omits it on macOS.
+  var duration: Double?
+  var isExplicit: Bool
+  /// A resolved/cached artwork URL string. Nullable.
+  var artworkURL: String?
+  /// When this row was first written / last refreshed by import.
+  var importedAt: Date
+
 }
 
-extension Song: FetchableRecord, MutablePersistableRecord {
-    static let databaseTableName = "song"
+// MARK: FetchableRecord, MutablePersistableRecord
 
-    enum Columns {
-        static let id = Column(CodingKeys.id)
-        static let musicItemID = Column(CodingKeys.musicItemID)
-        static let idNamespace = Column(CodingKeys.idNamespace)
-        static let title = Column(CodingKeys.title)
-        static let artistName = Column(CodingKeys.artistName)
-        static let albumTitle = Column(CodingKeys.albumTitle)
-        static let duration = Column(CodingKeys.duration)
-        static let isExplicit = Column(CodingKeys.isExplicit)
-        static let artworkURL = Column(CodingKeys.artworkURL)
-        static let importedAt = Column(CodingKeys.importedAt)
-    }
+extension Song: FetchableRecord, MutablePersistableRecord {
+  enum Columns {
+    static let id = Column(CodingKeys.id)
+    static let musicItemID = Column(CodingKeys.musicItemID)
+    static let idNamespace = Column(CodingKeys.idNamespace)
+    static let title = Column(CodingKeys.title)
+    static let artistName = Column(CodingKeys.artistName)
+    static let albumTitle = Column(CodingKeys.albumTitle)
+    static let duration = Column(CodingKeys.duration)
+    static let isExplicit = Column(CodingKeys.isExplicit)
+    static let artworkURL = Column(CodingKeys.artworkURL)
+    static let importedAt = Column(CodingKeys.importedAt)
+  }
+
+  static let databaseTableName = "song"
+
 }

@@ -8,11 +8,13 @@ import Foundation
 /// through the per-song app-playlist resolution path (arbitrary songs not
 /// backed by an Apple playlist).
 enum PlaylistSource: Hashable, Sendable {
-    case libraryUserPlaylist
-    case libraryCatalogPlaylist
-    case catalogPlaylist
-    case appPlaylist
+  case libraryUserPlaylist
+  case libraryCatalogPlaylist
+  case catalogPlaylist
+  case appPlaylist
 
-    /// User-owned (created/edited in DJ Roomba), not an imported snapshot.
-    var isAppOwned: Bool { self == .appPlaylist }
+  /// User-owned (created/edited in DJ Roomba), not an imported snapshot.
+  var isAppOwned: Bool {
+    self == .appPlaylist
+  }
 }

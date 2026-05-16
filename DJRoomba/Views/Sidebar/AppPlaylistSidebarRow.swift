@@ -11,35 +11,35 @@ import SwiftUI
 /// now goes through the modal `RenamePlaylistSheet` (a deterministic,
 /// trigger-independent commit), so this row is a plain, non-editing row again.
 struct AppPlaylistSidebarRow: View {
-    let summary: PlaylistSummary
-    let isFavorite: Bool
+  let summary: PlaylistSummary
+  let isFavorite: Bool
 
-    var body: some View {
-        HStack(spacing: 10) {
-            ArtworkThumbnail(
-                ref: summary.artworkRef,
-                size: 28,
-                cornerRadius: 4,
-                placeholderSymbol: "music.note.list"
-            )
-            VStack(alignment: .leading, spacing: 2) {
-                Text(summary.name)
-                    .font(.body)
-                    .lineLimit(1)
-                if let count = summary.trackCount {
-                    Text("^[\(count) track](inflect: true)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 0)
-            if isFavorite {
-                Image(systemName: "star.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.yellow)
-                    .accessibilityLabel("Favorite")
-            }
+  var body: some View {
+    HStack(spacing: 10) {
+      ArtworkThumbnail(
+        ref: summary.artworkRef,
+        size: 28,
+        cornerRadius: 4,
+        placeholderSymbol: "music.note.list",
+      )
+      VStack(alignment: .leading, spacing: 2) {
+        Text(summary.name)
+          .font(.body)
+          .lineLimit(1)
+        if let count = summary.trackCount {
+          Text("^[\(count) track](inflect: true)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 2)
+      }
+      Spacer(minLength: 0)
+      if isFavorite {
+        Image(systemName: "star.fill")
+          .font(.caption2)
+          .foregroundStyle(.yellow)
+          .accessibilityLabel("Favorite")
+      }
     }
+    .padding(.vertical, 2)
+  }
 }

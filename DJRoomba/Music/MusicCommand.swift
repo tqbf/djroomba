@@ -5,10 +5,10 @@
 /// MusicKit identity types. Playlist ids are `apple_playlist`/`app_playlist`
 /// keys; track ids are `MusicItemID.rawValue`.
 enum MusicCommand: Sendable {
-    case playPlaylist(String)
-    case playTrack(String, playlistID: String?)
-    case pause
-    case resume
-    case skipNext
-    case skipPrevious
+  case playPlaylist(String)
+  case playTrack(String, playlistID: String?)
+  case pause
+  case resume
+  case skipNext
+  case skipPrevious
 }

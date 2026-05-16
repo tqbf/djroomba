@@ -6,28 +6,38 @@ import Foundation
 /// re-resolved from the now-playing id and ids are raw strings, so the
 /// snapshot is a plain `Sendable` value.
 struct PlayerStateSnapshot: Sendable {
-    enum Status: Sendable, Equatable {
-        case stopped, playing, paused, interrupted, seekingForward, seekingBackward
-    }
+  enum Status: Sendable, Equatable {
+    case stopped
+    case playing
+    case paused
+    case interrupted
+    case seekingForward
+    case seekingBackward
+  }
 
-    var status: Status = .stopped
-    var title: String?
-    var artist: String?
-    var elapsed: TimeInterval = 0
-    var duration: TimeInterval?
-    /// App-local context: which playlist playback was started from, if known.
-    var playlistContextID: String?
-    /// `MusicItemID.rawValue` of the now-playing item, if known.
-    var nowPlayingItemID: String?
+  var status = Status.stopped
+  var title: String?
+  var artist: String?
+  var elapsed: TimeInterval = 0
+  var duration: TimeInterval?
+  /// App-local context: which playlist playback was started from, if known.
+  var playlistContextID: String?
+  /// `MusicItemID.rawValue` of the now-playing item, if known.
+  var nowPlayingItemID: String?
 
-    var hasContent: Bool { title != nil }
-    var isPlaying: Bool { status == .playing }
+  var hasContent: Bool {
+    title != nil
+  }
 
-    /// Re-resolvable artwork for the now-playing item (D2). The player
-    /// resolves library Songs (provenance `.library`), so the now-playing id
-    /// re-resolves the same way every other thumbnail does.
-    var artworkRef: ArtworkRef? {
-        guard let nowPlayingItemID, !nowPlayingItemID.isEmpty else { return nil }
-        return .song(nowPlayingItemID, namespace: .library)
-    }
+  var isPlaying: Bool {
+    status == .playing
+  }
+
+  /// Re-resolvable artwork for the now-playing item (D2). The player
+  /// resolves library Songs (provenance `.library`), so the now-playing id
+  /// re-resolves the same way every other thumbnail does.
+  var artworkRef: ArtworkRef? {
+    guard let nowPlayingItemID, !nowPlayingItemID.isEmpty else { return nil }
+    return .song(nowPlayingItemID, namespace: .library)
+  }
 }

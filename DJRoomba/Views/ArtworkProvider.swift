@@ -26,83 +26,91 @@ import SwiftUI
 /// hit (no re-fetch, no scroll flicker — the hard requirement). Only
 /// `Sendable` values cross the actor boundary (`Artwork` is `Sendable`).
 actor ArtworkProvider {
-    static let shared = ArtworkProvider()
 
-    /// What kind of library item owns the artwork (drives which
-    /// `MusicLibraryRequest` is issued).
-    enum Kind: Hashable, Sendable {
-        case song
-        case playlist
+  // MARK: Lifecycle
+
+  private init() { }
+
+  // MARK: Internal
+
+  /// What kind of library item owns the artwork (drives which
+  /// `MusicLibraryRequest` is issued).
+  enum Kind: Hashable, Sendable {
+    case song
+    case playlist
+  }
+
+  static let shared = ArtworkProvider()
+
+  /// Resolve the `Artwork` for a stored id, fetching+caching on first use.
+  /// Returns `nil` for an empty id, a non-library namespace (the only
+  /// imported provenance today — see `ImportService`), or any re-resolve
+  /// miss/failure; the caller then shows the shared placeholder.
+  func artwork(
+    forMusicItemID musicItemID: String,
+    namespace: Song.IDNamespace,
+    kind: Kind,
+  ) async -> Artwork? {
+    guard !musicItemID.isEmpty else { return nil }
+    // Imported provenance is always `.library` (ImportService). The
+    // catalog branch is dormant — there is no public per-id catalog
+    // artwork re-resolve without the MusicKit App Service entitlement,
+    // and nothing catalog-namespace is imported. Degrade gracefully.
+    guard namespace == .library else { return nil }
+
+    let key = Key(musicItemID: musicItemID, namespace: namespace, kind: kind)
+    if let cached = cache[key] { return cached }
+    if let existing = inFlight[key] { return await existing.value }
+
+    let task = Task<Artwork?, Never> {
+      await Self.resolve(musicItemID: musicItemID, kind: kind)
     }
+    inFlight[key] = task
+    let resolved = await task.value
+    inFlight[key] = nil
+    cache[key] = resolved
+    return resolved
+  }
 
-    private struct Key: Hashable, Sendable {
-        let musicItemID: String
-        let namespace: Song.IDNamespace
-        let kind: Kind
+  // MARK: Private
+
+  private struct Key: Hashable, Sendable {
+    let musicItemID: String
+    let namespace: Song.IDNamespace
+    let kind: Kind
+  }
+
+  /// `.some(nil)` = resolved-but-no-artwork (cache the negative so we don't
+  /// re-request a known-artless item every scroll). Absent = never tried.
+  private var cache = [Key: Artwork?]()
+  private var inFlight = [Key: Task<Artwork?, Never>]()
+
+  /// Re-fetch the owning library item by id and return its `Artwork`.
+  /// `MusicLibraryRequest<Song>` is the dev-signed path Phase 1 proved
+  /// (no catalog/MusicKit-App-Service entitlement needed); the same shape
+  /// works for `MusicLibraryRequest<Playlist>`. `nonisolated static` so it
+  /// captures nothing actor-isolated.
+  private nonisolated static func resolve(
+    musicItemID: String,
+    kind: Kind,
+  ) async -> Artwork? {
+    let id = MusicItemID(musicItemID)
+    do {
+      switch kind {
+      case .song:
+        var request = MusicLibraryRequest<MusicKit.Song>()
+        request.filter(matching: \.id, memberOf: [id])
+        let response = try await request.response()
+        return response.items.first?.artwork
+
+      case .playlist:
+        var request = MusicLibraryRequest<MusicKit.Playlist>()
+        request.filter(matching: \.id, memberOf: [id])
+        let response = try await request.response()
+        return response.items.first?.artwork
+      }
+    } catch {
+      return nil
     }
-
-    /// `.some(nil)` = resolved-but-no-artwork (cache the negative so we don't
-    /// re-request a known-artless item every scroll). Absent = never tried.
-    private var cache: [Key: Artwork?] = [:]
-    private var inFlight: [Key: Task<Artwork?, Never>] = [:]
-
-    private init() {}
-
-    /// Resolve the `Artwork` for a stored id, fetching+caching on first use.
-    /// Returns `nil` for an empty id, a non-library namespace (the only
-    /// imported provenance today — see `ImportService`), or any re-resolve
-    /// miss/failure; the caller then shows the shared placeholder.
-    func artwork(
-        forMusicItemID musicItemID: String,
-        namespace: Song.IDNamespace,
-        kind: Kind
-    ) async -> Artwork? {
-        guard !musicItemID.isEmpty else { return nil }
-        // Imported provenance is always `.library` (ImportService). The
-        // catalog branch is dormant — there is no public per-id catalog
-        // artwork re-resolve without the MusicKit App Service entitlement,
-        // and nothing catalog-namespace is imported. Degrade gracefully.
-        guard namespace == .library else { return nil }
-
-        let key = Key(musicItemID: musicItemID, namespace: namespace, kind: kind)
-        if let cached = cache[key] { return cached }
-        if let existing = inFlight[key] { return await existing.value }
-
-        let task = Task<Artwork?, Never> {
-            await Self.resolve(musicItemID: musicItemID, kind: kind)
-        }
-        inFlight[key] = task
-        let resolved = await task.value
-        inFlight[key] = nil
-        cache[key] = resolved
-        return resolved
-    }
-
-    /// Re-fetch the owning library item by id and return its `Artwork`.
-    /// `MusicLibraryRequest<Song>` is the dev-signed path Phase 1 proved
-    /// (no catalog/MusicKit-App-Service entitlement needed); the same shape
-    /// works for `MusicLibraryRequest<Playlist>`. `nonisolated static` so it
-    /// captures nothing actor-isolated.
-    private nonisolated static func resolve(
-        musicItemID: String,
-        kind: Kind
-    ) async -> Artwork? {
-        let id = MusicItemID(musicItemID)
-        do {
-            switch kind {
-            case .song:
-                var request = MusicLibraryRequest<MusicKit.Song>()
-                request.filter(matching: \.id, memberOf: [id])
-                let response = try await request.response()
-                return response.items.first?.artwork
-            case .playlist:
-                var request = MusicLibraryRequest<MusicKit.Playlist>()
-                request.filter(matching: \.id, memberOf: [id])
-                let response = try await request.response()
-                return response.items.first?.artwork
-            }
-        } catch {
-            return nil
-        }
-    }
+  }
 }

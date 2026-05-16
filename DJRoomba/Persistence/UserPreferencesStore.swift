@@ -5,21 +5,22 @@ import Foundation
 /// classes (they don't trigger view updates). `MusicController` reads/writes
 /// this explicitly and holds the observable mirror.
 struct UserPreferencesStore {
-    private let defaults: UserDefaults
-    private let lastSelectedPlaylistKey = "lastSelectedPlaylistID"
+  init(defaults: UserDefaults = .standard) {
+    self.defaults = defaults
+  }
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+  var lastSelectedPlaylistID: String? {
+    get { defaults.string(forKey: lastSelectedPlaylistKey) }
+    nonmutating set {
+      if let newValue {
+        defaults.set(newValue, forKey: lastSelectedPlaylistKey)
+      } else {
+        defaults.removeObject(forKey: lastSelectedPlaylistKey)
+      }
     }
+  }
 
-    var lastSelectedPlaylistID: String? {
-        get { defaults.string(forKey: lastSelectedPlaylistKey) }
-        nonmutating set {
-            if let newValue {
-                defaults.set(newValue, forKey: lastSelectedPlaylistKey)
-            } else {
-                defaults.removeObject(forKey: lastSelectedPlaylistKey)
-            }
-        }
-    }
+  private let defaults: UserDefaults
+  private let lastSelectedPlaylistKey = "lastSelectedPlaylistID"
+
 }

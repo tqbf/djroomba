@@ -10,6 +10,6 @@ import GRDB
 /// parent tables*, so a single FK can't express it; the discriminator
 /// rides with the id instead.
 enum PlaylistSourceKind: String, Codable, Sendable, CaseIterable, DatabaseValueConvertible {
-    case apple
-    case app
+  case apple
+  case app
 }

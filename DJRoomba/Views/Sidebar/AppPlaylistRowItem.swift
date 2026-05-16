@@ -15,51 +15,59 @@ import SwiftUI
 /// exactly what it does for every other sidebar row (select / play), nothing
 /// else.
 struct AppPlaylistRowItem: View {
-    let summary: PlaylistSummary
-    /// Open the modal rename sheet for this playlist (owned by the parent
-    /// section). Context-menu-only — no gesture trigger (the D1 collision).
-    let beginRename: () -> Void
-    let requestDelete: () -> Void
-    @Environment(MusicController.self) private var controller
 
-    var body: some View {
-        AppPlaylistSidebarRow(
-            summary: summary,
-            isFavorite: controller.isFavorite(summary)
-        )
-        .tag(summary.id)
-        .contextMenu {
-            Button("Play", systemImage: "play.fill", action: play)
-            Button("Rename", systemImage: "pencil", action: beginRename)
-            Button(
-                isFavorite ? "Remove from Favorites" : "Add to Favorites",
-                systemImage: isFavorite ? "star.slash" : "star",
-                action: toggleFavorite
-            )
-            Divider()
-            Button("Delete", systemImage: "trash", role: .destructive, action: requestDelete)
-        }
-        // Songs dragged from the track table carry their songID; a drop here
-        // appends them to this playlist (native macOS drag-into-playlist,
-        // like Music.app's sidebar).
-        .dropDestination(for: SongDragItem.self) { items, _ in
-            let ids = items.map(\.songID)
-            guard !ids.isEmpty else { return false }
-            Task { await controller.addSongs(ids, toAppPlaylist: summary.id) }
-            return true
-        }
+  // MARK: Internal
+
+  let summary: PlaylistSummary
+  /// Open the modal rename sheet for this playlist (owned by the parent
+  /// section). Context-menu-only — no gesture trigger (the D1 collision).
+  let beginRename: () -> Void
+  let requestDelete: () -> Void
+
+  var body: some View {
+    AppPlaylistSidebarRow(
+      summary: summary,
+      isFavorite: controller.isFavorite(summary),
+    )
+    .tag(summary.id)
+    .contextMenu {
+      Button("Play", systemImage: "play.fill", action: play)
+      Button("Rename", systemImage: "pencil", action: beginRename)
+      Button(
+        isFavorite ? "Remove from Favorites" : "Add to Favorites",
+        systemImage: isFavorite ? "star.slash" : "star",
+        action: toggleFavorite,
+      )
+      Divider()
+      Button("Delete", systemImage: "trash", role: .destructive, action: requestDelete)
     }
-
-    private var isFavorite: Bool { controller.isFavorite(summary) }
-
-    private func play() {
-        Task {
-            controller.selectedPlaylistID = summary.id
-            await controller.playSelectedPlaylist()
-        }
+    // Songs dragged from the track table carry their songID; a drop here
+    // appends them to this playlist (native macOS drag-into-playlist,
+    // like Music.app's sidebar).
+    .dropDestination(for: SongDragItem.self) { items, _ in
+      let ids = items.map(\.songID)
+      guard !ids.isEmpty else { return false }
+      Task { await controller.addSongs(ids, toAppPlaylist: summary.id) }
+      return true
     }
+  }
 
-    private func toggleFavorite() {
-        controller.toggleFavorite(summary)
+  // MARK: Private
+
+  @Environment(MusicController.self) private var controller
+
+  private var isFavorite: Bool {
+    controller.isFavorite(summary)
+  }
+
+  private func play() {
+    Task {
+      controller.selectedPlaylistID = summary.id
+      await controller.playSelectedPlaylist()
     }
+  }
+
+  private func toggleFavorite() {
+    controller.toggleFavorite(summary)
+  }
 }

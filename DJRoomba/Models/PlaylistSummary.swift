@@ -13,30 +13,30 @@ import Foundation
 /// key; `Hashable`'s contract only requires equal values hash equally, and
 /// `==` still implies same `id`.
 struct PlaylistSummary: Identifiable, Hashable, Sendable {
-    /// Apple library `MusicItemID` raw value (the `apple_playlist` PK), or an
-    /// app playlist UUID. The stable app-local key for selection/favorites.
-    let id: String
-    let name: String
-    let trackCount: Int?
-    let isEditable: Bool?
-    let source: PlaylistSource
-    var isFavorite: Bool
+  /// Apple library `MusicItemID` raw value (the `apple_playlist` PK), or an
+  /// app playlist UUID. The stable app-local key for selection/favorites.
+  let id: String
+  let name: String
+  let trackCount: Int?
+  let isEditable: Bool?
+  let source: PlaylistSource
+  var isFavorite: Bool
 
-    /// Re-resolvable artwork (D2). An imported Apple playlist's `id` *is* a
-    /// library `MusicItemID`, so `ArtworkProvider` re-fetches the playlist's
-    /// cover by it; app playlists have no Apple artwork (nil → placeholder).
-    var artworkRef: ArtworkRef? {
-        source == .libraryUserPlaylist ? .playlist(id) : nil
-    }
+  /// Re-resolvable artwork (D2). An imported Apple playlist's `id` *is* a
+  /// library `MusicItemID`, so `ArtworkProvider` re-fetches the playlist's
+  /// cover by it; app playlists have no Apple artwork (nil → placeholder).
+  var artworkRef: ArtworkRef? {
+    source == .libraryUserPlaylist ? .playlist(id) : nil
+  }
 
-    static func == (lhs: PlaylistSummary, rhs: PlaylistSummary) -> Bool {
-        lhs.id == rhs.id
-            && lhs.isFavorite == rhs.isFavorite
-            && lhs.trackCount == rhs.trackCount
-            && lhs.name == rhs.name
-    }
+  static func ==(lhs: PlaylistSummary, rhs: PlaylistSummary) -> Bool {
+    lhs.id == rhs.id
+      && lhs.isFavorite == rhs.isFavorite
+      && lhs.trackCount == rhs.trackCount
+      && lhs.name == rhs.name
+  }
 
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-    }
+  func hash(into hasher: inout Hasher) {
+    hasher.combine(id)
+  }
 }

@@ -7,13 +7,13 @@ import Observation
 @MainActor
 @Observable
 final class MusicAuthorizationService {
-    private(set) var status: MusicAuthorization.Status = MusicAuthorization.currentStatus
+  private(set) var status: MusicAuthorization.Status = MusicAuthorization.currentStatus
 
-    func refresh() {
-        status = MusicAuthorization.currentStatus
-    }
+  func refresh() {
+    status = MusicAuthorization.currentStatus
+  }
 
-    func request() async {
-        status = await MusicAuthorization.request()
-    }
+  func request() async {
+    status = await MusicAuthorization.request()
+  }
 }

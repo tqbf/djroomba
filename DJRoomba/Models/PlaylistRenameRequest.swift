@@ -12,9 +12,9 @@ import Foundation
 /// across triggers. A sheet's `TextField` is the sole first responder and the
 /// commit is an explicit, deterministic Rename/Cancel — identical every time.
 struct PlaylistRenameRequest: Identifiable, Hashable, Sendable {
-    /// `apple_playlist`/`app_playlist` id — the stable app-local key.
-    let id: String
-    /// The playlist's current name; the rename field starts pre-filled and
-    /// fully selected with this so typing replaces it (the Finder idiom).
-    let currentName: String
+  /// `apple_playlist`/`app_playlist` id — the stable app-local key.
+  let id: String
+  /// The playlist's current name; the rename field starts pre-filled and
+  /// fully selected with this so typing replaces it (the Finder idiom).
+  let currentName: String
 }
