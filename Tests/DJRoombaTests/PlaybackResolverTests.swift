@@ -295,6 +295,69 @@ struct PlaybackResolverTests {
     #expect(R.skipKind(elapsed: 0.75, duration: 1.5, button: .previous) == .none)
   }
 
+  /// THE falsifiable freight (Phase 4): the pure auto-advance transition
+  /// decision at **every** boundary. Deterministic, MusicKit-free — the
+  /// case the pure core exists to lock down (mirrors `skipKind`). The
+  /// `current == last` arm is called out explicitly as the **R4
+  /// guarantee**: it is the single equality that makes a back-replay (and
+  /// every paused/steady tick) record nothing.
+  @Test
+  func `advanceToRecord detects a transition at every boundary`() {
+    typealias R = PlaybackResolver
+
+    // No current position (stopped / cleared queue) → never records,
+    // regardless of the watermark.
+    #expect(R.advanceToRecord(lastRecordedIndex: nil, currentIndex: nil) == nil)
+    #expect(R.advanceToRecord(lastRecordedIndex: 3, currentIndex: nil) == nil)
+
+    // current == last → nil. THE R4 GUARANTEE: a back-button replay
+    // restarts the SAME structural index, a paused tick and a steady
+    // tick also keep it — all three are this one equality, so none
+    // appends to play_history (only Phase-3's recordReplay counts).
+    #expect(
+      R.advanceToRecord(lastRecordedIndex: 0, currentIndex: 0) == nil,
+      "R4: same index ⇒ no transition ⇒ no history append (replay/paused/steady)",
+    )
+    #expect(R.advanceToRecord(lastRecordedIndex: 5, currentIndex: 5) == nil)
+
+    // A different, valid index → record it (genuine advance / forward
+    // skip / new-queue start at a new position).
+    #expect(R.advanceToRecord(lastRecordedIndex: 0, currentIndex: 1) == 1)
+    #expect(R.advanceToRecord(lastRecordedIndex: 5, currentIndex: 2) == 2, "a backward jump is still a transition")
+
+    // Unseeded watermark (nil last) + some current → record that current
+    // (the first observation of a queue that was never seeded).
+    #expect(R.advanceToRecord(lastRecordedIndex: nil, currentIndex: 0) == 0)
+    #expect(R.advanceToRecord(lastRecordedIndex: nil, currentIndex: 4) == 4)
+  }
+
+  /// A realistic seeded index *sequence* fed iteratively, exactly as the
+  /// 0.5 s monitor would drive `detectAndRecordAdvance`: seed 0 (the
+  /// started track, already recorded by `recordPlayStart`), then ticks
+  /// `[0, 1, 1, 2, 2, 2, 1]`. Each distinct *consecutive change* records
+  /// once; steady ticks and same-index repeats record nothing. Expected
+  /// recorded set: `[1, 2, 1]` (note the final `1` is a NEW transition
+  /// from `2`, correctly distinct from the seed's `0`).
+  @Test
+  func `advanceToRecord over a tick sequence records each distinct change once`() {
+    var watermark: Int? = 0 // seeded to the start index (song 1 already recorded)
+    var recorded = [Int]()
+
+    for tick in [0, 1, 1, 2, 2, 2, 1] {
+      if let idx = PlaybackResolver.advanceToRecord(lastRecordedIndex: watermark, currentIndex: tick) {
+        // The detector advances the watermark UNCONDITIONALLY on a
+        // transition (even an unattributable hole) — model that here.
+        watermark = idx
+        recorded.append(idx)
+      }
+    }
+
+    #expect(
+      recorded == [1, 2, 1],
+      "seed 0 + ticks [0,1,1,2,2,2,1] ⇒ only the 3 distinct consecutive changes record; the leading 0 (==seed) and every steady/repeat tick record nothing",
+    )
+  }
+
   // MARK: Private
 
   private func row(

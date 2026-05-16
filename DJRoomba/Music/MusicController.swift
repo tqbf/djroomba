@@ -401,14 +401,27 @@ final class MusicController {
   // MARK: Private
 
   /// The canonical play context for the active queue, captured atomically
-  /// from one resolve so its two parts can never drift (set and cleared in
-  /// a single assignment). `songIDs[k]` is the stored `song.id` of the
+  /// from one resolve so its parts can never drift (set and cleared in a
+  /// single assignment). `songIDs[k]` is the stored `song.id` of the
   /// player's queue entry `k` (`nil` = unattributable position);
   /// `startSongID` seeds the structural index before the first monitor
-  /// tick. Phase-2 recording machinery; Phases 3–4 read it.
+  /// tick; `lastRecordedQueueIndex` is the Phase-4 auto-advance watermark
+  /// — the structural index the most recent play was recorded for. It is
+  /// part of this value (not a sibling `var`) precisely so a new queue
+  /// resets the watermark in the **same assignment** that swaps the
+  /// context: the two can never drift (the Phase-2 atomic set/clear
+  /// decision, extended to Phase 4). Seeded to the **start index** so the
+  /// detector's first observation (current == seed) is not a transition
+  /// and the explicitly-started first track — already recorded by
+  /// `recordPlayStart` — is not re-appended. Phase-2 machinery; Phases
+  /// 3–4 read it.
   private struct ActivePlayContext {
     var songIDs = [String?]()
     var startSongID: String?
+    /// The structural queue index the last play was recorded for (Phase
+    /// 4). Defaults to `nil` (empty/no queue ⇒ nothing recorded yet);
+    /// `resolveAndPlay` seeds it to the start index for a live queue.
+    var lastRecordedQueueIndex: Int?
   }
 
   /// The SQLite source of truth, and everything that reads/writes it. If
@@ -442,6 +455,13 @@ final class MusicController {
 
   private func startAuthorizedSession() async {
     subscription.start()
+    // Hang the Phase-4 auto-advance detector off the existing 0.5 s
+    // monitor (no second timer). Set once; a plain `@ObservationIgnored`
+    // closure, so the now-playing tick stays decoupled from any view
+    // `body` (swiftui-pro / memory-and-laziness).
+    playback.onSnapshotRefresh = { [weak self] in
+      self?.detectAndRecordAdvance()
+    }
     playback.startMonitoring()
 
     // One-shot UserDefaults → SQLite migration of M2 favorites/recents.
@@ -649,6 +669,88 @@ final class MusicController {
     }
   }
 
+  /// Phase 4 — record a play whenever the player **advances** to a new
+  /// structural queue position (Decision R1: "the last N songs *played*"
+  /// must reflect listening, not just clicks). Hung off the existing 0.5 s
+  /// `PlaybackService` monitor via `onSnapshotRefresh` (no second timer);
+  /// runs once per tick *after* `snapshot` is committed, so it reads the
+  /// fresh `queueIndex`.
+  ///
+  /// The pure, exhaustively-unit-tested `PlaybackResolver.advanceToRecord`
+  /// decides; this method only wires it to the detector's watermark and the
+  /// store:
+  /// - No transition (current == watermark — a paused/steady tick, or a
+  ///   back-button **replay** that restarts the same index) → return,
+  ///   nothing recorded. This is exactly how **Decision R4** is satisfied
+  ///   for free: a replay keeps the same index ⇒ no append; the only count
+  ///   is Phase-3's `recordReplay` counter.
+  /// - A genuine advance (auto-advance / forward-skip / new-queue start at
+  ///   a new position) → advance the watermark **unconditionally** (even
+  ///   when the new position is an unattributable `nil` hole — so it isn't
+  ///   retried and the *next* real transition is still detected) and, when
+  ///   the position attributes to one of **our** `song.id`s (Phase 2;
+  ///   never an Apple id), fire-and-forget `store.recordPlay` through
+  ///   Phase 1's single one-transaction path (`song_stat` +
+  ///   `play_history` append + cap), mirroring `recordRecentlyPlayed`'s
+  ///   exact `Task { do { … } catch { storeError } }` shape.
+  ///
+  /// Recording-only: this is a pure observer; it changes no playback or
+  /// queueing behavior. Cheap and synchronous on the monitor — the only
+  /// non-trivial work (the SQLite write) is moved off-main into the `Task`.
+  /// `lastRecordedQueueIndex` lives in `@ObservationIgnored`
+  /// `activePlayContext` and is never read from a view `body`, so this does
+  /// not regress the now-playing tick.
+  ///
+  /// Accepted limitation (`plans/play-statistics.md` — Phase 4): a burst of
+  /// skips faster than the 0.5 s poll skips *intermediate* positions in the
+  /// history (arguably not "played"); a finer-than-poll transition signal
+  /// is explicitly out of scope.
+  ///
+  /// SIGNED GATE (pending — user): the pure detector + store path are
+  /// fully unit-tested and code-complete. Only a real **signed** run can
+  /// confirm that `snapshot.queueIndex` actually tracks MusicKit's queue
+  /// position across a natural auto-advance and a manual skip, across
+  /// pause / interrupt / loop edges, and that song 1 is not double-counted
+  /// live (the seed beats the first tick under a real session).
+  private func detectAndRecordAdvance() {
+    guard let store else { return }
+    let currentIndex = playback.snapshot.queueIndex
+    guard
+      let recordIndex = PlaybackResolver.advanceToRecord(
+        lastRecordedIndex: activePlayContext.lastRecordedQueueIndex,
+        currentIndex: currentIndex,
+      )
+    else { return }
+
+    // Advance the watermark UNCONDITIONALLY on a detected transition:
+    // even an unattributable (`nil`) position must move it so the same
+    // hole isn't retried every tick and the next real transition is
+    // still detected. A `nil` position simply records nothing.
+    activePlayContext.lastRecordedQueueIndex = recordIndex
+
+    guard
+      let songID = PlaybackResolver.storedSongID(
+        in: activePlayContext.songIDs,
+        at: recordIndex,
+      )
+    else { return }
+
+    Task {
+      do {
+        try await store.recordPlay(songID: songID)
+      } catch LibraryStore.RecordPlayError.unknownSong(_) {
+        // The auto-advance landed on a `song.id` not in the library —
+        // a benign Phase-2 re-resolve/snapshot race, NOT a
+        // user-actionable error. Swallow it specifically: surfacing it
+        // would spam `storeError` on the 0.5 s monitor cadence until
+        // the index moves (Phase 3's once-per-press path doesn't have
+        // this exposure). Any other store error still surfaces below.
+      } catch {
+        storeError = error.localizedDescription
+      }
+    }
+  }
+
   /// The local-first round trip: stored ids → re-resolved MusicKit songs →
   /// existing M1 player. Records a play event when playback actually
   /// starts. Unresolvable tracks are tolerated (they don't break the queue).
@@ -677,7 +779,9 @@ final class MusicController {
       }
     guard let resolution else {
       // Resolve failed → no queue is set; drop any prior context so a
-      // stale one is never attributed to the next play (Phase 2).
+      // stale one is never attributed to the next play (Phase 2). This
+      // also resets the Phase-4 watermark to `nil` in the same atomic
+      // assignment — context and watermark can't drift.
       activePlayContext = ActivePlayContext()
       return
     }
@@ -685,9 +789,34 @@ final class MusicController {
     // Retain THIS queue's canonical context (replaced per queue), set
     // before `playback.play` so the seed index is valid the instant the
     // queue exists. Our data from our SQLite read — no Apple id.
+    //
+    // Seed the Phase-4 watermark to the structural START index in the
+    // SAME assignment: the detector's first observation (current ==
+    // seed) is then not a transition, so the explicitly-started first
+    // track — already recorded by `recordPlayStart` below — is never
+    // re-appended to `play_history` (no double-count of song 1).
+    //
+    // LOAD-BEARING ORDERING INVARIANT: there must be NO `await`
+    // suspension between this assignment and `player.queue` being
+    // swapped to the new songs (synchronous, inside `setQueueAndPlay`
+    // before its first `await`). `recordRecentlyPlayed` below is
+    // synchronous and `await playback.play(...)` runs synchronously
+    // until `try await player.play()` — which is *after* `player.queue`
+    // is set. On the single-threaded MainActor that guarantees a 0.5 s
+    // monitor tick can only ever observe (old context, old queue) —
+    // during the resolve `await` above, correctly attributing the prior
+    // queue the user is still hearing — or (new context, new queue),
+    // never a (new context, old queue) mix that would misattribute /
+    // double-count. Do NOT insert an `await`, nor make
+    // `recordRecentlyPlayed` async, between here and `playback.play`
+    // without re-establishing this invariant another way.
     activePlayContext = ActivePlayContext(
       songIDs: resolution.playContext,
       startSongID: resolution.startSongID,
+      lastRecordedQueueIndex: PlaybackResolver.startIndex(
+        in: resolution.playContext,
+        startSongID: resolution.startSongID,
+      ),
     )
 
     recordRecentlyPlayed(detail.id, source: detail.isAppOwned ? .app : .apple)

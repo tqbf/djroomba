@@ -5,9 +5,20 @@
 > 2. A per-song **skip count** — pressing "next" **before halfway** through a track.
 > 3. A per-song **replay count** — pressing "back" **after halfway** through a track.
 
-Status: **FINALIZED PLAN — not implemented.** All decisions resolved
-(see end). No schema/code changes have been made; awaiting go-ahead to
-implement Phase 1.
+Status: **IMPLEMENTED — code-complete (2026-05-16).** All 4 phases
+built, each through its own multi-agent cleanup gate (R6). **Phase 1
+shipped** (pure SQLite, unit-tested, no gate). **Phases 2–4
+code-complete; signed runtime gate PENDING (user)** — only a real
+signed MusicKit build can confirm structural `queueIndex` tracks the
+live queue across auto-advance/skip/`startingAt:`, that pre-skip
+capture beats the `currentEntry` mutation, and that song 1 isn't
+double-counted live. `swift build` clean, **100 tests / 18 suites**
+green, `swiftformat`/`swiftlint` 0. See `PROGRESS.md` for the per-phase
+record and the exact signed-gate checklist. Decisions (R1–R9) all
+resolved (see end); one intentional refinement: `playContext` is
+`[String?]` (a `nil` = an unattributable position: a live Apple-playlist
+track beyond the stored snapshot — it plays but records no stats),
+because the spec's `[String]` assumed live/stored align 1:1.
 
 ## Architecture principle (load-bearing constraint — user directive)
 

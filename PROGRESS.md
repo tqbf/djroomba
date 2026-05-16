@@ -5,6 +5,84 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ Play statistics Phase 4 + FEATURE CODE-COMPLETE
+
+`plans/play-statistics.md` **Phase 4** (Decision R1 — "last N *played*"
+must reflect listening, not just clicks). With this the whole
+play-statistics feature is **code-complete**; all 4 phases were
+implemented by sequential subagents, each through its own multi-agent
+cleanup gate (R6).
+
+- **Phase 4 design.** Pure `PlaybackResolver.advanceToRecord(
+  lastRecordedIndex:currentIndex:) -> Int?` (`nonisolated static`,
+  exhaustively unit-tested): nil current / current == watermark → nil
+  (paused/steady tick **or** a back-replay restarting the same index —
+  this is how **R4** holds for free, no append); else → the new index.
+  Hung off the existing 0.5 s monitor via a new `@ObservationIgnored`
+  `PlaybackService.onSnapshotRefresh` closure (no second timer), invoked
+  after `snapshot` is committed. `detectAndRecordAdvance` advances the
+  watermark **unconditionally** on a transition (an unattributable
+  `nil`-hole position still moves it, so it isn't retried and the next
+  real transition is still seen) and fire-and-forget `recordPlay`s only
+  attributable positions. **Song-1 double-count prevented** by seeding
+  the watermark to the structural start index in the SAME atomic
+  `ActivePlayContext` assignment `recordPlayStart` keys off (the
+  `ActivePlayContext` value type extended with `lastRecordedQueueIndex`
+  so context+seed can't drift — the Phase-2 atomicity decision carried
+  forward).
+- **Cleanup gate (R6):** reuse/quality/correctness + swiftui-pro/
+  efficiency 3-agent pass. swiftui-pro/efficiency: **clean** (closure
+  `@ObservationIgnored` + `[weak self]`, no body/tick coupling, O(1)
+  per-tick, early-return before any `Task` on the common no-transition
+  tick, off-main write). Correctness pass raised a "blocking" P1
+  (re-play-while-playing double-count) — **investigated and determined
+  a false positive**: it assumed a monitor tick can observe (new
+  context, old queue), but on the single-threaded MainActor there is no
+  `await` suspension between the context assignment and the synchronous
+  `player.queue` swap (`recordRecentlyPlayed` is sync; `await
+  playback.play` runs synchronously until *after* `player.queue` is
+  set), so that mixed state is unobservable; the reviewer's proposed
+  fix would have *lost* legitimate plays of the prior queue the user
+  still hears while the next resolves. Instead **hardened the subtle
+  ordering as a documented load-bearing invariant** at the seed
+  assignment (a future `await` inserted there would reintroduce the
+  window). Applied **P2** (real, low-severity): `detectAndRecordAdvance`
+  now swallows `RecordPlayError.unknownSong` specifically (a benign
+  Phase-2 re-resolve race) so a transient misalignment can't spam
+  `storeError` on the 2 Hz monitor; any other store error still
+  surfaces.
+- **Verify:** `swift build` clean; **100 tests / 18 suites** green
+  (pure `advanceToRecord` boundaries + seeded `[0,1,1,2,2,2,1]→[1,2,1]`
+  sequence; end-to-end vs real `LibraryStore`: N advances ⇒ N+1 history
+  rows incl. the start; back-replay adds zero; song 1 not duplicated;
+  R4 counter-vs-history isolation); `swiftformat` 0, `swiftlint` 0.
+
+### Play statistics — remaining work (the ONLY thing left: a signed run)
+
+Phase 1 is fully shipped (pure SQLite, unit-tested). **Phases 2–4 are
+code-complete and unit-tested but carry a SIGNED RUNTIME GATE that only
+the user can run** (no live MusicKit / signed build in unit tests —
+same gating every prior milestone in this codebase had). Under a signed
+build (`make`/`make run` with the Apple Development identity), confirm:
+
+1. **Phase 2:** `currentStoredSongID` tracks the right stored `song.id`
+   across a natural auto-advance and a manual skip (i.e.
+   `snapshot.queueIndex` = the structural ordinal stays aligned with
+   our `playContext`). Fallback if not: count `currentEntry` transitions
+   off the 0.5 s monitor (still principle-clean — no Apple-id key).
+2. **Phase 3:** the pre-skip capture (`currentStoredSongID` +
+   `livePlayhead()`, taken before `await playback.skip…`) actually
+   beats MusicKit mutating `currentEntry`, and live `elapsed` is
+   accurate enough at the `duration/2` boundary; skip counts in
+   `1 s < elapsed < dur/2`, replay in `elapsed > dur/2`.
+3. **Phase 4:** auto-advance appends `play_history` for the song
+   actually played; a back-replay of the current track appends nothing
+   (R4); song 1 isn't double-counted live; pause/interrupt/loop don't
+   spuriously record.
+
+No `PROBLEMS.md` change (no signed gate run by the agent → no defect to
+log). If a signed run finds a defect, log it there per the plan.
+
 ## 2026-05-16 — ✅ Play statistics Phase 3 (skip/replay counting; code-complete)
 
 `plans/play-statistics.md` **Phase 3** (asks #2 & #3). Count a **skip**

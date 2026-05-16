@@ -200,6 +200,46 @@ final class PlaybackResolver {
     return playContext[index]
   }
 
+  /// Decide whether the player has **advanced** to a new structural queue
+  /// position that a play should be recorded for (Phase 4, ask #1 → "the
+  /// last N songs *played*", Decision R1). Purely from the last index a
+  /// play was recorded for and the player's current structural index — the
+  /// entire Phase-4 transition policy, deterministic and MusicKit-free, the
+  /// only place the rule lives, so it can be exhaustively unit-tested at
+  /// every boundary with no live session (mirrors `skipKind`/`startIndex`).
+  ///
+  /// Returns the index to record a play for, or `nil` when nothing should
+  /// be recorded:
+  /// - `currentIndex == nil` (no current position — stopped / cleared
+  ///   queue) → `nil`.
+  /// - `currentIndex == lastRecordedIndex` → `nil`. **No transition.** This
+  ///   single equality is how **Decision R4** is satisfied for free: a
+  ///   paused tick, a steady tick, AND a back-button *replay* that restarts
+  ///   the SAME structural index all keep the index unchanged ⇒ no
+  ///   transition ⇒ no `play_history` append. A replay is counted only by
+  ///   Phase 3's `recordReplay` (a counter, never history) — the user's
+  ///   "do not record a song twice if we hit back to replay it".
+  /// - else (a different, valid `currentIndex`, incl. the unseeded
+  ///   `lastRecordedIndex == nil` first observation) → `currentIndex`: a
+  ///   genuine auto-advance, forward-skip, or new-queue start at a new
+  ///   position. The caller advances its watermark to this and records the
+  ///   play for the song now current.
+  ///
+  /// Performs no I/O and reads no MusicKit; the caller (the 0.5 s monitor's
+  /// detector) does the SQLite write off-main. Accepted limitation
+  /// (`plans/play-statistics.md` — Phase 4): a burst of skips faster than
+  /// the 0.5 s poll skips *intermediate* positions in the history (they
+  /// were arguably not "played"); a finer-than-poll transition signal is
+  /// explicitly out of scope.
+  nonisolated static func advanceToRecord(
+    lastRecordedIndex: Int?,
+    currentIndex: Int?,
+  ) -> Int? {
+    guard let currentIndex else { return nil }
+    guard currentIndex != lastRecordedIndex else { return nil }
+    return currentIndex
+  }
+
   /// Decide whether a transport press counts as a **skip**, a **replay**,
   /// or **nothing**, purely from how far into the track the user was when
   /// they pressed (`elapsed`), how long the track is (`duration`), and

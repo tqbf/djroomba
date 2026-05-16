@@ -24,6 +24,19 @@ final class PlaybackService {
   private(set) var snapshot = PlayerStateSnapshot()
   private(set) var lastError: String?
 
+  /// Invoked at the **end** of every `refreshSnapshot()` — i.e. once per
+  /// ~0.5 s monitor tick *and* after every transport/confirm refresh —
+  /// after `snapshot` is assigned, so the callback observes the fresh
+  /// `queueIndex`. `MusicController` sets it once (where `startMonitoring()`
+  /// is called) to its Phase-4 auto-advance detector. `@ObservationIgnored`
+  /// and a plain closure on purpose: this is **not** Observation-tracked
+  /// state, so wiring the transition detector here does **not** couple any
+  /// view `body` to the now-playing tick (the "no now-playing tick
+  /// coupling" regression `plans/memory-and-laziness.md` / swiftui-pro warn
+  /// against). The closure must be cheap and return immediately — it does
+  /// no I/O; the detector fires its SQLite write off-main in a `Task`.
+  @ObservationIgnored var onSnapshotRefresh: (@MainActor () -> Void)?
+
   func startMonitoring() {
     guard monitorTask == nil else { return }
     monitorTask = Task { [weak self] in
@@ -269,6 +282,10 @@ final class PlaybackService {
     }
 
     snapshot = snap
+
+    // After `snapshot` is committed, so the Phase-4 detector sees the
+    // fresh `queueIndex`. Cheap, synchronous, fire-and-return.
+    onSnapshotRefresh?()
   }
 
 }

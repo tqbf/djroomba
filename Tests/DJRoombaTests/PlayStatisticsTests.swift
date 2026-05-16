@@ -342,6 +342,137 @@ struct PlayStatisticsTests {
     #expect(try await store.recentlyPlayedSongIDs().isEmpty)
   }
 
+  /// THE falsifiable freight (Phase 4): the end-to-end auto-advance path
+  /// against the real `LibraryStore`, no MusicKit needed. Reproduces what
+  /// `MusicController` wires together — `recordPlayStart` of song 1, the
+  /// start-index *seed*, then the 0.5 s monitor driving
+  /// `advanceToRecord` → `storedSongID` → `recordPlay` over a tick
+  /// sequence — and asserts the plan's freight:
+  ///
+  /// A queue advancing N distinct positions yields exactly N
+  /// `play_history` rows from transitions **plus** the 1 from the start
+  /// path; a back-replay (same index, no transition) adds **zero** rows
+  /// (Decision R4); and song 1 is **not** duplicated by the seed.
+  @Test
+  func `auto advance records each new position once plus the start and never the replay`() async throws {
+    let store = try TestSupport.freshStore()
+    try await store.upsertSongs([
+      sample(id: "A", mid: "mA"),
+      sample(id: "B", mid: "mB"),
+      sample(id: "C", mid: "mC"),
+    ])
+
+    // Phase-2 canonical play context: our song.ids by structural
+    // position. The user explicitly started at index 0 ("A").
+    let context: [String?] = ["A", "B", "C"]
+    let startIndex = PlaybackResolver.startIndex(in: context, startSongID: "A")
+    #expect(startIndex == 0)
+
+    // 1. The explicitly-started track is recorded by `recordPlayStart`
+    //    (this is the existing Phase-1/2 path; ONE history row).
+    try await store.recordPlay(songID: "A", at: Date(timeIntervalSince1970: 0))
+
+    // 2. The detector's watermark is SEEDED to the start index in the
+    //    same atomic assignment `MusicController` uses — so the first
+    //    monitor tick (current == seed) is NOT a transition and "A" is
+    //    not re-appended (no double-count of song 1).
+    var watermark: Int? = startIndex
+
+    /// Replays `MusicController.detectAndRecordAdvance`'s exact body
+    /// (advance the watermark unconditionally on a transition; record a
+    /// play iff the position attributes to one of our song.ids), driven
+    /// by the same kind of tick stream the 0.5 s monitor produces.
+    /// `advanceToRecord`/`storedSongID` returning nil is the EXPECTED,
+    /// correct result for a steady / seed / same-index-replay /
+    /// unattributable tick (the detector returns early there) — so this
+    /// branches on the optionals rather than `#require`-ing them (that
+    /// would fail the test on the very behaviour under test). Written
+    /// `guard`-free to satisfy the project's `noGuardInTests` rule.
+    func tick(_ currentIndex: Int?, at when: TimeInterval) async throws {
+      if
+        let recordIndex = PlaybackResolver.advanceToRecord(
+          lastRecordedIndex: watermark,
+          currentIndex: currentIndex,
+        )
+      {
+        watermark = recordIndex
+        if let songID = PlaybackResolver.storedSongID(in: context, at: recordIndex) {
+          try await store.recordPlay(songID: songID, at: Date(timeIntervalSince1970: when))
+        }
+      }
+    }
+
+    // Tick stream over the natural life of the queue:
+    //  - 0,0      : steady on the seeded start ("A") — NO append (seed).
+    //  - 1,1,1    : auto-advance to "B", then steady — ONE append ("B").
+    //  - 1        : back-button REPLAY of "B" (same index) — ZERO append
+    //               (Decision R4; only Phase-3's recordReplay would count).
+    //  - 2,2      : auto-advance to "C", then steady — ONE append ("C").
+    let stream: [(Int?, TimeInterval)] = [
+      (0, 1),
+      (0, 2),
+      (1, 3),
+      (1, 4),
+      (1, 5),
+      (1, 6), // simulated back-replay of the current track: same index
+      (2, 7),
+      (2, 8),
+    ]
+    for (idx, when) in stream {
+      try await tick(idx, at: when)
+    }
+
+    // History, newest-first: C (transition), B (transition), A (start).
+    // Exactly N=2 transition rows + 1 start row; the replay added none.
+    let history = try await store.recentlyPlayedSongIDs()
+    #expect(
+      history == ["C", "B", "A"],
+      "1 start (A) + 2 distinct advances (B, C); the same-index back-replay adds ZERO rows (R4); the seed did not re-append A",
+    )
+    // Song 1 ("A") appears EXACTLY once — the start path only; the seed
+    // suppressed the first-tick re-append.
+    #expect(history.count(where: { $0 == "A" }) == 1, "song 1 not double-counted by the seed")
+
+    // play_count is the independent lifetime rollup: A=1, B=1, C=1.
+    #expect(try await store.songStat(songID: "A")?.playCount == 1)
+    #expect(try await store.songStat(songID: "B")?.playCount == 1)
+    #expect(try await store.songStat(songID: "C")?.playCount == 1)
+  }
+
+  /// Companion to the above isolating the **R4** claim with a counter in
+  /// the mix: a real `recordReplay` (Phase 3, "back" past halfway) plus
+  /// the Phase-4 detector seeing the *same* structural index (the replay
+  /// restarted the current track) must, together, add **zero**
+  /// `play_history` rows beyond the original start — the user's "do not
+  /// record a song twice if we hit back to replay it".
+  @Test
+  func `a back replay bumps the counter but the detector appends no history`() async throws {
+    let store = try TestSupport.freshStore()
+    try await store.upsertSongs([sample(id: "A", mid: "mA"), sample(id: "B", mid: "mB")])
+    let context: [String?] = ["A", "B"]
+
+    // Started "A" (index 0), recorded by the start path; watermark seeded.
+    try await store.recordPlay(songID: "A", at: Date(timeIntervalSince1970: 0))
+    var watermark: Int? = PlaybackResolver.startIndex(in: context, startSongID: "A")
+
+    // Played most of "A", pressed BACK past halfway → Phase-3 counter.
+    let kind = PlaybackResolver.skipKind(elapsed: 60, duration: 90, button: .previous)
+    #expect(kind == .replay)
+    try await store.recordReplay(songID: "A")
+
+    // The back-replay restarts "A" — the player's structural index is
+    // STILL 0. The Phase-4 detector therefore sees no transition.
+    let recordIndex = PlaybackResolver.advanceToRecord(lastRecordedIndex: watermark, currentIndex: 0)
+    #expect(recordIndex == nil, "R4: replay keeps the same index ⇒ no transition")
+    if let recordIndex { watermark = recordIndex } // (not taken)
+
+    // Exactly the one start row for "A"; the replay added none.
+    #expect(try await store.recentlyPlayedSongIDs() == ["A"], "R4: history has only the start play, not the replay")
+    let stat = try #require(try await store.songStat(songID: "A"))
+    #expect(stat.replayCount == 1, "the replay is counted (Phase 3) …")
+    #expect(stat.playCount == 1, "… but never as a second play (R4)")
+  }
+
   // MARK: Private
 
   private func sample(
