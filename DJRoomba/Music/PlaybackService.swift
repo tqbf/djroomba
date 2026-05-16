@@ -198,6 +198,15 @@ final class PlaybackService {
     if let entry = player.queue.currentEntry {
       snap.title = entry.title
       snap.artist = entry.subtitle
+      // Structural queue position: this entry's ordinal in `queue.entries`,
+      // matched by the queue `Entry`'s OWN id (the queue's per-position
+      // handle MusicKit mints, NOT the song's `MusicItemID` — attribution
+      // never keys on an Apple content id). nil if not found; callers fall
+      // back to the start-index seed. (Signed-gate fallback documented in
+      // plans/play-statistics.md if this proves unreliable under real
+      // auto-advance/skip.)
+      snap.queueIndex = player.queue.entries
+        .firstIndex { $0.id == entry.id }
       switch entry.item {
       case .song(let song):
         snap.duration = song.duration

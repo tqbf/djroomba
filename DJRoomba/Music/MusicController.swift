@@ -200,6 +200,22 @@ final class MusicController {
     )
   }
 
+  /// The stored `song.id` at the player's current **structural queue
+  /// position**, or nil if unknown/unattributable. Cheap O(1) derived
+  /// read, not view-consumed in Phase 2 (Phases 3–4 read it for
+  /// attribution). Position = `snapshot.queueIndex`, or the start-index
+  /// seed before the first monitor tick. Only ever indexes **our**
+  /// context by an ordinal — no Apple id is a key (plans/play-statistics.md
+  /// — "Rejected alternative").
+  var currentStoredSongID: String? {
+    let index = playback.snapshot.queueIndex
+      ?? PlaybackResolver.startIndex(
+        in: activePlayContext.songIDs,
+        startSongID: activePlayContext.startSongID,
+      )
+    return PlaybackResolver.storedSongID(in: activePlayContext.songIDs, at: index)
+  }
+
   func requestSidebarFocus() {
     focusSidebarRequest &+= 1
   }
@@ -374,6 +390,17 @@ final class MusicController {
 
   // MARK: Private
 
+  /// The canonical play context for the active queue, captured atomically
+  /// from one resolve so its two parts can never drift (set and cleared in
+  /// a single assignment). `songIDs[k]` is the stored `song.id` of the
+  /// player's queue entry `k` (`nil` = unattributable position);
+  /// `startSongID` seeds the structural index before the first monitor
+  /// tick. Phase-2 recording machinery; Phases 3–4 read it.
+  private struct ActivePlayContext {
+    var songIDs = [String?]()
+    var startSongID: String?
+  }
+
   /// The SQLite source of truth, and everything that reads/writes it. If
   /// the store can't be opened the app still runs (auth/empty states); the
   /// failure is surfaced via `storeError`.
@@ -381,6 +408,14 @@ final class MusicController {
 
   @ObservationIgnored private let preferences = UserPreferencesStore()
   @ObservationIgnored private let legacyMigration = LegacyPreferencesMigration()
+
+  /// `@ObservationIgnored` is load-bearing: the 0.5 s monitor advances
+  /// `snapshot.queueIndex` continuously and `currentStoredSongID` reads it
+  /// — Observation-tracking this would invalidate `body` on every
+  /// now-playing tick (the "no now-playing tick coupling" regression
+  /// `plans/memory-and-laziness.md` / swiftui-pro warn against). Nothing
+  /// reads it from a view body, and it must stay that way.
+  @ObservationIgnored private var activePlayContext = ActivePlayContext()
 
   /// Last-resort in-memory store so `store == nil` never crashes the app.
   /// An in-memory `DatabaseQueue` failing to open means the process is
@@ -576,7 +611,20 @@ final class MusicController {
           startAt: startRow,
         )
       }
-    guard let resolution else { return }
+    guard let resolution else {
+      // Resolve failed → no queue is set; drop any prior context so a
+      // stale one is never attributed to the next play (Phase 2).
+      activePlayContext = ActivePlayContext()
+      return
+    }
+
+    // Retain THIS queue's canonical context (replaced per queue), set
+    // before `playback.play` so the seed index is valid the instant the
+    // queue exists. Our data from our SQLite read — no Apple id.
+    activePlayContext = ActivePlayContext(
+      songIDs: resolution.playContext,
+      startSongID: resolution.startSongID,
+    )
 
     recordRecentlyPlayed(detail.id, source: detail.isAppOwned ? .app : .apple)
     // `play` confirms the player actually reached `.playing` (polls the

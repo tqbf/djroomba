@@ -39,12 +39,27 @@ final class PlaybackResolver {
   /// track playback actually starts at (for play recording — the resolved
   /// `Song.id` is the song's own `i.` id and does NOT equal the stored
   /// `music_item_id`, so id-matching back to a row is unreliable; this
-  /// carries the FK target directly), and which stored ids dropped out.
+  /// carries the FK target directly), the **canonical play context**, and
+  /// which stored ids dropped out.
+  ///
+  /// `playContext` is *our* data from *our* SQLite read: stored `song.id`s
+  /// **parallel to `songs`** (same count & order — `playContext[k]` is
+  /// `songs[k]`'s stored id), so attribution is a structural-position
+  /// index into our list, never a live-Apple-id translation (see
+  /// `plans/play-statistics.md` — "Rejected alternative"). An element is
+  /// `nil` only when that queue position has no canonically-attributable
+  /// stored row (a live Apple-playlist track beyond the stored snapshot —
+  /// the playlist changed since import): the song still plays, but it
+  /// records no stats rather than being misattributed. Parallelism is by
+  /// construction — every `songs` append has a paired `playContext` append.
   struct Resolution: Sendable {
     var songs: [MusicKit.Song]
     var startSong: MusicKit.Song?
     /// The `TrackRow.songID` (app-stable `song.id`) of the started track.
     var startSongID: String?
+    /// Stored `song.id` per queue position, parallel to `songs`; `nil` at
+    /// an unattributable position (see the type doc).
+    var playContext: [String?]
     var unresolved: [String]
   }
 
@@ -96,19 +111,24 @@ final class PlaybackResolver {
   /// falls back to the first resolved song if the requested start dropped.
   /// Also reports the **stored `song.id`** of the started row so the
   /// caller can record the play against the right FK target (the resolved
-  /// `Song.id` is the song's own `i.` id and won't equal the stored id).
+  /// `Song.id` is the song's own `i.` id and won't equal the stored id),
+  /// and the **canonical play context** — `playContext[k]` is the stored
+  /// `song.id` of `songs[k]`, appended in the same loop iteration as the
+  /// song so the two arrays are parallel by construction (*our* ids from
+  /// *our* read; here every resolved row has a stored id, so no element is
+  /// nil).
   nonisolated static func reassemble(
     rows: [TrackRow],
     startRow: TrackRow?,
     resolved: [String: MusicKit.Song],
   ) -> Resolution {
     var songs = [MusicKit.Song]()
-    var resolvedRows = [TrackRow]()
+    var playContext = [String?]()
     var unresolved = [String]()
     for row in rows {
       if let song = resolved[row.musicItemID] {
         songs.append(song)
-        resolvedRows.append(row)
+        playContext.append(row.songID)
       } else {
         unresolved.append(row.musicItemID)
       }
@@ -120,14 +140,44 @@ final class PlaybackResolver {
       startSongID = startRow.songID
     } else {
       startSong = songs.first
-      startSongID = resolvedRows.first?.songID
+      startSongID = playContext.first ?? nil
     }
     return Resolution(
       songs: songs,
       startSong: startSong,
       startSongID: startSongID,
+      playContext: playContext,
       unresolved: unresolved,
     )
+  }
+
+  /// The structural index of `startSongID` within the canonical play
+  /// context. This is a lookup in **our** context by **our** `song.id`
+  /// (never an Apple id): the position the player will seed
+  /// `startingAt:` to. Falls back to `0` (queue head) when there is no
+  /// start id or it isn't in the context — the same "first song" fallback
+  /// `reassemble` uses for `startSong`. Pure, MusicKit-free, unit-tested
+  /// with no live session (mirrors `groupByNamespace`/`reassemble`).
+  nonisolated static func startIndex(
+    in playContext: [String?],
+    startSongID: String?,
+  ) -> Int {
+    guard let startSongID else { return 0 }
+    return playContext.firstIndex { $0 == startSongID } ?? 0
+  }
+
+  /// The stored `song.id` at a structural queue position in the canonical
+  /// play context, bounds-checked (out-of-range / empty context → nil).
+  /// `index` is the player's *structural queue position*, an ordinal into
+  /// **our** ordered context — emphatically NOT an Apple content id and
+  /// never derived from one (see `plans/play-statistics.md`). Pure,
+  /// MusicKit-free, unit-tested with no live session.
+  nonisolated static func storedSongID(
+    in playContext: [String?],
+    at index: Int,
+  ) -> String? {
+    guard playContext.indices.contains(index) else { return nil }
+    return playContext[index]
   }
 
   /// Re-resolve an imported Apple playlist for playback by its stored
@@ -176,11 +226,21 @@ final class PlaybackResolver {
       }
 
       var songs = [MusicKit.Song]()
+      var playContext = [String?]()
       var unresolved = [String]()
       for (index, track) in liveTracks.enumerated() {
         switch track {
         case .song(let song):
+          // Parallel by construction: every `songs` append has exactly
+          // one paired `playContext` append. Stored row order aligns 1:1
+          // with the live tracks (import preserves playlist order; the
+          // re-resolve returns it). A live track beyond the stored
+          // snapshot (playlist changed since import) still plays but is
+          // unattributable → `nil` (no stats, never misattributed). Our
+          // id from our read; the live `Song.id` is never a key.
           songs.append(song)
+          playContext.append(index < rows.count ? rows[index].songID : nil)
+
         default:
           // Music video / unknown entry: not played. Report it by
           // the stored id at the same position — order aligns
@@ -220,6 +280,7 @@ final class PlaybackResolver {
         songs: songs,
         startSong: startSong,
         startSongID: startSongID,
+        playContext: playContext,
         unresolved: unresolved,
       )
     } catch {

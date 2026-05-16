@@ -24,6 +24,16 @@ struct PlayerStateSnapshot: Sendable {
   var playlistContextID: String?
   /// `MusicItemID.rawValue` of the now-playing item, if known.
   var nowPlayingItemID: String?
+  /// The **structural** position of the playing entry within the player's
+  /// queue: the ordinal of `queue.currentEntry` among `queue.entries`,
+  /// matched by the queue `Entry`'s own `id` (the queue's per-position
+  /// structural handle MusicKit mints when it builds the queue — NOT the
+  /// song's catalog/library `MusicItemID`). `nil` when it can't be
+  /// determined (no current entry / entry absent from `entries`). This is
+  /// the Phase-2 enabler: it indexes the resolver's canonical play context
+  /// (our `song.id`s) by position, so "which stored song is playing now"
+  /// needs zero Apple-id translation (see `plans/play-statistics.md`).
+  var queueIndex: Int?
 
   var hasContent: Bool {
     title != nil

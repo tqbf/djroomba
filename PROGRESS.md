@@ -5,6 +5,62 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ Play statistics Phase 2 (canonical play context; code-complete)
+
+`plans/play-statistics.md` **Phase 2** — THE enabler. Carry *our*
+`song.id`s forward from the SQLite read that built the queue and
+attribute "which stored song is playing now" by the player's
+**structural queue position**, never by translating an Apple id back
+(the load-bearing architecture principle). Recording-only — no
+playback/UI behavior change.
+
+- **`PlaybackResolver.Resolution.playContext: [String?]`** — stored
+  `song.id` per queue position, **parallel to `songs` by construction**
+  (every `songs` append has one paired `playContext` append). Built in
+  `reassemble` (app playlists; all non-nil) and `resolvePlaylist`
+  (imported Apple; `nil` for a live track beyond the stored snapshot —
+  it still plays but records no stats rather than being misattributed).
+- **Pure helpers** (`nonisolated static`, MusicKit-free, unit-tested):
+  `startIndex(in:startSongID:)`, `storedSongID(in:at:)`.
+- **`PlaybackService`** sets `snapshot.queueIndex` = the ordinal of
+  `currentEntry` within `queue.entries`, matched by the queue **Entry**'s
+  own id (the queue's structural handle MusicKit mints — *not* the song's
+  `MusicItemID`; no Apple content id is ever a key).
+- **`MusicController`** holds the active queue's context atomically in one
+  `@ObservationIgnored` value type (`ActivePlayContext{ songIDs,
+  startSongID }`) set/cleared in a single assignment so the two parts
+  can't drift; `currentStoredSongID` = `storedSongID(at: queueIndex ??
+  startIndex-seed)`. `@ObservationIgnored` is load-bearing (the 0.5 s
+  monitor must not invalidate `body` — the swiftui-pro / memory-laziness
+  "no now-playing tick coupling" rule); nothing reads it from a view.
+- **Cleanup gate (R6):** reuse/quality/efficiency + swiftui-pro 3-agent
+  pass. Caught & fixed a **CRITICAL** desync (`songs` grew but
+  `playContext` didn't when the live Apple playlist exceeds the stored
+  snapshot → every later position misattributed) — fixed via `[String?]`
+  parallel-by-construction (no playback change, vs the reviewer's
+  drop-from-both which would have dropped playable songs); collapsed two
+  drift-prone fields into one value type; deleted a brittle
+  source-substring test (the behavioral pure-function proof already
+  covers the no-Apple-id-key guarantee); trimmed change-narrating
+  comments. swiftui-pro/efficiency review: `@ObservationIgnored` correct
+  & sufficient; `queueIndex` adds zero new body churn (snapshot already
+  wholesale-replaced each tick); per-tick `entries.firstIndex` is
+  bounded — Phase 4's transition detector supersedes it.
+- **Refines the plan:** spec said `playContext: [String]`; the
+  stale-snapshot edge (live > stored) makes `[String?]` the faithful
+  realization of "attribute only what our SQLite read canonically gives"
+  — recorded here as an intentional deviation.
+- **Verify:** `swift build` clean; **94 tests / 18 suites** green
+  (Phase-2 pure helpers, parallelism, nil-hole bounds; −1 vs prior count
+  = the removed brittle source-grep test); `swiftformat` 0, `swiftlint`
+  0.
+- **Signed gate PENDING (user):** structural-position fidelity under
+  real auto-advance / manual skip / `startingAt:` can't be unit-verified
+  (no live MusicKit in tests). Documented fallback if it proves
+  unreliable: count `currentEntry` transitions off the 0.5 s monitor to
+  advance the index — still principle-clean (no Apple-id translation).
+  Phases 3–4 depend on this.
+
 ## 2026-05-16 — ✅ Play statistics Phase 1 (v3 schema + store API)
 
 Executed `plans/play-statistics.md` **Phase 1** (the durable spine; no
