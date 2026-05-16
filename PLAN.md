@@ -140,6 +140,12 @@ Four persistent conceptual regions, mapped to the macOS layout formula:
   + `Makefile`; **no Xcode IDE, no xcodebuild, no XcodeGen**. Xcode is only a
   toolchain provider, used solely by `make dist`. See
   [plans/build-system.md](plans/build-system.md).
+- **Code style:** Airbnb Swift Style Guide, enforced by `swiftformat`
+  (`.swiftformat`) + `swiftlint` (`.swiftlint.yml`), Airbnb canonical
+  configs. Apply the global `airbnb-swift-style` skill (+ `swiftui-pro`)
+  when writing/reviewing Swift; see the 2026-05-15 style-pass PROGRESS
+  entry. Formatting is `[AUTO]` (run `swiftformat`); judgment rules are
+  manual.
 - **Min target:** macOS 14 Sonoma. Built with Xcode 26.4 / Swift 6.3.
 - **Identity:** App "DJ Roomba", bundle `org.sockpuppet.djroomba`, team
   KK7E9G89GW (Thomas Ptacek), automatic signing.

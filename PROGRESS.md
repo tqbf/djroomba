@@ -5,6 +5,43 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-15 — ✅ Airbnb Swift style pass (formatter + linter wired up)
+
+Applied the Swift skills (`airbnb-swift-style`, `swiftui-pro`) across the
+whole codebase. Tooling adopted (Homebrew): **SwiftFormat 0.61.1 +
+SwiftLint 0.63.2**; Airbnb's canonical configs vendored as `.swiftformat`
+and `.swiftlint.yml` (one toolchain adaptation: `--type-blank-lines
+preserve` since 0.61.1 lacks `consistent`; `--language-mode 6` since the
+package compiles in Swift 6 mode).
+
+- **`[AUTO]` layer:** `swiftformat` reformatted **all 75 files**
+  (+5,788 / −5,330) — sorted imports, `// MARK:` organization +
+  visibility/type declaration ordering, redundant `self`/`return`/`init`/
+  parens/`Void` removed, trailing commas, raw-identifier swift-testing
+  case names, brace/space normalization. Non-behavioral (Airbnb tenet) and
+  proven so: build clean, **67/67 tests / 14 suites still green**.
+- **Lint layer:** `swiftlint` with the Airbnb `only_rules` set →
+  **0 violations / 74 files** (independently confirms no IUOs, force-
+  unwraps, stray `print`, `@unchecked Sendable`, legacy constructors,
+  `#file`). Earlier phases were already disciplined.
+- **`[JUDGMENT]` manual pass** (3 parallel skill-checklist reviewers +
+  swiftui-pro + a deprecated-API/forbidden-state grep cross-check): the
+  app code is clean — **0** deprecated SwiftUI API, **0** forbidden state
+  patterns (`ObservableObject`/`@Published`/`@AppStorage`-in-`@Observable`
+  — only a *comment* documenting the rule), structured concurrency only.
+  One genuine fix applied: `LegacyMigrationTests` force-unwrapped
+  `UserDefaults(suiteName:)!` → `try #require(...)` with a `throws`
+  helper (Airbnb "avoid force-unwrap in tests").
+- **Rejected (documented):** a sub-reviewer flagged two `MusicController`
+  fire-and-forget `Task {}` as "retain cycles" → verified false (tasks
+  not stored; consistent with the 28-site fire-and-forget vs 3-site
+  stored-`[weak self]` pattern). Changing 2 of 28 identical sites would be
+  the nitpick the skills forbid; left as-is.
+- Verification: `swift build` clean, `swift test` **67/67 green**,
+  `swiftformat --lint` **0/75**, `swiftlint` **0**. Behavior unchanged.
+  Not committed (no instruction to); a global `airbnb-swift-style` skill
+  now exists at `~/.claude/skills/`.
+
 ## 2026-05-15 — ✅ ALL PHASES COMPLETE — committed to a branch
 
 Phases 2–5 are implemented and **runtime-verified on a signed build**
