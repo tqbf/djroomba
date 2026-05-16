@@ -35,6 +35,7 @@ playlist-forward and intentionally simple.
 | [PLAN.md](PLAN.md) | This index + product shape, milestones, key decisions |
 | [PROGRESS.md](PROGRESS.md) | Canonical record: done / verified / next / open actions |
 | [PROBLEMS.md](PROBLEMS.md) | **Every outstanding issue** — actionable open-issue index (severity/owner/status) |
+| [DESIGN-TODO.md](DESIGN-TODO.md) | Deferred Thomas'-Laws cleanup phases (B/C) + decided-against list, with freight claims & veto conditions |
 | [plans/roadmap.md](plans/roadmap.md) | **Forward source of truth** — end-to-end 5-phase plan; Phase 1 = access-validation gate |
 | [plans/risks-and-challenges.md](plans/risks-and-challenges.md) | **Live risk register** — every problem we're up against, with status |
 | [plans/architecture.md](plans/architecture.md) | Local-first pivot layering + original M1/M2 layers, data flow, concurrency |
@@ -43,6 +44,7 @@ playlist-forward and intentionally simple.
 | [plans/project-setup.md](plans/project-setup.md) | Signing, MusicKit entitlement/plist, how to build (points at build-system.md) |
 | [plans/musickit-notes.md](plans/musickit-notes.md) | MusicKit-on-macOS API specifics, gotchas, identity risks |
 | [plans/profiling.md](plans/profiling.md) | **Import perf investigation** — swift-profile-recorder runbook + the self-time hypotheses to test |
+| [plans/memory-and-laziness.md](plans/memory-and-laziness.md) | **Residency plan (A+B done)** — killed per-`body` recompute + bounded detail cache; records why GRDB observation was rejected (single-writer) and the mutation-chokepoint forward pattern |
 | [plans/typography.md](plans/typography.md) | Semantic-font type system + hierarchy rules |
 | [plans/milestone-1.md](plans/milestone-1.md) | _Historical_ — original "Play a library playlist" notes |
 | [plans/milestone-2.md](plans/milestone-2.md) | _Historical_ — original "Make it pleasant" notes |

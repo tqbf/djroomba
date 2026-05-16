@@ -62,6 +62,14 @@ final class ImportService {
   /// (unchanged → expensive track fetch skipped). Surfaced for the
   /// profiling finding / a future "N updated, M unchanged" affordance.
   private(set) var skippedPlaylistCount = 0
+  /// Imported-playlist ids whose stored snapshot this run actually changed
+  /// — successfully re-fetched-and-written, or pruned (vanished). Lets the
+  /// caller invalidate only those cached details (Phase B —
+  /// `plans/memory-and-laziness.md`); a `.skipUnchanged` playlist is NOT
+  /// here, so an incremental Refresh that changed nothing leaves the
+  /// on-screen playlist's cached rows warm (no cold SQLite re-read of, e.g.,
+  /// a multi-day playlist).
+  private(set) var changedPlaylistIDs = Set<String>()
 
   /// Map a library playlist `Track` to a stored `Song`.
   ///
@@ -175,6 +183,7 @@ final class ImportService {
     importedPlaylistCount = 0
     totalPlaylistCount = 0
     skippedPlaylistCount = 0
+    changedPlaylistIDs = []
     defer { isImporting = false }
 
     do {
@@ -214,6 +223,10 @@ final class ImportService {
               maxTrackBatches: maxTrackBatches,
             )
             try await writePlaylist(playlist, tracks: tracks)
+            // Snapshot rewritten → its cached detail is now stale.
+            // (Only on success: a failed fetch left the snapshot — and
+            // thus any cached detail — consistent, so don't invalidate.)
+            changedPlaylistIDs.insert(id)
           } catch {
             failures.append(
               "\(playlist.name): \(error.localizedDescription)"
@@ -225,10 +238,11 @@ final class ImportService {
 
       // Drop snapshots whose upstream playlist vanished. Cheap: the live
       // id set is from the list fetch already done; FK cascade removes
-      // only their membership (one-way isolation preserved).
-      try? await store.pruneApplePlaylists(
-        keeping: Set(playlists.map { $0.id.rawValue })
-      )
+      // only their membership (one-way isolation preserved). A vanished
+      // playlist's cached detail is also stale → mark it changed.
+      let liveIDs = Set(playlists.map { $0.id.rawValue })
+      changedPlaylistIDs.formUnion(Set(existing.keys).subtracting(liveIDs))
+      try? await store.pruneApplePlaylists(keeping: liveIDs)
 
       if !failures.isEmpty {
         lastError = "Some playlists could not be imported:\n"

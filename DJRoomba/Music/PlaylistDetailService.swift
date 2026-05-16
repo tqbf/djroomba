@@ -3,8 +3,11 @@ import Observation
 
 /// Loads a selected playlist's tracks from the local SQLite store (NOT live
 /// MusicKit — local-first pivot), normalizes to `TrackRow`, and caches the
-/// result in memory keyed by playlist id. Cache is invalidated on import /
-/// manual refresh. Selection changes cancel any in-flight load.
+/// result in a small **bounded LRU** (`PlaylistDetailCache`, capacity 5) so
+/// residency is O(visible), never O(browsed). Invalidation is **targeted**
+/// (the one changed playlist) for app-playlist edits / incremental import;
+/// `invalidateAll()` is reserved for a forced full reimport. Selection
+/// changes cancel any in-flight load.
 ///
 /// Concurrency: `@MainActor @Observable`; `await`s the `Sendable`, off-main
 /// `LibraryStore` and republishes results as observable state.
@@ -27,7 +30,7 @@ final class PlaylistDetailService {
   func select(_ summary: PlaylistSummary) {
     loadTask?.cancel()
 
-    if let cached = cache[summary.id] {
+    if let cached = cache.value(forID: summary.id) {
       // Serve the cached rows immediately (instant, no flash), then
       // refresh the play-count / last-played columns from `song_stat`
       // on this discrete (re)selection event — they may have advanced
@@ -69,15 +72,42 @@ final class PlaylistDetailService {
     isLoading = false
   }
 
-  func invalidate() {
+  /// Targeted invalidation (Phase B): drop exactly the playlist whose
+  /// membership/snapshot changed (an app-playlist edit, a delete, or one
+  /// re-fetched-by-import playlist). Every other cached detail stays warm,
+  /// so e.g. a Refresh of an unchanged library never cold-re-reads the
+  /// on-screen playlist.
+  func invalidate(playlistID: String) {
+    cache.remove(playlistID)
+  }
+
+  func invalidate(playlistIDs: some Sequence<String>) {
+    cache.remove(ids: playlistIDs)
+  }
+
+  /// Full clear — only for a forced full reimport.
+  func invalidateAll() {
     cache.removeAll()
   }
 
   // MARK: Private
 
   @ObservationIgnored private let store: LibraryStore
-  @ObservationIgnored private var cache = [String: PlaylistDetail]()
+  /// Bounded LRU (capacity 5 — the user-chosen residency/feel trade-off:
+  /// the visible playlist plus a few bounce-backs, never the whole
+  /// browsed library). See `plans/memory-and-laziness.md`.
+  @ObservationIgnored private var cache = PlaylistDetailCache(capacity: 5)
   @ObservationIgnored private var loadTask: Task<Void, Never>?
+  /// Monotonic, process-unique within this service. Every produced
+  /// `PlaylistDetail` gets the next value so the track table's recompute
+  /// can be driven purely by `detail.revision` changing (Phase A —
+  /// keeps sort/filter out of `body`).
+  @ObservationIgnored private var revisionCounter = 0
+
+  private func nextRevision() -> Int {
+    revisionCounter += 1
+    return revisionCounter
+  }
 
   /// Caller passes the on-screen summary's identity so the refresh keys the
   /// right `songsWithStats` source (app vs imported). Returns nil when the
@@ -106,7 +136,7 @@ final class PlaylistDetailService {
         TrackRow(songWithStat: entry, position: index + 1)
       }
       guard
-        let current = cache[summary.id] ?? detail,
+        let current = cache.peek(summary.id) ?? detail,
         current.id == summary.id
       else { return }
       let refreshed = PlaylistDetail(
@@ -117,8 +147,9 @@ final class PlaylistDetailService {
         description: current.description,
         isEditable: current.isEditable,
         tracks: rows,
+        revision: nextRevision(),
       )
-      cache[summary.id] = refreshed
+      cache.set(refreshed, forID: summary.id)
       if detail?.id == summary.id { detail = refreshed }
     } catch {
       // A stats refresh failing is non-fatal — the (possibly stale)
@@ -154,8 +185,9 @@ final class PlaylistDetailService {
         description: nil,
         isEditable: summary.source.isAppOwned ? true : summary.isEditable,
         tracks: rows,
+        revision: nextRevision(),
       )
-      cache[summary.id] = result
+      cache.set(result, forID: summary.id)
       detail = result
     } catch {
       if Task.isCancelled { return }

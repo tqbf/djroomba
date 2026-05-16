@@ -17,6 +17,13 @@ struct PlaylistDetail: Identifiable, Sendable {
   let description: String?
   let isEditable: Bool?
   let tracks: [TrackRow]
+  /// Monotonic content token, minted by `PlaylistDetailService` every time
+  /// it produces a value (load, reorder, stats refresh). The track table
+  /// keys its sorted/filtered recompute off this so it re-derives exactly
+  /// when the content changed — including a same-`id` stats refresh — and
+  /// never per `body`. `TrackRow`'s `==` is id-only, so comparing
+  /// `tracks` arrays would miss a stats-only change; this token doesn't.
+  var revision = 0
 
   var isEmpty: Bool {
     tracks.isEmpty

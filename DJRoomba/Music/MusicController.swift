@@ -58,6 +58,34 @@ final class MusicController {
   /// keyboard focus (commands are app-scoped, so this bridges to the view).
   private(set) var focusSidebarRequest = 0
 
+  /// Derived summary collections — **stored, input-driven state**, not
+  /// per-`body` computed properties (Phase A spry fix; see
+  /// `plans/memory-and-laziness.md`). `rebuildDerivedSummaries()` recomputes
+  /// these only when an input (`library.summaries`,
+  /// `appPlaylistService.summaries`, `favoriteIDs`, `recentIDs`) changes, so
+  /// a sidebar render does zero array concatenation and zero O(n·m) scans.
+  ///
+  /// `allSummaries`: every selectable playlist across both libraries —
+  /// imported Apple snapshots + user-owned app playlists, uniform for
+  /// selection / restore / detail lookups.
+  private(set) var allSummaries = [PlaylistSummary]()
+
+  /// User-owned, SQLite-only playlists ("My Playlists" section, Phase 4),
+  /// with `isFavorite` overlaid (the service leaves it false).
+  private(set) var appPlaylists = [PlaylistSummary]()
+
+  /// Favorites span both libraries (a user playlist can be a favorite too).
+  private(set) var favoritePlaylists = [PlaylistSummary]()
+
+  /// Recently played, in recency order, limited to playlists still present
+  /// in either library.
+  private(set) var recentPlaylists = [PlaylistSummary]()
+
+  /// O(1) id → summary index over `allSummaries`. Backs `selectedSummary`
+  /// and every `…contains(where: id ==)` / `first(where: id ==)` lookup so
+  /// they stop being O(n) scans over a freshly concatenated array.
+  private(set) var summariesByID = [String: PlaylistSummary]()
+
   /// Sidebar selection. App-local state — drives lazy detail load and is
   /// persisted so it survives relaunch (if the playlist still exists).
   var selectedPlaylistID: String? {
@@ -65,13 +93,6 @@ final class MusicController {
       guard oldValue != selectedPlaylistID else { return }
       handleSelectionChange()
     }
-  }
-
-  /// Every selectable playlist across both libraries — imported Apple
-  /// snapshots and user-owned app playlists. Selection / restore / detail
-  /// lookups go through this so the two sources are uniform.
-  var allSummaries: [PlaylistSummary] {
-    library.summaries + appPlaylistService.summaries
   }
 
   /// True while the library is being (re)populated — an Apple import is
@@ -119,37 +140,18 @@ final class MusicController {
     )
   }
 
+  /// O(1) index lookup (was an O(n) scan over a freshly concatenated
+  /// `allSummaries` on every `body`).
   var selectedSummary: PlaylistSummary? {
     guard let id = selectedPlaylistID else { return nil }
-    return allSummaries.first { $0.id == id }
+    return summariesByID[id]
   }
 
-  /// Imported Apple library playlists ("Library Playlists" section).
+  /// Imported Apple library playlists ("Library Playlists" section). A bare
+  /// passthrough (single observed-property read, no recompute), kept
+  /// computed deliberately.
   var libraryPlaylists: [PlaylistSummary] {
     library.summaries
-  }
-
-  /// User-owned, SQLite-only playlists ("My Playlists" section, Phase 4).
-  /// `isFavorite` is overlaid here (the service leaves it false).
-  var appPlaylists: [PlaylistSummary] {
-    appPlaylistService.summaries.map { summary in
-      var s = summary
-      s.isFavorite = favoriteIDs.contains(summary.id)
-      return s
-    }
-  }
-
-  /// Favorites span both libraries (a user playlist can be a favorite too).
-  var favoritePlaylists: [PlaylistSummary] {
-    allSummaries.filter { favoriteIDs.contains($0.id) }
-  }
-
-  /// Recently played, in recency order, limited to playlists still present
-  /// in either library.
-  var recentPlaylists: [PlaylistSummary] {
-    recentIDs.compactMap { raw in
-      allSummaries.first { $0.id == raw }
-    }
   }
 
   /// Library browsing always works; catalog playback needs a subscription.
@@ -248,6 +250,10 @@ final class MusicController {
     } else {
       favoriteIDs.remove(key)
     }
+    // `favoriteIDs` is an input to the derived collections (favorites list,
+    // the `isFavorite` overlay on app playlists) — re-derive now, off the
+    // optimistic mutation, not in `body`.
+    rebuildDerivedSummaries()
     let kind: PlaylistSourceKind = summary.source.isAppOwned ? .app : .apple
     Task {
       do {
@@ -286,18 +292,24 @@ final class MusicController {
   @discardableResult
   func createAppPlaylist(named name: String = "New Playlist") async -> String? {
     let id = await appPlaylistService.create(named: name)
+    // Rebuild BEFORE assigning selection: `selectedPlaylistID`'s `didSet`
+    // resolves `selectedSummary` via `summariesByID`, which must already
+    // contain the new playlist.
+    rebuildDerivedSummaries()
     if let id { selectedPlaylistID = id }
     return id
   }
 
   func renameAppPlaylist(_ playlistID: String, to name: String) async {
-    await appPlaylistService.rename(playlistID, to: name)
-    refreshSelectedDetailIfNeeded(playlistID)
+    await mutateAppPlaylist(playlistID) {
+      await appPlaylistService.rename(playlistID, to: name)
+    }
   }
 
   func deleteAppPlaylist(_ playlistID: String) async {
     await appPlaylistService.delete(playlistID)
-    detailService.invalidate()
+    rebuildDerivedSummaries()
+    detailService.invalidate(playlistID: playlistID)
     if selectedPlaylistID == playlistID {
       // Selected playlist was deleted — clear selection silently.
       selectedPlaylistID = nil
@@ -305,25 +317,29 @@ final class MusicController {
   }
 
   func addSongs(_ songIDs: [String], toAppPlaylist playlistID: String) async {
-    await appPlaylistService.addSongs(songIDs, to: playlistID)
-    refreshSelectedDetailIfNeeded(playlistID)
+    await mutateAppPlaylist(playlistID) {
+      await appPlaylistService.addSongs(songIDs, to: playlistID)
+    }
   }
 
   func removeTracks(at oneBasedPositions: [Int], fromAppPlaylist playlistID: String) async {
-    await appPlaylistService.removeTracks(at: oneBasedPositions, from: playlistID)
-    refreshSelectedDetailIfNeeded(playlistID)
+    await mutateAppPlaylist(playlistID) {
+      await appPlaylistService.removeTracks(at: oneBasedPositions, from: playlistID)
+    }
   }
 
   /// Persist a reordered membership for an app playlist (the full ordered
   /// song-id list, e.g. after a drag-to-reorder in the track table).
   func setAppPlaylistTracks(_ songIDs: [String], for playlistID: String) async {
-    await appPlaylistService.setTracks(songIDs, for: playlistID)
-    refreshSelectedDetailIfNeeded(playlistID)
+    await mutateAppPlaylist(playlistID) {
+      await appPlaylistService.setTracks(songIDs, for: playlistID)
+    }
   }
 
   /// Persist a new sidebar order for the user playlists.
   func reorderAppPlaylists(_ orderedIDs: [String]) async {
     await appPlaylistService.reorder(orderedIDs)
+    rebuildDerivedSummaries()
   }
 
   func handle(_ command: MusicCommand) async {
@@ -409,6 +425,11 @@ final class MusicController {
       await library.load()
     }
 
+    // Covers the direct `appPlaylistService.load()` /
+    // `reloadFavoritesAndRecents()` calls and the `else` (non-import)
+    // branch above; `runImport()` also rebuilds, idempotently. Must run
+    // before `restoreSelection()` (it reads `allSummaries`/`summariesByID`).
+    rebuildDerivedSummaries()
     restoreSelection()
   }
 
@@ -431,8 +452,53 @@ final class MusicController {
   /// every playlist), then reload the store-backed sidebar.
   private func runImport(force: Bool = false) async {
     await importService.runImport(force: force)
-    detailService.invalidate()
+    // Targeted (Phase B): drop only the cached details whose snapshot the
+    // import actually changed/pruned. `.skipUnchanged` playlists keep
+    // their warm cache — an incremental Refresh that changed nothing no
+    // longer cold-re-reads the on-screen playlist. `force` re-fetches all,
+    // so this naturally degrades to "invalidate everything that existed".
+    detailService.invalidate(playlistIDs: importService.changedPlaylistIDs)
     await library.load()
+    rebuildDerivedSummaries()
+  }
+
+  /// Recompute the derived summary collections + the O(1) id index from the
+  /// current inputs (`library.summaries`, `appPlaylistService.summaries`,
+  /// `favoriteIDs`, `recentIDs`). Called only on a real input change, never
+  /// from `body` — the Phase-A spry fix: a sidebar render reads already-
+  /// built arrays instead of re-concatenating + O(n·m)-scanning on every
+  /// invalidation.
+  ///
+  /// FORWARD PATTERN (`plans/memory-and-laziness.md`). Single-writer for
+  /// good (no multi-source sync, ever), so freshness is a discipline, not
+  /// a framework concern: every input mutation funnels through here. GRDB
+  /// `ValueObservation` was prototyped (Phase C) and **reverted** — its
+  /// only single-writer benefit is the "can't forget to refresh"
+  /// guarantee, which a mutation chokepoint gives synchronously without the
+  /// async-iterator lifecycle / startup-&-reconcile sequencing tax. As
+  /// features are built on this baseline, decompose this single
+  /// all-collections rebuild into **per-collection** rebuilds invoked by
+  /// the specific `LibraryStore` mutation, so a new surface never
+  /// recomputes every other surface (the one-God-rebuild is the real
+  /// scaling limit here, not observe-vs-manual).
+  private func rebuildDerivedSummaries() {
+    let imported = library.summaries
+    let owned = appPlaylistService.summaries.map { summary -> PlaylistSummary in
+      var summary = summary
+      summary.isFavorite = favoriteIDs.contains(summary.id)
+      return summary
+    }
+    appPlaylists = owned
+
+    let combined = imported + owned
+    allSummaries = combined
+
+    var index = [String: PlaylistSummary](minimumCapacity: combined.count)
+    for summary in combined { index[summary.id] = summary }
+    summariesByID = index
+
+    favoritePlaylists = combined.filter { favoriteIDs.contains($0.id) }
+    recentPlaylists = recentIDs.compactMap { index[$0] }
   }
 
   private func handleSelectionChange() {
@@ -464,6 +530,7 @@ final class MusicController {
     } catch {
       storeError = error.localizedDescription
     }
+    rebuildDerivedSummaries()
   }
 
   private func recordRecentlyPlayed(_ id: String, source: PlaylistSourceKind) {
@@ -473,6 +540,7 @@ final class MusicController {
     updated.removeAll { $0 == id }
     updated.insert(id, at: 0)
     recentIDs = Array(updated.prefix(12))
+    rebuildDerivedSummaries()
     Task {
       do {
         try await store.recordRecent(playlistID: id, source: source)
@@ -558,10 +626,32 @@ final class MusicController {
     }
   }
 
-  /// After an app-playlist mutation, drop the stale cached detail and (if
-  /// it's the one on screen) reload it so the track table reflects the edit.
+  /// The single funnel for the membership-mutating app-playlist edits
+  /// (rename / addSongs / removeTracks / setTracks): run the store
+  /// mutation, then **always** re-derive the sidebar collections and
+  /// refresh the on-screen detail. Routing every such edit through here
+  /// makes the "forgot to rebuild after a write" bug class (the Phase-4 UI
+  /// corrective) structurally impossible for these paths instead of a
+  /// per-method discipline — the chokepoint the memory-and-laziness plan
+  /// commits to, made structural. (`create`/`delete`/`reorder` keep their
+  /// own post-mutation bookkeeping: a different shape — selection assign,
+  /// silent clear, or no per-playlist detail — would only be hurt by being
+  /// forced through this funnel.)
+  private func mutateAppPlaylist(
+    _ playlistID: String,
+    _ operation: () async -> Void,
+  ) async {
+    await operation()
+    rebuildDerivedSummaries()
+    refreshSelectedDetailIfNeeded(playlistID)
+  }
+
+  /// After an app-playlist mutation, drop **that playlist's** stale cached
+  /// detail (Phase B targeted invalidation — other cached details stay
+  /// warm) and, if it's the one on screen, reload it so the track table
+  /// reflects the edit.
   private func refreshSelectedDetailIfNeeded(_ playlistID: String) {
-    detailService.invalidate()
+    detailService.invalidate(playlistID: playlistID)
     if selectedPlaylistID == playlistID, let summary = selectedSummary {
       detailService.select(summary)
     }

@@ -5,6 +5,187 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ Cleanup pass (Thomas' Laws): Phase A shipped; B/C logged
+
+Applied the `toms-laws` rubric to the post-residency code. Verdict: the
+codebase is in good shape — only three genuine findings, one worth doing
+now.
+
+- **Phase A — SHIPPED.** Collapsed the duplicated app-playlist mutation
+  ritual into one private chokepoint, `MusicController.mutateAppPlaylist(_:_:)`.
+  `renameAppPlaylist` / `addSongs` / `removeTracks` / `setAppPlaylistTracks`
+  each were `await service.X(); rebuildDerivedSummaries();
+  refreshSelectedDetailIfNeeded(id)` — 4 copies of the same 3-statement
+  ritual where forgetting the rebuild is exactly the Phase-4 "forgot to
+  refresh" bug class. Now each is one `await mutateAppPlaylist(id) { … }`
+  call; the rebuild+refresh is structural for these paths, not a
+  per-method discipline. `create`/`delete`/`reorder` keep their own
+  bespoke post-mutation bookkeeping (genuinely different shapes — forcing
+  them through the funnel would be a Law-13 hybrid). Laws 5/10/11/12.
+  Pure intra-class refactor, behavior identical. **`swift build` clean,
+  82 tests / 17 suites green** (incl. `UIRefreshCorrectionTests`,
+  `AppPlaylistCRUDTests`), `swiftformat --lint` 0/1, `swiftlint` 0
+  violations.
+- **Phases B & C — logged, deferred.** B (extract `LibraryStore`'s
+  chunked multi-row `INSERT` ceremony) and C (hoist `PlaylistSidebarList`
+  filtering out of `body`) recorded in `DESIGN-TODO.md` with their
+  falsifiable freight claims and veto conditions. C is recommended
+  **against** unless the sidebar measurably lags. Three options were
+  explicitly evaluated and decided **against** (per-collection rebuild
+  decomposition now; Environment-injecting `ArtworkProvider.shared`;
+  reopening reactive-store) — rationale in `DESIGN-TODO.md` so they aren't
+  re-proposed without a new trigger.
+
+## 2026-05-16 — ✅ Residency: A+B shipped; C (GRDB observation) reverted
+
+Final state of the `plans/memory-and-laziness.md` work. **A and B are
+kept** (they fully deliver the goal: ruthless residency + spry UI at
+near-zero risk). **Phase C — the GRDB `ValueObservation` reactive store —
+was built, verified green, then reverted** after the user confirmed two
+facts that change the calculus: **multi-source sync will never happen**,
+and **lots of features will be built on this baseline**.
+
+- **Why C was reverted (the freight evaluation).** `ValueObservation`'s
+  defining benefit is propagating writes the app didn't initiate; under a
+  permanent **single writer** that is moot. Its only residual value — the
+  structural "can't forget to refresh" guarantee — is delivered *more
+  cheaply and synchronously* by a **mutation chokepoint**, without
+  observation's async-iterator lifecycle or the startup /
+  `reconcileSelectionAfterImport` / create→select **sequencing races**
+  (the prototype had to paper those over with kept-explicit reads — the
+  tell that pure observation fights the synchronous control flow). The
+  shipped form was also a hybrid (3 tables observed; app-playlists +
+  detail manual; redundant optimistic rebuilds) feeding one
+  `rebuildDerivedSummaries()` God-sink — the worst base for "build lots on
+  top". Net: C carried observation's cost without a benefit that exists
+  here.
+- **Forward pattern (recorded in code + plan).** Single-writer ⇒ freshness
+  is a discipline at the `LibraryStore` mutation chokepoint, not a
+  framework concern: every input mutation re-derives synchronously
+  (zero-latency, race-free). The Phase-4 "forgot to refresh" bug class is
+  prevented by routing all mutation→re-derive through that chokepoint. As
+  features grow, decompose the single all-collections
+  `rebuildDerivedSummaries()` into **per-collection** rebuilds invoked by
+  the specific mutation (the one God-rebuild — not observe-vs-manual — is
+  the real scaling limit). This note lives in the
+  `rebuildDerivedSummaries()` doc-comment so a future agent meets it at
+  the code.
+- **Revert mechanics.** `LibraryReadService` restored to its exact
+  pre-change original (store-backed `load()`); `LibraryStore` `observe*`
+  factories removed (Phase-B `allSongs()` doc kept);
+  `MusicController` observation tasks / `deinit` / `startObservations` /
+  `loadImportedPlaylistsInitial` removed and `startAuthorizedSession` /
+  `runImport` restored to the A/B form; `StoreObservationTests` deleted.
+  Grep confirms no `ValueObservation`/`observe*`/`observationTasks`
+  remnants except the intentional decision note in the doc-comment.
+- **Verification (final A+B baseline):** `swift build` clean; **82 tests
+  / 17 suites** green (78 original + 4 `PlaylistDetailCacheTests`);
+  `swiftformat 0/78`, swiftlint clean. Not committed (on `main`).
+- **Still true from A+B:** Phase A (stored input-driven derived
+  collections + O(1) `summariesByID`; `TrackTableView` sort/filter out of
+  `body` via `PlaylistDetail.revision`) and Phase B (LRU **5**,
+  targeted invalidation via `ImportService.changedPlaylistIDs`,
+  `ArtworkProvider` FIFO 1024, `allSongs()` flagged). Phase D (SQL-side
+  sort/filter + windowed `Table`) still deferred; the huge multi-day
+  playlist is its test case.
+
+## 2026-05-16 — ✅ Residency/laziness Phases A-B-C implemented (C since reverted — see top)
+
+Executed `plans/memory-and-laziness.md` (user picked LRU **5**, scope
+**A→B→C**, Phase D deferred — but the real library's **huge multi-day
+playlist** is now the concrete D trigger, recorded in the plan).
+
+- **A — kill per-`body` recompute (no behavior/schema change).**
+  `MusicController` derived collections (`allSummaries`/`appPlaylists`/
+  `favoritePlaylists`/`recentPlaylists`) are stored, input-driven state
+  via `rebuildDerivedSummaries()` (called only on real input changes, never
+  in `body`); `selectedSummary` + all id lookups go through an O(1)
+  `summariesByID`. `recentPlaylists` is no longer O(recents×allSummaries).
+  `TrackTableView` filter+sort moved out of `body` into `@State
+  displayedTracks`, recomputed only via `onChange(of: detail.revision /
+  trackFilter / sortOrder)`. New monotonic `PlaylistDetail.revision`
+  (minted per produced value in `PlaylistDetailService`) so a same-id
+  stats refresh still re-derives but an unrelated observable tick doesn't.
+- **B — bound residency (no schema change).** New `PlaylistDetailCache`
+  bounded **LRU capacity 5** replaces the unbounded `[String:
+  PlaylistDetail]`; `peek` (recency-neutral, for stats merge) vs
+  `value(forID:)` (a use). Targeted `invalidate(playlistID:)` /
+  `invalidate(playlistIDs:)`; `invalidateAll()` only for forced reimport.
+  `ImportService.changedPlaylistIDs` exposes exactly the re-fetched +
+  pruned playlists so `runImport` invalidates only those — an incremental
+  Refresh that changed nothing keeps the on-screen (multi-day) playlist's
+  cache warm (no cold SQLite re-read). `ArtworkProvider` cache FIFO-capped
+  (1024, positives+negatives). `LibraryStore.allSongs()` doc-flagged as a
+  residency footgun (no caller; must never back a list view).
+- **C — reactive store (no schema change).** Scoped GRDB
+  `ValueObservation` on `apple_playlist` / `favorite_playlist` /
+  `recent_playlist` (each tracks only the table its fetch reads) consumed
+  by `@MainActor` controller tasks (structured concurrency, cancelled in
+  `deinit`); `rebuildDerivedSummaries()` is the sink. `LibraryReadService`
+  is now push-based (`apply(applePlaylists:)`/`fail`, no store dep).
+  Removed the steady-state manual reload choreography; external/background
+  DB changes now propagate with **no explicit reload**.
+  - **Two deliberate scoping boundaries (documented in the plan, not
+    omissions):** app playlists stay on the explicit zero-latency path
+    (create→select→inline-rename needs the new row in `summariesByID`
+    synchronously — observation latency would race it; app playlists are
+    tiny/single-writer so ~no residency gain); per-playlist detail stays
+    lazy + Phase-B-bounded + D4-discrete-refreshed (a detail observation
+    needs risky per-selection re-keying for no residency/correctness
+    gain). Sequencing-critical explicit reads kept on purpose: startup
+    population (so `restoreSelection()` sees summaries) and post-import
+    `loadImportedPlaylistsInitial()` (so the synchronous reconcile sees
+    fresh data); the observation then re-emits idempotently.
+- **Verification:** `swift build` clean; **85 tests / 18 suites** green
+  (+`PlaylistDetailCacheTests` ×4 = LRU bound/eviction/peek-neutral/
+  targeted-invalidate; +`StoreObservationTests` ×3 = external write
+  propagates with no reload, deterministic via stepped async iterator —
+  no sleeps); swiftformat `0/79 require formatting`, swiftlint clean.
+  swiftui-pro consulted (data.md/performance.md): `body` no longer
+  sorts/filters; derived collections are stored/`@State` with **explicit**
+  invalidation; `@Observable @MainActor` preserved; structured concurrency
+  only. **Not committed** (on `main`; no instruction to commit).
+- **Honest read:** A+B fully deliver the user's stated goal (ruthless
+  residency + spry) at near-zero risk. C is the architectural end-state;
+  with a single in-process writer its concrete benefit today is the live
+  projection / external-change propagation / deleted manual-reload churn —
+  modest now, valuable when multi-source sync (schema-doc future) lands.
+  Phase D (SQL-side sort/filter + windowed `Table`) remains deferred; the
+  multi-day playlist is its test case.
+
+## 2026-05-16 — 📋 Residency/laziness plan written (then implemented — see above)
+
+Evaluated the whole codebase against the "SQLite is the fast source of
+truth → keep almost nothing resident, lazy-load, stay spry" goal. Wrote
+`plans/memory-and-laziness.md` (PLAN.md index updated). Findings:
+
+- The app does **not** load the whole library's tracks today — one
+  playlist at a time. The real issues are narrower than "library in
+  memory": (1) `PlaylistDetailService.cache` is **unbounded** with
+  all-or-nothing `invalidate()` — browsing the library accumulates every
+  playlist's `TrackRow`s; (2) `MusicController`'s derived collections
+  (`allSummaries`/`favoritePlaylists`/`recentPlaylists`/`appPlaylists`/
+  `selectedSummary`/`sidebarState`) are **computed properties rebuilt
+  every SwiftUI `body`** — `recentPlaylists` is O(recents×allSummaries),
+  the sidebar does ~5 concats + O(n·m) scans + 4 filters per render;
+  (3) `TrackTableView` sorts/filters the full track array **in `body`**;
+  (4) no `ValueObservation` (manual reload+republish, why the cache is a
+  crutch); (5) latent footgun `LibraryStore.allSongs()` (no app caller).
+- Plan stages it lowest-risk-first: **A** convert per-`body` recompute to
+  input-driven stored `@Observable` state + O(1) id index, move
+  Table sort/filter out of `body` (pure spry win, no behavior/schema
+  change); **B** bounded LRU detail cache + targeted invalidation +
+  `ArtworkProvider` ceiling (bounded residency); **C** scoped GRDB
+  `ValueObservation` replacing the manual reload choreography (freshness
+  without a resident mirror); **D** SQL-side sort/filter + windowed Table
+  — **deferred**, trigger-gated (no >10k-track list / catalog browser).
+- No migration in A–D; all above `LibraryStore`. swiftui-pro consulted
+  (data.md/performance.md): the design respects "`body` is hot" and
+  "cache derived collections only with explicit invalidation".
+- **Open decisions surfaced to the user** (LRU capacity; do C now vs.
+  stop after B; confirm D stays deferred). Awaiting direction before
+  implementing. Nothing built/committed yet.
+
 ## 2026-05-16 — ✅ Incremental import implemented (the only real lever)
 
 Acted on the profiling finding: don't re-fetch tracks for playlists that

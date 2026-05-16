@@ -68,7 +68,7 @@ actor ArtworkProvider {
     inFlight[key] = task
     let resolved = await task.value
     inFlight[key] = nil
-    cache[key] = resolved
+    store(resolved, for: key)
     return resolved
   }
 
@@ -80,10 +80,22 @@ actor ArtworkProvider {
     let kind: Kind
   }
 
+  /// Phase B residency ceiling (`plans/memory-and-laziness.md`): cap the
+  /// process-wide cache (positives **and** negatives) so a marathon scroll
+  /// over a large library can't grow it without bound. `Artwork` is a small
+  /// handle and MusicKit owns the bitmap cache, so the ceiling is generous
+  /// and eviction is plain FIFO — a re-scroll of an evicted old item just
+  /// re-resolves cheaply (MusicKit's own on-disk cache still serves the
+  /// bitmap). Far larger than any on-screen working set, so it never
+  /// evicts something actively visible.
+  private static let cacheCeiling = 1024
+
   /// `.some(nil)` = resolved-but-no-artwork (cache the negative so we don't
   /// re-request a known-artless item every scroll). Absent = never tried.
   private var cache = [Key: Artwork?]()
   private var inFlight = [Key: Task<Artwork?, Never>]()
+  /// Insertion order for the FIFO bound below.
+  private var insertionOrder = [Key]()
 
   /// Re-fetch the owning library item by id and return its `Artwork`.
   /// `MusicLibraryRequest<Song>` is the dev-signed path Phase 1 proved
@@ -113,4 +125,17 @@ actor ArtworkProvider {
       return nil
     }
   }
+
+  /// Insert with the FIFO bound applied. Re-storing an existing key keeps
+  /// its original position (it was already counted) — only genuinely new
+  /// keys grow the cache and can trigger an eviction.
+  private func store(_ artwork: Artwork?, for key: Key) {
+    if cache.index(forKey: key) == nil { insertionOrder.append(key) }
+    cache[key] = artwork
+    while cache.count > Self.cacheCeiling, !insertionOrder.isEmpty {
+      let oldest = insertionOrder.removeFirst()
+      cache[oldest] = nil
+    }
+  }
+
 }

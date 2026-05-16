@@ -171,6 +171,16 @@ struct LibraryStore: Sendable {
     }
   }
 
+  /// Every song in the library, materialized into `[Song]`.
+  ///
+  /// ⚠️ **Residency footgun (Phase B — `plans/memory-and-laziness.md`).**
+  /// This loads the entire `song` table into memory and is deliberately
+  /// **not** used by any view — the app reads one playlist at a time. Do
+  /// **not** back an "All Songs" / catalog list with this: that would
+  /// resurrect exactly the "whole library in memory" problem the residency
+  /// plan removes. A flat song browser must be windowed at the SQL layer
+  /// (keyset / `LIMIT`+`OFFSET`, the deferred Phase D), never this. Kept
+  /// only as a store primitive for tests / small bounded callers.
   func allSongs() async throws -> [Song] {
     try await database.dbQueue.read { db in
       try Song.order(Song.Columns.title).fetchAll(db)

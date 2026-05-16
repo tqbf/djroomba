@@ -10,7 +10,7 @@ struct TrackTableView: View {
   let detail: PlaylistDetail
 
   var body: some View {
-    let tracks = sortedFilteredTracks
+    let tracks = displayedTracks
 
     Group {
       if tracks.isEmpty {
@@ -111,6 +111,17 @@ struct TrackTableView: View {
       }
     }
     .searchable(text: $trackFilter, prompt: "Filter Tracks")
+    // Recompute the filtered+sorted rows OUT of `body` (swiftui-pro:
+    // assume `body` runs often; move sort/filter out). These three
+    // `onChange`es ARE the explicit invalidation for the `@State`-cached
+    // derived collection — it re-derives exactly on a content change
+    // (`detail.revision`, incl. a same-id stats refresh), a filter
+    // keystroke, or a column-header sort, and NOT on an unrelated
+    // observable tick (e.g. the 0.5 s now-playing snapshot). `initial`
+    // on the revision hook seeds the first render.
+    .onChange(of: detail.revision, initial: true) { recomputeDisplayedTracks() }
+    .onChange(of: trackFilter) { recomputeDisplayedTracks() }
+    .onChange(of: sortOrder) { recomputeDisplayedTracks() }
   }
 
   // MARK: Private
@@ -122,23 +133,13 @@ struct TrackTableView: View {
   /// so an unsorted table looks exactly as before; clicking "Plays" /
   /// "Last Played" (or any column header) re-sorts in place.
   @State private var sortOrder = [KeyPathComparator(\TrackRow.position)]
-
-  /// Filtered (⌘F) then sorted by the active column comparator. Sorting in
-  /// memory is fine and fast: the rows are already fully fetched once per
-  /// selection (stats joined in that one query), so a large playlist never
-  /// re-hits SQLite to re-sort.
-  private var sortedFilteredTracks: [TrackRow] {
-    filteredTracks.sorted(using: sortOrder)
-  }
-
-  private var filteredTracks: [TrackRow] {
-    guard !trackFilter.isEmpty else { return detail.tracks }
-    return detail.tracks.filter {
-      $0.title.localizedStandardContains(trackFilter)
-        || $0.artistName.localizedStandardContains(trackFilter)
-        || ($0.albumTitle?.localizedStandardContains(trackFilter) ?? false)
-    }
-  }
+  /// The rendered rows: `detail.tracks` filtered (⌘F) then sorted by the
+  /// active column comparator. `@State`-cached and recomputed only by the
+  /// `onChange` hooks above — never in `body`. Sorting in memory stays
+  /// fine for normal playlists (rows are fetched once per selection, stats
+  /// joined in that one query, so no SQLite re-hit to re-sort); a single
+  /// genuinely huge playlist is the deferred Phase-D (SQL-side) case.
+  @State private var displayedTracks = [TrackRow]()
 
   /// "Last Played" cell text. Relative ("2 days ago") for played songs,
   /// an em-dash for never-played — matching the table's "—" nil idiom.
@@ -146,4 +147,19 @@ struct TrackTableView: View {
     guard let date else { return "—" }
     return date.formatted(.relative(presentation: .named))
   }
+
+  private func recomputeDisplayedTracks() {
+    let filtered: [TrackRow] =
+      if trackFilter.isEmpty {
+        detail.tracks
+      } else {
+        detail.tracks.filter {
+          $0.title.localizedStandardContains(trackFilter)
+            || $0.artistName.localizedStandardContains(trackFilter)
+            || ($0.albumTitle?.localizedStandardContains(trackFilter) ?? false)
+        }
+      }
+    displayedTracks = filtered.sorted(using: sortOrder)
+  }
+
 }
