@@ -19,9 +19,13 @@ struct MigrationTests {
   }
 
   @Test
-  func `migrator registers V 1 then V 2 in order`() {
+  func `migrator registers migrations in order`() {
     let applied = LibraryMigrator.migrator.migrations
-    #expect(applied == ["v1.initialSchema", "v2.applePlaylistChangeToken"])
+    #expect(applied == [
+      "v1.initialSchema",
+      "v2.applePlaylistChangeToken",
+      "v3.playStatistics",
+    ])
   }
 
   @Test
@@ -57,7 +61,11 @@ struct MigrationTests {
     let songExists = try second.dbQueue.read { db in
       try db.tableExists("song")
     }
-    #expect(appliedAfterFirst == ["v1.initialSchema", "v2.applePlaylistChangeToken"])
+    #expect(appliedAfterFirst == [
+      "v1.initialSchema",
+      "v2.applePlaylistChangeToken",
+      "v3.playStatistics",
+    ])
     #expect(appliedAfterSecond == appliedAfterFirst)
     #expect(songExists)
   }
@@ -96,7 +104,7 @@ struct MigrationTests {
     "apple_playlist_track",
     "app_playlist",
     "app_playlist_track",
-    "play_event",
+    "play_history",
     "song_stat",
     "favorite_playlist",
     "recent_playlist",

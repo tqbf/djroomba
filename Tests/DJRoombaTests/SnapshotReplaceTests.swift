@@ -52,8 +52,8 @@ struct SnapshotReplaceTests {
     // song_stat untouched.
     let stat = try await store.songStat(songID: "s1")
     #expect(stat?.playCount == 1)
-    // play_event untouched.
-    #expect(try await store.playEventCount(songID: "s1") == 1)
+    // play_history untouched (only s1 was recorded).
+    #expect(try await store.recentlyPlayedSongIDs() == ["s1"])
   }
 
   @Test

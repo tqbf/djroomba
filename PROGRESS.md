@@ -5,6 +5,64 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ Play statistics Phase 1 (v3 schema + store API)
+
+Executed `plans/play-statistics.md` **Phase 1** (the durable spine; no
+playback behavior change — recording-only foundation for Phases 2–4).
+
+- **Migration `v3.playStatistics`** (appended below v2; v1/v2 frozen,
+  `eraseDatabaseOnSchemaChange` still false; idempotent). Four
+  coordinated changes: (a) `song.local_id` added nullable →
+  backfilled dense 1-based in `(imported_at, id)` order → `UNIQUE`
+  index; (b) `play_history` (`seq INTEGER PK AUTOINCREMENT`,
+  `song_local_id` FK→`song(local_id)` `ON DELETE RESTRICT`) — the
+  user's bounded numeric "vector"; (c) `song_stat.skip_count` /
+  `replay_count` (`NOT NULL DEFAULT 0`); (d) **`play_event` DROPped**
+  (verified consumer-less; last unbounded table gone). Cleanup pass
+  added a **partial index** `idx_song_unassigned_local_id … WHERE
+  local_id IS NULL` so the new-row allocator is skipped at O(1) on a
+  no-op incremental re-import (the path commit `11bcaf4` optimizes).
+- **Records:** `Song.localID` (read-authoritative, write-ignored —
+  contract is comment-enforced, documented as such); `SongStat`
+  skip/replay counters; new `PlayHistoryEntry`; `PlayEvent.swift`
+  deleted.
+- **`LibraryStore`:** `playHistoryCap = 50_000` (R9, one tunable);
+  `upsertSongs` assigns `local_id` for new rows only inside the existing
+  upsert txn (existing rows keep theirs — same non-destructive
+  re-import guarantee as the stable `id`); `recordPlay` rewritten (one
+  txn: resolve `local_id` → typed `RecordPlayError.unknownSong` aborts
+  ghost plays leaving `song_stat` unchanged → roll `song_stat` → append
+  `play_history` → keyset prune `WHERE seq <= MAX(seq) - cap`);
+  `recordSkip`/`recordReplay` are thin wrappers over one private
+  `bumpStatCounter` key-path helper (R4: never touch `play_history`);
+  `recentlyPlayedSongLocalIDs`/`…SongIDs` (newest-first, dupes kept);
+  `playEventCount` removed.
+- **Canonical-key discipline (architecture principle):** Phase 1 keys
+  only on `song.id` / `song.local_id`; no Apple id anywhere on this path.
+- **Cleanup gate (R6):** `simplify` three-agent pass (reuse/quality/
+  efficiency — covers the Thomas'-Laws surface) found and fixed: the
+  duplicated skip/replay block (→ shared helper), a doc-comment that
+  misstated the ghost-song error mechanism (now accurate: counter paths
+  FK-trip a raw `DatabaseError`, only `recordPlay` raises the typed
+  error), the unconditional allocator scan (→ partial index + EXISTS
+  early-out), over-long comments trimmed. `recentlyPlayed*` default left
+  at `playHistoryCap` (decision-locked R3/R9, bounded, no callers yet —
+  not a defect). swiftui-pro: no SwiftUI/Observation touched (N/A).
+- **Verify:** `swift build` clean; **90 tests / 18 suites** green
+  (baseline 82/17 + new `PlayStatisticsTests` incl. v3 non-destructive
+  backfill on a real v2 DB via `migrate(…, upTo: "v2…")`, exact-cap
+  prune, counter isolation, `local_id` stability across re-import;
+  3 tests migrated off `playEventCount`); `swiftformat` 0/80,
+  `swiftlint` 0 violations.
+- **Known precision note (carried):** the `MAX(local_id)+1` allocator
+  is over *live* rows, so a never-referenced number *could* recur if its
+  song were deleted before being observed; songs are never deleted in
+  the app and any played/listed song is FK-RESTRICTed, so an observable
+  `local_id` can't recur. `Song.localID` doc states this exactly (the
+  unqualified "never recycled" was tightened).
+- **Not signed-gated** (pure SQLite, unit-tested — plan: Phase 1 no
+  gate). Phases 2–4 follow.
+
 ## 2026-05-16 — ✅ App icon (native macOS treatment)
 
 `djroomba.png` (1254² pixel-art DJ-Roomba on an off-white field) turned

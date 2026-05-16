@@ -61,7 +61,7 @@ struct AppPlaylistCRUDTests {
     #expect(try await store.songCount() == 2)
     // Play history survives (a song outlives playlist membership).
     #expect(try await store.songStat(songID: "s1")?.playCount == 1)
-    #expect(try await store.playEventCount(songID: "s1") == 1)
+    #expect(try await store.recentlyPlayedSongIDs() == ["s1"])
   }
 
   @Test
@@ -167,7 +167,7 @@ struct AppPlaylistCRUDTests {
     // Songs / stats / history untouched.
     #expect(try await store.songCount() == 3)
     #expect(try await store.songStat(songID: "s1")?.playCount == 1)
-    #expect(try await store.playEventCount(songID: "s1") == 1)
+    #expect(try await store.recentlyPlayedSongIDs() == ["s1"])
   }
 
   @Test

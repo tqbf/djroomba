@@ -32,6 +32,7 @@ struct Song: Codable, Identifiable, Hashable, Sendable {
   /// renames a shipped column.
   enum CodingKeys: String, CodingKey {
     case id
+    case localID = "local_id"
     case musicItemID = "music_item_id"
     case idNamespace = "id_namespace"
     case title
@@ -45,6 +46,27 @@ struct Song: Codable, Identifiable, Hashable, Sendable {
 
   /// App-stable identity (UUID string). Primary key.
   var id: String
+  /// The durable canonical numeric song id (`v3`; see
+  /// plans/play-statistics.md "Two identities"). `id` stays the relational
+  /// key; `localID` is the compact stable handle alongside it.
+  ///
+  /// **Read-authoritative, never written from this struct:** the contract
+  /// is comment-enforced, not type-enforced. `LibraryStore.upsertSongs`
+  /// assigns it inside the upsert transaction; the upsert SQL omits
+  /// `local_id` so a re-import keeps each existing row's value, and no
+  /// other persist path writes it. The `= 0` default is an
+  /// always-overwritten sentinel (decoding always reads a real value — the
+  /// column is populated post-migration / post-upsert); a future
+  /// `try song.save(db)` through GRDB's record API would wrongly persist
+  /// it and is the thing to watch.
+  ///
+  /// Contract: assigned at import, monotonic, stable across re-import,
+  /// never the rowid, never an Apple id. The allocator is `MAX(local_id)+1`
+  /// over live rows, so a value is never recycled while its song exists —
+  /// and any song ever played or placed in a playlist is FK-RESTRICTed
+  /// against deletion (`play_history` / `*_playlist_track`), so a
+  /// `local_id` that could ever have been observed/stored can't recur.
+  var localID = 0
   /// `MusicItemID.rawValue` as imported from MusicKit.
   var musicItemID: String
   /// Which MusicKit id space `musicItemID` belongs to.
@@ -67,6 +89,7 @@ struct Song: Codable, Identifiable, Hashable, Sendable {
 extension Song: FetchableRecord, MutablePersistableRecord {
   enum Columns {
     static let id = Column(CodingKeys.id)
+    static let localID = Column(CodingKeys.localID)
     static let musicItemID = Column(CodingKeys.musicItemID)
     static let idNamespace = Column(CodingKeys.idNamespace)
     static let title = Column(CodingKeys.title)

@@ -21,7 +21,12 @@ import GRDB
 /// │ 4. Foreign keys are enforced (see AppDatabase). Ownership cascades  │
 /// │    are deliberate (documented per table below). Deleting a `song`   │
 /// │    is RESTRICTed while play history / playlist membership exists —  │
-/// │    listening history must never be silently destroyed.              │
+/// │    listening history must never be silently destroyed. As of `v3`   │
+/// │    `play_history` (FK on `song(local_id)` ON DELETE RESTRICT) is    │
+/// │    the only history of record; `play_event` was dropped (it had no  │
+/// │    consumer and was the last unbounded table). The                  │
+/// │    delete-RESTRICT-protects-history invariant is preserved by       │
+/// │    `play_history`'s FK.                                              │
 /// │                                                                     │
 /// │ 5. This is a standalone static value with no app/MusicKit deps so   │
 /// │    migration tests don't need the app to run.                       │
@@ -198,6 +203,82 @@ enum LibraryMigrator {
       try db.alter(table: "apple_playlist") { t in
         t.add(column: "change_token", .integer)
       }
+    }
+
+    // v3: play statistics — a canonical numeric song id, a bounded
+    // newest-first play history, skip/replay counters, and the removal of
+    // the consumer-less unbounded `play_event` log. Four coordinated
+    // changes (see plans/play-statistics.md "migration v3"); each is
+    // defaulted/backfilled so an existing v2 DB migrates non-destructively.
+    migrator.registerMigration("v3.playStatistics") { db in
+      // (a) song.local_id — a first-class canonical numeric song id
+      // (assigned at import, monotonic, never recycled, stable across
+      // re-import, never the rowid / an Apple id). Added nullable: SQLite
+      // can't ADD a NOT NULL column without a constant default, and
+      // local_id is per-row, not constant. Existing rows are then
+      // backfilled with a dense 1-based id in the deterministic
+      // (imported_at, id) order before the UNIQUE index is created.
+      try db.alter(table: "song") { t in
+        t.add(column: "local_id", .integer)
+      }
+      try db.execute(sql: """
+        UPDATE song SET local_id = ordered.rn
+        FROM (
+          SELECT id, ROW_NUMBER() OVER (ORDER BY imported_at, id) AS rn
+          FROM song
+        ) AS ordered
+        WHERE song.id = ordered.id
+        """)
+      // UNIQUE so play_history.song_local_id can FK-reference it. (A
+      // SQLite UNIQUE index permits multiple NULLs; app logic guarantees
+      // no NULL local_id persists past an upsert.)
+      try db.create(
+        index: "idx_song_local_id",
+        on: "song",
+        columns: ["local_id"],
+        unique: true,
+      )
+      // Partial index over only the transiently-unassigned rows (normally
+      // none — a freshly inserted song carries local_id NULL only until
+      // the same upsert transaction's allocator runs). It makes
+      // `upsertSongs`' "are there new rows?" probe and the allocator's
+      // `WHERE local_id IS NULL` an O(1) empty-index scan, so a no-op
+      // incremental re-import does no allocator work at all.
+      try db.execute(sql: """
+        CREATE INDEX idx_song_unassigned_local_id
+        ON song(id) WHERE local_id IS NULL
+        """)
+
+      // (b) play_history — the user's "vector": a bounded, newest-first
+      // sequence of the numeric song id. `seq` is AUTOINCREMENT so it is
+      // strictly monotonic and never reused (the cap-prune keyset
+      // `DELETE WHERE seq <= MAX(seq) - :cap` depends on that). FK on
+      // song(local_id) ON DELETE RESTRICT preserves the "history is never
+      // silently destroyed" invariant the dropped play_event carried.
+      // Written via raw SQL because the FK target is a non-PK UNIQUE
+      // column, which GRDB's `references` doesn't model cleanly.
+      try db.execute(sql: """
+        CREATE TABLE play_history (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          song_local_id INTEGER NOT NULL
+            REFERENCES song(local_id) ON DELETE RESTRICT
+        )
+        """)
+
+      // (c) song_stat — the per-song rollup also carries skip/replay
+      // counts now (maintained in-app in the same write as the play, like
+      // play_count; not derived from any event log).
+      try db.alter(table: "song_stat") { t in
+        t.add(column: "skip_count", .integer).notNull().defaults(to: 0)
+        t.add(column: "replay_count", .integer).notNull().defaults(to: 0)
+      }
+
+      // (d) DROP play_event — verified consumer-less (read only by
+      // `playEventCount`, which had zero app callers). `song_stat` was
+      // always maintained independently, never derived from play_event,
+      // so removing it changes no behaviour; `play_history` is now the
+      // only history of record. Dropping the table drops its index.
+      try db.drop(table: "play_event")
     }
 
     return migrator

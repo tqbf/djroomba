@@ -35,6 +35,13 @@ struct LibraryStore: Sendable {
 
   // MARK: Internal
 
+  /// Recording a play for a song that isn't in the library is a caller
+  /// bug (the canonical `local_id` can't be resolved); it aborts the whole
+  /// `recordPlay` transaction so `song_stat` stays unchanged.
+  enum RecordPlayError: Error, Equatable {
+    case unknownSong(String)
+  }
+
   /// Import key, mirrors the DB's `UNIQUE(music_item_id, id_namespace)`.
   struct SongKey: Hashable, Sendable {
     let musicItemID: String
@@ -51,6 +58,14 @@ struct LibraryStore: Sendable {
     var lastPlayedAt: Date?
   }
 
+  /// The bounded "last N played" cap (Decision R9, `v3`): `play_history`
+  /// keeps at most this many newest rows; `recordPlay` prunes the rest in
+  /// the same transaction. It IS the user's original "remember the last
+  /// 50,000 songs played" — a single tunable constant (changing N is one
+  /// line). Lifetime `song_stat.play_count` is an independent rollup, so
+  /// capping history never corrupts true play counts (Decision R5).
+  static let playHistoryCap = 50_000
+
   /// Insert-or-update songs in a SINGLE transaction using a real SQLite
   /// UPSERT, deduped on `(music_item_id, id_namespace)`.
   ///
@@ -65,6 +80,11 @@ struct LibraryStore: Sendable {
   /// `INSERT … VALUES (…),(…),… ON CONFLICT(music_item_id, id_namespace)
   /// DO UPDATE SET col = excluded.col …`, all inside one `write`
   /// transaction. No per-row `SELECT`+`update`/`insert`.
+  ///
+  /// `v3` canonical numeric id: the UPSERT omits `local_id`, so an
+  /// existing row keeps its assigned id (same non-destructive re-import
+  /// guarantee as the stable `id`); genuinely-new rows are assigned after
+  /// the chunk loop (see the inline allocator comment).
   func upsertSongs(_ songs: [Song]) async throws {
     guard !songs.isEmpty else { return }
     // 10 columns/row → keep chunks comfortably under the 999-variable cap.
@@ -107,6 +127,28 @@ struct LibraryStore: Sendable {
         }
         try db.execute(sql: sql, arguments: StatementArguments(arguments))
       }
+
+      // Assign local_id to genuinely-new rows only. Existing rows keep
+      // theirs (the UPSERT never wrote local_id). Skip the allocator
+      // entirely on a no-op / fully-incremental re-import that added no
+      // new rows — the idx_song_unassigned_local_id partial index makes
+      // this probe an O(1) empty-index scan, so the common Refresh case
+      // does zero allocator work (mirrors pruneApplePlaylists' early-out).
+      let hasNewRows = try Bool.fetchOne(
+        db,
+        sql: "SELECT EXISTS(SELECT 1 FROM song WHERE local_id IS NULL)",
+      ) ?? false
+      guard hasNewRows else { return }
+      // Dense MAX+1, +2, … in (imported_at, id) order — deterministic
+      // and, being in this single serialized write transaction, race-free
+      // (same idiom as app_playlist.sort_index's MAX+1).
+      try db.execute(sql: """
+        UPDATE song SET local_id = base.m + sub.rn
+        FROM (SELECT IFNULL(MAX(local_id), 0) AS m FROM song) AS base,
+             (SELECT id, ROW_NUMBER() OVER (ORDER BY imported_at, id) AS rn
+              FROM song WHERE local_id IS NULL) AS sub
+        WHERE song.id = sub.id
+        """)
     }
   }
 
@@ -198,7 +240,7 @@ struct LibraryStore: Sendable {
   /// membership — all in a single transaction. `songIDs` must already
   /// exist (call `upsertSongs` first in the SAME import flow).
   ///
-  /// Guaranteed NOT to touch `app_playlist*`, `song_stat`, `play_event`,
+  /// Guaranteed NOT to touch `app_playlist*`, `song_stat`, `play_history`,
   /// favorites or recents: this only writes `apple_playlist` and
   /// `apple_playlist_track`. (Verified by test.)
   func replaceApplePlaylistSnapshot(
@@ -282,7 +324,7 @@ struct LibraryStore: Sendable {
   /// Delete Apple-playlist snapshots whose upstream playlist no longer
   /// exists (gone from the library since the last import). FK cascade
   /// drops only their `apple_playlist_track` membership; by schema this
-  /// can never touch `app_playlist*`, `song`, `song_stat`, `play_event`,
+  /// can never touch `app_playlist*`, `song`, `song_stat`, `play_history`,
   /// favorites or recents — the one-way isolation invariant holds. A
   /// no-op when nothing vanished.
   func pruneApplePlaylists(keeping liveIDs: Set<String>) async throws {
@@ -399,7 +441,7 @@ struct LibraryStore: Sendable {
 
   /// Delete a user-owned playlist. Its `app_playlist_track` membership
   /// cascades (v1 schema FK `ON DELETE CASCADE`); `song`/`song_stat`/
-  /// `play_event` are untouched (a song outlives playlist membership).
+  /// `play_history` are untouched (a song outlives playlist membership).
   func deleteAppPlaylist(_ playlistID: String) async throws {
     try await database.dbQueue.write { db in
       _ = try AppPlaylist.deleteOne(db, key: playlistID)
@@ -585,15 +627,33 @@ struct LibraryStore: Sendable {
     try await songsWithStats(joining: "app_playlist_track", playlistColumn: "app_playlist_id", playlistID)
   }
 
-  /// Record that `songID` started playing at `playedAt`, and roll the
-  /// stat forward — both in ONE transaction so `song_stat` can never drift
-  /// from `play_event`. `song_stat` is upserted (created at count 1 on the
-  /// first play, incremented thereafter); `last_played_at` only advances
-  /// (a backfilled older event won't move it backwards).
+  /// Record that `songID` started playing at `playedAt`. ONE transaction:
+  /// resolve the song's canonical `local_id`, roll `song_stat` forward,
+  /// append a `play_history` row, then prune history beyond
+  /// `playHistoryCap`.
+  ///
+  /// A play for a song not in the library aborts the whole transaction
+  /// (the `local_id` lookup throws), so `song_stat` stays unchanged —
+  /// preserving the "play for a missing song is rejected and stat
+  /// unchanged" guarantee the old `play_event` FK RESTRICT gave.
+  /// `song_stat` is upserted (created at count 1 on the first play,
+  /// incremented thereafter); `last_played_at` only advances (a backfilled
+  /// older play won't move it backwards). `play_history` is the bounded
+  /// "last N played"; pruning is a cheap keyset
+  /// (`DELETE WHERE seq <= MAX(seq) - cap`) in the same write, so history
+  /// can never grow past the cap while `song_stat.play_count` keeps the
+  /// true lifetime count (the two are independent — Decision R5).
   func recordPlay(songID: String, at playedAt: Date = .now) async throws {
     try await database.dbQueue.write { db in
-      var event = PlayEvent(id: nil, songID: songID, playedAt: playedAt)
-      try event.insert(db)
+      guard
+        let localID = try Int.fetchOne(
+          db,
+          sql: "SELECT local_id FROM song WHERE id = ?",
+          arguments: [songID],
+        )
+      else {
+        throw RecordPlayError.unknownSong(songID)
+      }
 
       if var stat = try SongStat.fetchOne(db, key: songID) {
         stat.playCount += 1
@@ -611,6 +671,45 @@ struct LibraryStore: Sendable {
         )
         try stat.insert(db)
       }
+
+      var entry = PlayHistoryEntry(seq: nil, songLocalID: localID)
+      try entry.insert(db)
+
+      try db.execute(
+        sql: """
+          DELETE FROM play_history
+          WHERE seq <= (SELECT MAX(seq) FROM play_history) - ?
+          """,
+        arguments: [Self.playHistoryCap],
+      )
+    }
+  }
+
+  /// Increment `song_stat.skip_count` for `songID` ("next" pressed before
+  /// halfway). Upsert-or-insert (new row → `skip_count 1`, everything else
+  /// at its default). **Never touches `play_history`** — a skip is not a
+  /// play (Decision R4).
+  ///
+  /// A skip for a song not in the library throws: the `song_stat`→`song`
+  /// FK trips on the insert (a raw GRDB `DatabaseError`, *not*
+  /// `RecordPlayError`). This deliberately differs from `recordPlay`,
+  /// which must resolve `local_id` for the history append anyway and so
+  /// can raise a typed error for free — the counter-only paths skip that
+  /// lookup and let the FK enforce the identical precondition.
+  func recordSkip(songID: String) async throws {
+    try await database.dbQueue.write { db in
+      try Self.bumpStatCounter(db, songID: songID, \.skipCount)
+    }
+  }
+
+  /// Increment `song_stat.replay_count` for `songID` ("back" pressed after
+  /// halfway). Upsert-or-insert (new row → `replay_count 1`, everything
+  /// else at its default). **Never touches `play_history`** — a replay is
+  /// not a new history entry (Decision R4). Unknown-song behavior is the
+  /// same FK-enforced `DatabaseError` as `recordSkip`.
+  func recordReplay(songID: String) async throws {
+    try await database.dbQueue.write { db in
+      try Self.bumpStatCounter(db, songID: songID, \.replayCount)
     }
   }
 
@@ -620,11 +719,37 @@ struct LibraryStore: Sendable {
     }
   }
 
-  func playEventCount(songID: String) async throws -> Int {
+  /// The bounded play history as the user's compact numeric vector:
+  /// `song.local_id`s, newest first, duplicates preserved. Defaults to the
+  /// whole capped history.
+  func recentlyPlayedSongLocalIDs(limit: Int = playHistoryCap) async throws -> [Int] {
     try await database.dbQueue.read { db in
-      try PlayEvent
-        .filter(PlayEvent.Columns.songID == songID)
-        .fetchCount(db)
+      try Int.fetchAll(
+        db,
+        sql: """
+          SELECT song_local_id FROM play_history
+          ORDER BY seq DESC LIMIT ?
+          """,
+        arguments: [limit],
+      )
+    }
+  }
+
+  /// Convenience for callers that need the relational `song.id`: the same
+  /// newest-first history joined to `song`, duplicates and order preserved.
+  func recentlyPlayedSongIDs(limit: Int = playHistoryCap) async throws -> [String] {
+    try await database.dbQueue.read { db in
+      try String.fetchAll(
+        db,
+        sql: """
+          SELECT s.id
+          FROM play_history h
+          JOIN song s ON s.local_id = h.song_local_id
+          ORDER BY h.seq DESC
+          LIMIT ?
+          """,
+        arguments: [limit],
+      )
     }
   }
 
@@ -679,6 +804,27 @@ struct LibraryStore: Sendable {
   private static let sqliteVariableLimit = 999
 
   private let database: AppDatabase
+
+  /// Upsert-or-insert `song_stat` for `songID`, incrementing the single
+  /// `Int` column at `counter` by one (a new row starts that counter at 1,
+  /// every other column at its struct default). The mechanically-identical
+  /// bump behind `recordSkip` / `recordReplay` — only the key path
+  /// differs, so they stay one-liners instead of duplicated blocks. Runs
+  /// in the caller's write transaction; never touches `play_history` (R4).
+  private static func bumpStatCounter(
+    _ db: Database,
+    songID: String,
+    _ counter: WritableKeyPath<SongStat, Int>,
+  ) throws {
+    if var stat = try SongStat.fetchOne(db, key: songID) {
+      stat[keyPath: counter] += 1
+      try stat.update(db)
+    } else {
+      var stat = SongStat(songID: songID, playCount: 0, lastPlayedAt: nil)
+      stat[keyPath: counter] = 1
+      try stat.insert(db)
+    }
+  }
 
   /// Compact an app playlist's positions to 0..<count in current order.
   /// Called after a delete so the composite PK never has gaps. Reads the

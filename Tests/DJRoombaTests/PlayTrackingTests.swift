@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import DJRoomba
 
-/// `recordPlay` appends a `play_event` and keeps `song_stat`
+/// `recordPlay` appends a `play_history` row and keeps `song_stat`
 /// (play_count / last_played_at) consistent in the same transaction.
 struct PlayTrackingTests {
   @Test
@@ -16,7 +16,7 @@ struct PlayTrackingTests {
     let stat = try await store.songStat(songID: "s")
     #expect(stat?.playCount == 1)
     #expect(TestSupport.datesMatch(stat?.lastPlayedAt, t0))
-    #expect(try await store.playEventCount(songID: "s") == 1)
+    #expect(try await store.recentlyPlayedSongIDs() == ["s"])
   }
 
   @Test
@@ -32,7 +32,8 @@ struct PlayTrackingTests {
     let stat = try await store.songStat(songID: "s")
     #expect(stat?.playCount == 2)
     #expect(stat?.lastPlayedAt == t2)
-    #expect(try await store.playEventCount(songID: "s") == 2)
+    // Two plays → two newest-first history rows (repeats allowed).
+    #expect(try await store.recentlyPlayedSongIDs() == ["s", "s"])
   }
 
   @Test
@@ -48,17 +49,19 @@ struct PlayTrackingTests {
     let stat = try await store.songStat(songID: "s")
     #expect(stat?.playCount == 2)
     #expect(stat?.lastPlayedAt == recent, "last_played_at must only advance")
+    // Both plays still appended (recency only gates last_played_at).
+    #expect(try await store.recentlyPlayedSongIDs() == ["s", "s"])
   }
 
   @Test
-  func `play event for missing song is rejected and stat unchanged`() async throws {
+  func `play for missing song is rejected and stat unchanged`() async throws {
     let store = try TestSupport.freshStore()
-    // No song inserted → FK RESTRICT on play_event.song_id must throw,
-    // and the whole transaction (incl. song_stat) must roll back.
+    // No song inserted → the local_id lookup fails and the whole
+    // transaction (incl. song_stat) must roll back, leaving no history.
     await #expect(throws: (any Error).self) {
       try await store.recordPlay(songID: "ghost", at: .now)
     }
     #expect(try await store.songStat(songID: "ghost") == nil)
-    #expect(try await store.playEventCount(songID: "ghost") == 0)
+    #expect(try await store.recentlyPlayedSongIDs().isEmpty)
   }
 }

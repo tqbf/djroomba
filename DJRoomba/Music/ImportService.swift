@@ -4,7 +4,7 @@ import Observation
 
 /// One-way import: MusicKit library → SQLite. Apple Music is strictly a read
 /// source here; this **never** deletes or mutates app-owned data
-/// (`app_playlist*`, `song_stat`, `play_event`, favorites, recents) — it only
+/// (`app_playlist*`, `song_stat`, `play_history`, favorites, recents) — it only
 /// upserts songs and replaces `apple_playlist` snapshots transactionally via
 /// `LibraryStore` (which itself guarantees the isolation; verified by test).
 ///

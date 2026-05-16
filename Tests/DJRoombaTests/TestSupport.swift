@@ -8,6 +8,14 @@ enum TestSupport {
     LibraryStore(database: try AppDatabase())
   }
 
+  /// A fresh store plus the `AppDatabase` backing it, for the few tests
+  /// that must reach raw SQL / the migrator (schema-level assertions).
+  /// Keeps that need test-side instead of adding production API.
+  static func freshStoreWithDatabase() throws -> (store: LibraryStore, database: AppDatabase) {
+    let database = try AppDatabase()
+    return (LibraryStore(database: database), database)
+  }
+
   /// GRDB stores dates as text with millisecond precision, so a
   /// round-tripped `Date.now` differs from the original in the sub-ms
   /// digits. Compare stored timestamps with a tolerance.
