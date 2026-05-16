@@ -29,6 +29,7 @@ final class MusicController {
     library = LibraryReadService(store: safeStore)
     appPlaylistService = AppPlaylistService(store: safeStore)
     detailService = PlaylistDetailService(store: safeStore)
+    recentlyPlayed = RecentlyPlayedService(store: safeStore)
     importService = ImportService(store: safeStore)
     resolver = PlaybackResolver()
     if openedStore == nil {
@@ -46,6 +47,9 @@ final class MusicController {
   let library: LibraryReadService
   let appPlaylistService: AppPlaylistService
   let detailService: PlaylistDetailService
+  /// The "Recently Played" landing surface's view-model (shown when no
+  /// playlist is selected). Reads the keyset-paginated distinct history.
+  let recentlyPlayed: RecentlyPlayedService
   let importService: ImportService
   let resolver: PlaybackResolver
 
@@ -251,6 +255,22 @@ final class MusicController {
     reconcileSelectionAfterImport()
   }
 
+  /// Debug menu action: seed `count` synthetic plays drawn at random from
+  /// the user's playlist songs, then re-show the Recently Played surface so
+  /// the result is immediately visible. Fire-and-forget-safe: a store
+  /// failure sets `storeError` (matching the codebase) and never crashes.
+  /// No `#if DEBUG` gate — the user's normal `make` build is debug-config
+  /// and the button is wanted (it is clearly labelled under "Debug").
+  func seedSyntheticHistory(count: Int) async {
+    guard let store else { return }
+    do {
+      try await store.seedRandomPlayHistory(count: count)
+      recentlyPlayed.reload()
+    } catch {
+      storeError = error.localizedDescription
+    }
+  }
+
   func isFavorite(_ summary: PlaylistSummary) -> Bool {
     favoriteIDs.contains(summary.id)
   }
@@ -395,6 +415,39 @@ final class MusicController {
 
     case .skipPrevious:
       await skipPrevious()
+    }
+  }
+
+  /// Play an arbitrary set of stored songs the user picked from the
+  /// **"Recently Played"** list. Reuses the **app-playlist resolution
+  /// path** (`resolveAppPlaylist` — arbitrary stored songs by id, the
+  /// verified per-id `equalTo` round trip) and the same shared queue-start
+  /// helper as `resolveAndPlay`'s app branch, so the load-bearing ordering
+  /// invariant and the Phase-2/4 context+watermark seeding are *not*
+  /// duplicated. The loaded `recentlyPlayed.rows` are the queue context so
+  /// Next/Prev walk the list. The started track is fed to stats via the
+  /// same `recordPlay` path (dogfooding: listening from here also counts).
+  /// "Recently Played" is not a playlist, so there is no `recordRecent`
+  /// (playlist-recents) bump.
+  func playRecentlyPlayed(startAt row: TrackRow) async {
+    let queueRows = recentlyPlayed.rows
+    guard !queueRows.isEmpty else { return }
+    let resolution = await resolver.resolveAppPlaylist(
+      rows: queueRows,
+      startAt: row,
+    )
+    let didStart = await startResolvedQueue(
+      resolution,
+      // No backing playlist — the queue context id is nil, exactly as a
+      // bare song selection. Stats attribution stays the Phase-2
+      // structural-position path (never an Apple id).
+      contextID: nil,
+      beforePlay: nil,
+    )
+    if didStart, let resolution {
+      await recordPlayStart(
+        startedSongID: resolution.startSongID ?? row.songID
+      )
     }
   }
 
@@ -777,13 +830,64 @@ final class MusicController {
           startAt: startRow,
         )
       }
+
+    // The canonical-context set, the synchronous recents bump, and the
+    // queue swap are the invariant-sensitive sequence — run them through
+    // the single shared helper so the ordering window exists in exactly
+    // one place. The recents bump is synchronous and runs *inside* that
+    // window via the helper's `beforePlay` hook.
+    let didStart = await startResolvedQueue(
+      resolution,
+      contextID: detail.id,
+      beforePlay: { [self] in
+        recordRecentlyPlayed(detail.id, source: detail.isAppOwned ? .app : .apple)
+      },
+    )
+
+    // Record the play ONLY on a confirmed start, for the track that
+    // actually started. `recordPlay` maintains song_stat in the same
+    // transaction (Phase 2 machinery).
+    if didStart, let resolution {
+      await recordPlayStart(for: resolution, detail: detail, startRow: startRow)
+    }
+  }
+
+  /// The single invariant-sensitive queue-start sequence, shared by
+  /// `resolveAndPlay` (app + Apple branches) and `playRecentlyPlayed`. A
+  /// `nil` resolution clears the canonical context and returns `false`
+  /// (no queue set). Otherwise it sets the Phase-2 canonical context +
+  /// seeds the Phase-4 watermark **atomically**, runs the synchronous
+  /// `beforePlay` side effect (if any), then swaps the player queue —
+  /// returning whether playback confirmed.
+  ///
+  /// LOAD-BEARING ORDERING INVARIANT (the reason this is ONE helper, not
+  /// duplicated at each call site): there must be NO `await` suspension
+  /// between the `activePlayContext` assignment below and `player.queue`
+  /// being swapped to the new songs (synchronous, inside
+  /// `PlaybackService.setQueueAndPlay` before its first `await`).
+  /// `beforePlay` is a **synchronous** `@MainActor` closure and
+  /// `await playback.play(...)` runs synchronously until
+  /// `try await player.play()` — which is *after* `player.queue` is set.
+  /// On the single-threaded MainActor that guarantees a 0.5 s monitor tick
+  /// can only ever observe (old context, old queue) — during the resolve
+  /// `await` at the call site, correctly attributing the prior queue the
+  /// user is still hearing — or (new context, new queue), never a (new
+  /// context, old queue) mix that would misattribute / double-count. Do
+  /// NOT insert an `await`, nor make `beforePlay` async, between the
+  /// assignment and `playback.play` without re-establishing this invariant
+  /// another way.
+  private func startResolvedQueue(
+    _ resolution: PlaybackResolver.Resolution?,
+    contextID: String?,
+    beforePlay: (@MainActor () -> Void)?,
+  ) async -> Bool {
     guard let resolution else {
       // Resolve failed → no queue is set; drop any prior context so a
       // stale one is never attributed to the next play (Phase 2). This
       // also resets the Phase-4 watermark to `nil` in the same atomic
       // assignment — context and watermark can't drift.
       activePlayContext = ActivePlayContext()
-      return
+      return false
     }
 
     // Retain THIS queue's canonical context (replaced per queue), set
@@ -793,23 +897,8 @@ final class MusicController {
     // Seed the Phase-4 watermark to the structural START index in the
     // SAME assignment: the detector's first observation (current ==
     // seed) is then not a transition, so the explicitly-started first
-    // track — already recorded by `recordPlayStart` below — is never
+    // track — recorded by `recordPlayStart` at the call site — is never
     // re-appended to `play_history` (no double-count of song 1).
-    //
-    // LOAD-BEARING ORDERING INVARIANT: there must be NO `await`
-    // suspension between this assignment and `player.queue` being
-    // swapped to the new songs (synchronous, inside `setQueueAndPlay`
-    // before its first `await`). `recordRecentlyPlayed` below is
-    // synchronous and `await playback.play(...)` runs synchronously
-    // until `try await player.play()` — which is *after* `player.queue`
-    // is set. On the single-threaded MainActor that guarantees a 0.5 s
-    // monitor tick can only ever observe (old context, old queue) —
-    // during the resolve `await` above, correctly attributing the prior
-    // queue the user is still hearing — or (new context, new queue),
-    // never a (new context, old queue) mix that would misattribute /
-    // double-count. Do NOT insert an `await`, nor make
-    // `recordRecentlyPlayed` async, between here and `playback.play`
-    // without re-establishing this invariant another way.
     activePlayContext = ActivePlayContext(
       songIDs: resolution.playContext,
       startSongID: resolution.startSongID,
@@ -819,23 +908,19 @@ final class MusicController {
       ),
     )
 
-    recordRecentlyPlayed(detail.id, source: detail.isAppOwned ? .app : .apple)
+    // Synchronous side effect inside the invariant window (e.g. the
+    // playlist-recents bump). Must NOT introduce an `await`.
+    beforePlay?()
+
     // `play` confirms the player actually reached `.playing` (polls the
     // player's own live status, not the 0.5 s-lagged snapshot — the
     // Phase-3 follow-up fix; the old `snapshot.isPlaying` guard read the
     // stale poll too early so plays never recorded).
-    let didStart = await playback.play(
+    return await playback.play(
       songs: resolution.songs,
       startingAt: resolution.startSong,
-      playlistContextID: detail.id,
+      playlistContextID: contextID,
     )
-
-    // Record the play ONLY on a confirmed start, for the track that
-    // actually started. `recordPlay` maintains song_stat in the same
-    // transaction (Phase 2 machinery).
-    if didStart {
-      await recordPlayStart(for: resolution, detail: detail, startRow: startRow)
-    }
   }
 
   private func recordPlayStart(
@@ -843,7 +928,6 @@ final class MusicController {
     detail: PlaylistDetail,
     startRow: TrackRow?,
   ) async {
-    guard let store else { return }
     // The resolver reports the started track's *stored* `song.id` (the FK
     // target). This is deterministic and correct for both paths — unlike
     // matching the now-playing id back to a row, which fails because the
@@ -855,15 +939,33 @@ final class MusicController {
       ?? startRow?.songID
       ?? detail.tracks.first?.songID
     guard let startedSongID else { return }
-    do {
-      try await store.recordPlay(songID: startedSongID)
+    let recorded = await recordPlayStart(startedSongID: startedSongID)
+    if recorded {
       // The play just bumped `song_stat`; refresh the on-screen
       // track table's Plays / Last Played columns from the fresh
       // `songsWithStats` join (D4). Discrete event — fired once on
       // the recorded play, not on every now-playing snapshot tick.
       await detailService.refreshStats(for: detail.id)
+    }
+  }
+
+  /// Record the play of `startedSongID` through Phase 1's single
+  /// one-transaction path (`song_stat` + `play_history` append + cap),
+  /// shared by the playlist start path and `playRecentlyPlayed` (dogfood:
+  /// listening from the Recently Played list also feeds stats). Returns
+  /// whether the write succeeded so the playlist wrapper can decide whether
+  /// to refresh the on-screen detail (the Recently Played list has no such
+  /// detail — its own surface re-reads via `reload()`). A store error sets
+  /// `storeError`, matching the codebase.
+  @discardableResult
+  private func recordPlayStart(startedSongID: String) async -> Bool {
+    guard let store else { return false }
+    do {
+      try await store.recordPlay(songID: startedSongID)
+      return true
     } catch {
       storeError = error.localizedDescription
+      return false
     }
   }
 

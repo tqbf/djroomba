@@ -45,6 +45,7 @@ playlist-forward and intentionally simple.
 | [plans/musickit-notes.md](plans/musickit-notes.md) | MusicKit-on-macOS API specifics, gotchas, identity risks |
 | [plans/profiling.md](plans/profiling.md) | **Import perf investigation** — swift-profile-recorder runbook + the self-time hypotheses to test |
 | [plans/memory-and-laziness.md](plans/memory-and-laziness.md) | **Residency plan (A+B done)** — killed per-`body` recompute + bounded detail cache; records why GRDB observation was rejected (single-writer) and the mutation-chokepoint forward pattern |
+| [plans/recently-played.md](plans/recently-played.md) | **Recently Played** landing surface — replaces the "Select a Playlist" empty state with a keyset-paginated, lazily-scrolled distinct-songs list (built on `play_history`); + a Debug-menu synthetic-history seeder. Code-complete |
 | [plans/play-statistics.md](plans/play-statistics.md) | Capped 50k numeric play history (`song.local_id`) + skip/replay counters; canonical attribution (no Apple ids as app keys); drops `play_event`. **ALL 4 phases ✅ code-complete** — Phase 1 shipped (v3 schema + store API, no gate); Phases 2–4 (canonical play context / skip-replay counting / auto-advance recording) code-complete, **signed runtime gate pending (user)**. 100 tests/18 suites green |
 | [plans/typography.md](plans/typography.md) | Semantic-font type system + hierarchy rules |
 | [plans/milestone-1.md](plans/milestone-1.md) | _Historical_ — original "Play a library playlist" notes |

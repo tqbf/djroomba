@@ -121,6 +121,16 @@ struct PlaylistPlayerApp: App {
         Button("Focus Playlist Sidebar", action: controller.requestSidebarFocus)
           .keyboardShortcut("l", modifiers: .command)
       }
+
+      // Clearly labelled developer affordance: seed synthetic plays so
+      // the Recently Played surface is testable without listening to 500
+      // songs. Intentionally NOT `#if DEBUG`-gated — the user's normal
+      // `make` build is debug-config and they want this button.
+      CommandMenu("Debug") {
+        Button("Seed 500 Random Plays") {
+          Task { await controller.seedSyntheticHistory(count: 500) }
+        }
+      }
     }
   }
 

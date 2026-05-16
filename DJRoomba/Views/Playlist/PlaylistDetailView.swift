@@ -9,11 +9,9 @@ struct PlaylistDetailView: View {
   var body: some View {
     Group {
       if controller.selectedPlaylistID == nil {
-        ContentUnavailableView(
-          "Select a Playlist",
-          systemImage: "music.note.list",
-          description: Text("Choose a playlist to see its tracks."),
-        )
+        // No playlist selected → the app's landing surface is the
+        // user's Recently Played, not a dead "select something" prompt.
+        RecentlyPlayedView()
       } else if
         controller.detailService.isLoading,
         controller.detailService.detail == nil
@@ -46,10 +44,10 @@ struct PlaylistDetailView: View {
           }
         }
       } else {
-        ContentUnavailableView(
-          "Select a Playlist",
-          systemImage: "music.note.list",
-        )
+        // Unreachable safety net (selection set but no detail/loading/
+        // error state). Stay coherent with the no-selection landing
+        // surface rather than a different dead-end prompt.
+        RecentlyPlayedView()
       }
     }
   }

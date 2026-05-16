@@ -5,6 +5,55 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ Recently Played landing surface (code-complete; live test next)
+
+New user request: opening the app with no playlist selected should show a
+lazily-scrolled list of recently-played songs (built on the Phase-1–4
+`play_history`), plus a debug seeder. Full design in
+`plans/recently-played.md`.
+
+- **Store:** `recentlyPlayedPage(beforeSeq:limit:)` — distinct songs,
+  newest-play-first, **keyset** paginated on the `play_history`
+  AUTOINCREMENT PK (`GROUP BY song_local_id`, `HAVING MAX(seq) <
+  :cursor`). `seedRandomPlayHistory(count:)` — one-txn debug seeder,
+  picks playlist-member songs, faithful to `recordPlay` (no `song_stat`
+  drift), returns `min(count, available)`.
+- **View:** `RecentlyPlayedService` (`@MainActor @Observable`, on
+  `MusicController`; not coupled to the 0.5 s tick) + `RecentlyPlayedView`
+  /`RecentlyPlayedRow` (native `List`, reuses existing type tiers — zero
+  new roles). Replaces the "Select a Playlist" empty state. Lazy via
+  per-row `.onAppear`.
+- **Playback:** `playRecentlyPlayed` reuses the app-playlist resolution
+  path through a new shared `startResolvedQueue` helper —
+  `resolveAndPlay` refactored onto it rather than duplicating the
+  **load-bearing ordering invariant**; the refactor was independently
+  reviewed and the invariant **verified to still hold** (no `await`
+  between the atomic `ActivePlayContext` set+seed and the synchronous
+  `player.queue` swap). Plays from this surface record stats (dogfoods
+  Phases 1–4). No Apple id as a key.
+- **Debug menu:** `CommandMenu("Debug")` → "Seed 500 Random Plays".
+- **Cleanup gate (R6 + swiftui-pro/macos-design/typography):** 2-agent
+  pass. The risky `resolveAndPlay` refactor verified correct. Fixed
+  three real defects: a `loadTask` teardown race (cancel-and-replace
+  could spawn a concurrent page → duplicated rows) → **monotonic
+  `loadGeneration` token** (mirrors `PlaylistDetailService.revisionCounter`);
+  an **O(n²) scroll scan** (`firstIndex` over all rows per `onAppear`) →
+  bounded `rows.suffix(prefetchDistance)` check; a `.task`
+  reload-on-reappear that **discarded scroll position** every time the
+  user returned from a playlist → load page 1 only when empty (explicit
+  `reload()` from the seed path handles data changes). Pagination
+  doc-comment corrected to be honest about the replay-mid-scroll
+  eventual-consistency nuance (by design, not a gap). Change-narrating
+  comment trimmed.
+- **Verify:** `swift build` clean; **107 tests / 19 suites** green (new
+  `RecentlyPlayedTests`: distinct/newest-first, cross-boundary keyset
+  no-overlap/terminate, re-float, empty, seeder member-only/min-count/
+  zero/accumulate+cap); `swiftformat` 0, `swiftlint` 0.
+- **Next:** live computer-use validation on a dev-signed build — seed 500
+  via the Debug menu, confirm the scroll renders and lazy-loads, play a
+  row. (`playRecentlyPlayed` carries the same class of MusicKit signed
+  gate as Phases 2–4.)
+
 ## 2026-05-16 — ✅ Play statistics Phase 4 + FEATURE CODE-COMPLETE
 
 `plans/play-statistics.md` **Phase 4** (Decision R1 — "last N *played*"

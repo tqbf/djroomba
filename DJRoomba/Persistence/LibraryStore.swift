@@ -58,6 +58,21 @@ struct LibraryStore: Sendable {
     var lastPlayedAt: Date?
   }
 
+  /// One **distinct** song in the "Recently Played" browse list (NOT a raw
+  /// `play_history` row): the song plus the `play_history.seq` of its
+  /// **most recent** play and its lifetime `song_stat` rollup. `lastSeq` is
+  /// the keyset cursor — pass the last row's `lastSeq` as the next page's
+  /// `beforeSeq` (see `recentlyPlayedPage`). A song played three times
+  /// appears once, positioned by its newest play.
+  struct RecentlyPlayedSong: Sendable {
+    var song: Song
+    /// `MAX(play_history.seq)` for this song — its most-recent play and the
+    /// keyset pagination cursor (strictly monotonic, never reused).
+    var lastSeq: Int64
+    var playCount: Int
+    var lastPlayedAt: Date?
+  }
+
   /// The bounded "last N played" cap (Decision R9, `v3`): `play_history`
   /// keeps at most this many newest rows; `recordPlay` prunes the rest in
   /// the same transaction. It IS the user's original "remember the last
@@ -750,6 +765,136 @@ struct LibraryStore: Sendable {
           """,
         arguments: [limit],
       )
+    }
+  }
+
+  /// One page of the **"Recently Played" browse list**: *distinct* songs,
+  /// each at its **most-recent** play, newest first (NOT the raw repeated
+  /// `play_history` — a song played many times appears once, at its latest
+  /// position). The list is keyset-paginated as the user scrolls.
+  ///
+  /// `beforeSeq == nil` → the first page. To fetch the next page, pass the
+  /// `lastSeq` of the **last** row of the page just shown as `beforeSeq`;
+  /// the `HAVING MAX(h.seq) < :beforeSeq` then returns the slice strictly
+  /// older than that cursor. A short / empty page means the end.
+  ///
+  /// Keyset, not `LIMIT … OFFSET`: `seq` is the `play_history` PK
+  /// (AUTOINCREMENT, strictly monotonic, never reused), so the per-song
+  /// `MAX(seq)` cursor is stable for the unchanged history — no dup, no
+  /// gap in the distinct set, whereas OFFSET would shift every prior row
+  /// under it. A new play only mints a *higher* seq (above any cursor
+  /// already handed out), so a brand-new song never disturbs later pages.
+  /// One eventual-consistency nuance, by design (not a gap): if a song
+  /// that was *already* paginated is replayed mid-scroll, its `MAX(seq)`
+  /// floats above the live cursor, so it is not re-emitted in a later
+  /// page and its already-rendered row stays at its older position until
+  /// a `reload()` re-floats it to the top. The `GROUP BY` is
+  /// over at most `playHistoryCap` (50k) rows and `seq` is the integer PK,
+  /// so the grouped scan + `MAX(seq)` stays cheap at library scale (no
+  /// per-song subquery, one pass).
+  func recentlyPlayedPage(
+    beforeSeq: Int64?,
+    limit: Int,
+  ) async throws -> [RecentlyPlayedSong] {
+    try await database.dbQueue.read { db in
+      // The keyset predicate is applied only on subsequent pages
+      // (`beforeSeq != nil`); the first page has no cursor. Interpolating a
+      // fixed clause (never user input) keeps the two shapes one query.
+      let havingClause = beforeSeq == nil ? "" : "HAVING MAX(h.seq) < ?"
+      let sql = """
+        SELECT s.*, MAX(h.seq) AS last_seq,
+               COALESCE(st.play_count, 0) AS pc,
+               st.last_played_at AS lpa
+        FROM play_history h
+        JOIN song s  ON s.local_id = h.song_local_id
+        LEFT JOIN song_stat st ON st.song_id = s.id
+        GROUP BY h.song_local_id
+        \(havingClause)
+        ORDER BY last_seq DESC
+        LIMIT ?
+        """
+      var arguments = [(any DatabaseValueConvertible)?]()
+      if let beforeSeq { arguments.append(beforeSeq) }
+      arguments.append(limit)
+      let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
+      return try rows.map { row in
+        RecentlyPlayedSong(
+          song: try Song(row: row),
+          lastSeq: row["last_seq"],
+          playCount: row["pc"] ?? 0,
+          lastPlayedAt: row["lpa"],
+        )
+      }
+    }
+  }
+
+  /// Debug-only: seed up to `count` synthetic plays drawn at random from
+  /// songs that are a member of *some* playlist (Apple or app), so the
+  /// "Recently Played" surface is testable without listening to hundreds of
+  /// songs. Mirrors `recordPlay`'s per-row work for each picked song
+  /// (resolve `local_id`; upsert `song_stat` play_count/last_played_at;
+  /// append a `play_history` row) **in one write transaction**, pruning
+  /// beyond `playHistoryCap` **once** at the end (snappy debug action — not
+  /// 500 separate transactions). Returns the number actually seeded (`0`
+  /// when the library has no playlist-member songs yet). `last_played_at`
+  /// is staggered slightly per song so the column isn't all-identical.
+  @discardableResult
+  func seedRandomPlayHistory(count: Int) async throws -> Int {
+    guard count > 0 else { return 0 }
+    return try await database.dbQueue.write { db in
+      let songIDs = try String.fetchAll(
+        db,
+        sql: """
+          SELECT id FROM song
+          WHERE id IN (
+            SELECT song_id FROM apple_playlist_track
+            UNION
+            SELECT song_id FROM app_playlist_track
+          )
+          ORDER BY RANDOM()
+          LIMIT ?
+          """,
+        arguments: [count],
+      )
+      guard !songIDs.isEmpty else { return 0 }
+      let now = Date.now
+      for (index, songID) in songIDs.enumerated() {
+        // Resolve canonical local_id — the membership query already
+        // guarantees the row exists, so this is always non-nil here.
+        guard
+          let localID = try Int.fetchOne(
+            db,
+            sql: "SELECT local_id FROM song WHERE id = ?",
+            arguments: [songID],
+          )
+        else { continue }
+        // Minor realism: stagger the timestamp a few seconds per song so
+        // `last_played_at` isn't a single identical value across the seed.
+        let playedAt = now.addingTimeInterval(-Double(index) * 3)
+        if var stat = try SongStat.fetchOne(db, key: songID) {
+          stat.playCount += 1
+          if let last = stat.lastPlayedAt {
+            stat.lastPlayedAt = max(last, playedAt)
+          } else {
+            stat.lastPlayedAt = playedAt
+          }
+          try stat.update(db)
+        } else {
+          var stat = SongStat(songID: songID, playCount: 1, lastPlayedAt: playedAt)
+          try stat.insert(db)
+        }
+        var entry = PlayHistoryEntry(seq: nil, songLocalID: localID)
+        try entry.insert(db)
+      }
+      // Prune ONCE at the end (not per row), same keyset as `recordPlay`.
+      try db.execute(
+        sql: """
+          DELETE FROM play_history
+          WHERE seq <= (SELECT MAX(seq) FROM play_history) - ?
+          """,
+        arguments: [Self.playHistoryCap],
+      )
+      return songIDs.count
     }
   }
 
