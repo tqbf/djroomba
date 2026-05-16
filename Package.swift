@@ -18,41 +18,41 @@ import PackageDescription
 // is unchanged. `swift test` is the Phase 2 store/migration gate.
 
 let package = Package(
-    name: "DJRoomba",
-    platforms: [
-        .macOS(.v14),
-    ],
-    dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
-    ],
-    targets: [
-        .executableTarget(
-            name: "DJRoomba",
-            dependencies: [
-                .product(name: "GRDB", package: "GRDB.swift"),
-            ],
-            path: "DJRoomba",
-            exclude: [
-                "Info.plist",
-                "DJRoomba.entitlements",
-            ],
-            swiftSettings: [
-                // Swift 6 language mode == strict concurrency "complete",
-                // matching the retired project.yml's
-                // SWIFT_STRICT_CONCURRENCY: complete.
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
-            name: "DJRoombaTests",
-            dependencies: [
-                "DJRoomba",
-                .product(name: "GRDB", package: "GRDB.swift"),
-            ],
-            path: "Tests/DJRoombaTests",
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-    ]
+  name: "DJRoomba",
+  platforms: [
+    .macOS(.v14)
+  ],
+  dependencies: [
+    .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0")
+  ],
+  targets: [
+    .executableTarget(
+      name: "DJRoomba",
+      dependencies: [
+        .product(name: "GRDB", package: "GRDB.swift")
+      ],
+      path: "DJRoomba",
+      exclude: [
+        "Info.plist",
+        "DJRoomba.entitlements",
+      ],
+      swiftSettings: [
+        // Swift 6 language mode == strict concurrency "complete",
+        // matching the retired project.yml's
+        // SWIFT_STRICT_CONCURRENCY: complete.
+        .swiftLanguageMode(.v6)
+      ],
+    ),
+    .testTarget(
+      name: "DJRoombaTests",
+      dependencies: [
+        "DJRoomba",
+        .product(name: "GRDB", package: "GRDB.swift"),
+      ],
+      path: "Tests/DJRoombaTests",
+      swiftSettings: [
+        .swiftLanguageMode(.v6)
+      ],
+    ),
+  ],
 )
