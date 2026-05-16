@@ -5,6 +5,27 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ App icon (native macOS treatment)
+
+`djroomba.png` (1254² pixel-art DJ-Roomba on an off-white field) turned
+into a native-feeling `AppIcon.icns` and wired into the no-Xcode bundle.
+
+- **Treatment (macos-design consulted):** Apple Big Sur+ icon grid — 1024
+  canvas, 824² rounded tile (100px margin), continuous-ish corner radius
+  ~185, one restrained soft shadow inside the margin (not a single heavy
+  drop). The source's off-white field becomes the tile color; character
+  keeps its breathing room. Verified by eye on light **and** dark
+  backdrops — reads as a real Mac app icon, not a full-bleed square.
+- **Reproducible:** `scripts/make-appicon.sh` (ImageMagick + `iconutil`)
+  builds all 10 iconset sizes from one styled 1024 master → `iconutil`
+  packs `DJRoomba/AppIcon.icns`. `djroomba.png` is the checked-in source.
+- **Wiring:** no asset catalog (consistent with the no-Xcode build).
+  `build.sh` copies `AppIcon.icns` → `Contents/Resources/`; `Info.plist`
+  gains `CFBundleIconFile`/`CFBundleIconName` = `AppIcon`. `build.sh`
+  hard-fails if the icns is missing. `./build.sh debug` verified: builds,
+  signs clean, bundle carries the icon. `plans/build-system.md` updated
+  (the "no bundled resources" claim was now false).
+
 ## 2026-05-16 — ✅ Cleanup pass (Thomas' Laws): Phase A shipped; B/C logged
 
 Applied the `toms-laws` rubric to the post-residency code. Verdict: the

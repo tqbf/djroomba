@@ -15,6 +15,9 @@ only `make dist` reaches into Xcode-supplied tools (`codesign`,
 | `Makefile` | The only entry point. `make`, `run`, `check`, `install`, `clean`, and the full `dist` release pipeline. |
 | `DJRoomba/Info.plist` | De-templated to **literal** values. The old `$(PRODUCT_BUNDLE_IDENTIFIER)`-style vars were Xcode build-setting substitutions; SwiftPM does not expand them, and a literal `$(...)` as `CFBundleIdentifier` breaks MusicKit's App ID match. |
 | `DJRoomba/DJRoomba.entitlements` | Unchanged: `app-sandbox` + `network.client`. Applied at every codesign step. |
+| `DJRoomba/AppIcon.icns` | The app icon, prebuilt. `build.sh` copies it to `Contents/Resources/AppIcon.icns`; `Info.plist` points at it via `CFBundleIconFile`/`CFBundleIconName`. No asset catalog (consistent with the no-Xcode build). |
+| `scripts/make-appicon.sh` | Regenerates `AppIcon.icns` from `djroomba.png` using Apple's Big Sur+ icon grid (824/1024 rounded tile + soft shadow) via ImageMagick + `iconutil`. |
+| `djroomba.png` | Source artwork for the icon (1254², the only icon input). |
 
 `project.yml` and `DJRoomba.xcodeproj/` were **deleted**. `.gitignore` keeps
 the `*.xcodeproj` rule so a stray Xcode-generated project never lands in git.
@@ -84,7 +87,7 @@ artifact — `make` cannot conjure it.
 
 `swift build` compiles the full Swift 6 strict-concurrency SwiftUI tree
 cleanly (verified). The app is a single `@main` SwiftUI `App` with no asset
-catalog, no bundled resources — so `build.sh` only copies the binary +
-Info.plist, exactly like mdv. SPM dependencies work in this model (mdv
-ships three); GRDB slots into `Package.swift` in Phase 3 with no build-system
-changes.
+catalog — so `build.sh` copies the binary + Info.plist + the one bundled
+resource (`AppIcon.icns`), close to mdv. SPM dependencies work in this model
+(mdv ships three); GRDB slots into `Package.swift` in Phase 3 with no
+build-system changes.

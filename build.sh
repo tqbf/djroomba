@@ -43,6 +43,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN"           "$APP/Contents/MacOS/$APP_NAME"
 cp "$SRC_DIR/Info.plist" "$APP/Contents/Info.plist"
 
+# App icon. The bundle's only resource: a prebuilt .icns referenced by
+# CFBundleIconFile (no asset catalog — consistent with the no-Xcode build).
+# Regenerate from djroomba.png with ./scripts/make-appicon.sh.
+ICON="$SRC_DIR/AppIcon.icns"
+[ -f "$ICON" ] || { echo "✗ $ICON missing — run ./scripts/make-appicon.sh"; exit 1; }
+cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+
 # Stamp the version from an exact git tag when one is present (mirrors
 # mdv's "dist is built from a vX.Y.Z tag" philosophy). Falls back to the
 # literal value already in Info.plist (0.1.0) for untagged dev builds.
