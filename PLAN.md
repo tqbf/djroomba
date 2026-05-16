@@ -19,7 +19,7 @@ playlist-forward and intentionally simple.
 - **Identity: native MusicKit, system Apple Account** ("Option A"). No in-app
   login. User has an ADC membership; App ID `org.sockpuppet.djroomba` must
   have the MusicKit App Service enabled for real runs.
-- **Local store: SQLite via GRDB** (SPM dep, added through XcodeGen). The
+- **Local store: SQLite via GRDB** (SPM dep, added in `Package.swift`). The
   app's source of truth. Apple data is imported into it one-way.
 - **Playback: native `ApplicationMusicPlayer`**, in-process. Catalog/library
   `MusicItemID`s are stored in SQLite and re-resolved to MusicKit items at
@@ -34,11 +34,13 @@ playlist-forward and intentionally simple.
 |-----|----------------|
 | [PLAN.md](PLAN.md) | This index + product shape, milestones, key decisions |
 | [PROGRESS.md](PROGRESS.md) | Canonical record: done / verified / next / open actions |
+| [PROBLEMS.md](PROBLEMS.md) | **Every outstanding issue** — actionable open-issue index (severity/owner/status) |
 | [plans/roadmap.md](plans/roadmap.md) | **Forward source of truth** — end-to-end 5-phase plan; Phase 1 = access-validation gate |
 | [plans/risks-and-challenges.md](plans/risks-and-challenges.md) | **Live risk register** — every problem we're up against, with status |
 | [plans/architecture.md](plans/architecture.md) | Local-first pivot layering + original M1/M2 layers, data flow, concurrency |
 | [plans/data-and-import.md](plans/data-and-import.md) | GRDB/SQLite schema, import pipeline, playback resolution |
-| [plans/project-setup.md](plans/project-setup.md) | XcodeGen project, signing, MusicKit entitlement/plist, how to build |
+| [plans/build-system.md](plans/build-system.md) | **mdv-cloned build env** — SwiftPM + Makefile, no Xcode IDE/xcodebuild, signing, dist pipeline |
+| [plans/project-setup.md](plans/project-setup.md) | Signing, MusicKit entitlement/plist, how to build (points at build-system.md) |
 | [plans/musickit-notes.md](plans/musickit-notes.md) | MusicKit-on-macOS API specifics, gotchas, identity risks |
 | [plans/typography.md](plans/typography.md) | Semantic-font type system + hierarchy rules |
 | [plans/milestone-1.md](plans/milestone-1.md) | _Historical_ — original "Play a library playlist" notes |
@@ -80,23 +82,64 @@ Four persistent conceptual regions, mapped to the macOS layout formula:
 2. **Make it pleasant** ✅ code-complete & build-verified. Favorites, recents,
    filtering, persisted selection/sidebar state, keyboard shortcuts, states.
    *(Favorites/recents currently UserDefaults — migrate into SQLite in M3.)*
-3. **Local store + import pipeline** ← *next*. Add GRDB; SQLite schema;
-   `ImportService` (MusicKit read → one-way upsert into SQLite); re-point the
-   sidebar/detail at the DB; move favorites/recents into SQLite; playback
-   resolves stored `MusicItemID`s → MusicKit items at play time. Switch
-   project back to automatic signing (user wires Apple ID into Xcode).
-4. **App-owned playlists + play counts.** Create/rename/delete/reorder app
-   playlists (SQLite only, never written to Apple); "My Playlists" section
-   distinct from imported "Library Playlists"; play-count + last-played
-   tracking incremented on play, surfaced in the track table.
-5. **Polish + extension readiness.** `MusicContext` boundary + collapsible
-   inspector (deferred from old M3); smarter empty states (e.g. "library not
-   synced to this Mac" hint); the standing unit-test gap (GRDB stores,
-   import, filtering); optional catalog search as an import affordance.
+3. **Local store + import pipeline** ✅ code-complete (Phase 2 store +
+   Phase 3 import/UI-on-SQLite + the Phase 3 **corrective**); signed
+   runtime re-gate pending the orchestrator. GRDB + schema (Phase 2);
+   `ImportService` (one-way MusicKit→SQLite, stores the underlying Song's
+   **library** id by provenance), sidebar/detail re-pointed at the DB,
+   favorites/recents migrated one-shot into SQLite, `PlaybackResolver`
+   re-resolves stored library ids via `MusicLibraryRequest` at play time,
+   artwork re-resolved by id through `ArtworkProvider` + `ArtworkImage`,
+   batched SQLite import (UPSERT + IN-list lookup + chunked membership).
+   The signed gate caught 3 defects (broken id round trip, placeholder
+   artwork, ~90s row-by-row import); all corrected in code — see PROGRESS.md
+   top entry. `make check` + `swift test` (**35**) green. Signing uses the
+   Phase-1 Apple Development cert directly (no Xcode-Accounts step).
+4. **App-owned playlists + play counts.** ✅ code-complete; signed gate ran
+   (core PASSED) + UI corrective applied; signed re-gate pending.
+   Create/rename/delete/reorder/add/remove app playlists (SQLite only, batch
+   idioms, one-way isolated, no schema change); native "My Playlists" sidebar
+   section distinct from imported "Library Playlists"; per-song 1:1
+   app-playlist re-resolution; play-tracking fixed (fires on the player's
+   confirmed start), surfaced as sortable track-table columns. The signed
+   gate confirmed the core works but caught 4 UI defects (inline rename;
+   phantom Table rows; stale sidebar count; stale Plays/Last Played) — all
+   root-caused + fixed as view/reactivity-only changes (see the Phase-4 UI
+   CORRECTIVE PROGRESS.md top entry). `make check`/`swift test` (51/11)
+   green; signed build produced; not committed.
+5. **Polish + extension readiness.** ✅ code-complete; signed gate pending.
+   `MusicContext` boundary realized as a real collapsible native
+   `.inspector()` (collapsed by default, toolbar toggle, observes the
+   read-only context / acts only via `MusicCommand`, never touches the
+   player); cause-inferred empty states ("Library Not Synced to This Mac" vs
+   "Subscription Needed" vs "No Playlists Yet" vs error — pure, unit-tested
+   `LibrarySidebarState` cross-checking `MusicSubscription`); auto-start
+   polish (Play reliably begins playing, no transport nudge; recording not
+   regressed); edge hardening (rapid switching / disappeared playlist /
+   unplayable track / network-down — tested where deterministic); honest
+   import-cost finding (full re-import of a ~270-playlist / ~8200-track
+   library is ~90–120 s, dominated by MusicKit's per-playlist track
+   resolution on macOS — *not* SQLite, *not* reducible by app-side
+   parallelism; the bounded-parallel attempt was measured ineffective and
+   reverted to the simple serial loop, keeping only the "Importing N of M
+   playlists…" progress affordance; accepted as the one-time/Refresh v1
+   cost); +16 tests (67/14 green); final swiftui-pro/macos-design/typography
+   pass. Catalog search + incremental import documented as deliberately
+   deferred. Distribution pipeline reviewed (nothing notarized by the
+   agent). See PROGRESS.md top entry for the exact remaining USER steps to
+   ship, plus the Phase-5 CORRECTIVE entry (title/inspector/import fixes,
+   including the deeper window-sizing root cause: the hard outer
+   `.frame(minWidth:)` clamp on the split-view-bearing `WindowGroup` root
+   removed in favor of a content-derived window minimum via
+   `.windowResizability(.contentSize)`, so the inspector no longer clips at
+   either window edge and state restoration can't pin a too-narrow frame).
 
 ## Key design decisions
 
-- **Tooling:** XcodeGen (`project.yml` in git, `.xcodeproj` generated, gitignored).
+- **Tooling:** mdv-cloned build env — SwiftPM (`Package.swift`) + `build.sh`
+  + `Makefile`; **no Xcode IDE, no xcodebuild, no XcodeGen**. Xcode is only a
+  toolchain provider, used solely by `make dist`. See
+  [plans/build-system.md](plans/build-system.md).
 - **Min target:** macOS 14 Sonoma. Built with Xcode 26.4 / Swift 6.3.
 - **Identity:** App "DJ Roomba", bundle `org.sockpuppet.djroomba`, team
   KK7E9G89GW (Thomas Ptacek), automatic signing.

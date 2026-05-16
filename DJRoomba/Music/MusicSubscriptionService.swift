@@ -9,6 +9,14 @@ import Observation
 final class MusicSubscriptionService {
     private(set) var canPlayCatalogContent = false
     private(set) var canBecomeSubscriber = false
+    /// Whether the system Apple Account has Cloud / Sync Library enabled.
+    /// This is the signal that lets the empty-state logic distinguish
+    /// "library isn't synced to this Mac" (cloud library off → MusicKit
+    /// genuinely has nothing local) from "synced but you have no playlists"
+    /// (Phase 5 smarter empty states; the risk register's "empty/failure
+    /// modes are silent" item). Defaults `true` until subscription info has
+    /// loaded so we never accuse a syncing library of being unsynced.
+    private(set) var hasCloudLibraryEnabled = true
     private(set) var hasLoaded = false
 
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
@@ -20,6 +28,7 @@ final class MusicSubscriptionService {
                 guard let self else { return }
                 self.canPlayCatalogContent = subscription.canPlayCatalogContent
                 self.canBecomeSubscriber = subscription.canBecomeSubscriber
+                self.hasCloudLibraryEnabled = subscription.hasCloudLibraryEnabled
                 self.hasLoaded = true
             }
         }

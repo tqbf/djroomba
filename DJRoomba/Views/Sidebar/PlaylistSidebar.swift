@@ -1,34 +1,28 @@
 import SwiftUI
 
-/// Routes the sidebar between loading / error / empty / populated. The
-/// populated list (sections, filtering, focus) lives in `PlaylistSidebarList`.
+/// Routes the sidebar between loading / error / cause-specific empty /
+/// populated. The *cause* of an empty state is inferred by the controller's
+/// pure `sidebarState` (Phase 5 smarter empty states — "library not synced"
+/// vs "subscription needed" vs "no playlists yet", not a blanket "empty").
+/// The populated list (sections, filtering, focus) lives in
+/// `PlaylistSidebarList`.
 struct PlaylistSidebar: View {
     @Environment(MusicController.self) private var controller
 
     var body: some View {
         Group {
-            if controller.library.isLoading && controller.library.summaries.isEmpty {
-                ProgressView("Loading playlists…")
+            switch controller.sidebarState {
+            case .loading:
+                ProgressView(controller.libraryLoadingMessage)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let error = controller.library.loadError,
-                      controller.library.summaries.isEmpty {
-                ContentUnavailableView {
-                    Label("Couldn't Load Playlists", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(error)
-                } actions: {
-                    Button("Try Again") {
-                        Task { await controller.refreshLibrary() }
-                    }
-                }
-            } else if controller.library.summaries.isEmpty {
-                ContentUnavailableView(
-                    "No Playlists",
-                    systemImage: "music.note.list",
-                    description: Text("No playlists were found in your Apple Music library.")
-                )
-            } else {
+            case .populated:
+                // Always the list when there's anything to show: even with no
+                // imported library and no user playlists, "My Playlists" stays
+                // reachable so the user can create one (the create affordance
+                // is a destination).
                 PlaylistSidebarList()
+            case .error, .libraryNotSynced, .subscriptionNeeded, .noImportedPlaylists:
+                SidebarUnavailableView(state: controller.sidebarState)
             }
         }
         .navigationTitle("Playlists")

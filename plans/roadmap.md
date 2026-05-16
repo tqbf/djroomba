@@ -42,8 +42,9 @@ we must know now, not after building Phases 2–5.
   library is actually present locally for native MusicKit).
 
 **Work:**
-1. Flip `project.yml` back to automatic signing, team `KK7E9G89GW`; confirm a
-   signed build succeeds (real cert, not ad-hoc).
+1. ✅ Done — `make` signs with `Apple Development: Thomas Ptacek
+   (7F2QE7P59D)` (real cert, not ad-hoc) via `build.sh`. No
+   `project.yml`/automatic-provisioning step anymore.
 2. Using the existing M1/M2 app (no new architecture), verify live:
    - `MusicAuthorization` → authorized.
    - `MusicSubscription` reports catalog playback allowed.
@@ -72,7 +73,7 @@ See `plans/musickit-notes.md`, `plans/architecture.md`.
 **Goal:** a working, tested SQLite layer with no behavior change yet.
 
 **Work:**
-- Add **GRDB** via SPM in `project.yml`; regenerate; build clean.
+- Add **GRDB** via SPM in `Package.swift`; `make check` clean.
 - DB at `Application Support/DJRoomba/library.sqlite`; `DatabaseMigrator`
   with the schema in `plans/data-and-import.md` (songs, apple_playlist(+track),
   app_playlist(+track), play_event, song_stat, favorite_playlist,
@@ -80,14 +81,24 @@ See `plans/musickit-notes.md`, `plans/architecture.md`.
 - `LibraryStore` over a GRDB `DatabaseQueue`; async read/write APIs;
   Sendable-safe; off the main actor.
 - **Unit tests** for the store + migrations (closes the standing test gap;
-  add a test target via XcodeGen).
+  add a `.testTarget` in `Package.swift`, run with `swift test`).
 
 **Exit criteria:** build + tests green; migrations apply on a fresh DB; no UI
 or import wired yet (purely additive).
 
 ---
 
-## Phase 3 — IMPORT PIPELINE & UI ON SQLITE
+## Phase 3 — IMPORT PIPELINE & UI ON SQLITE ✅ code-complete 2026-05-15 (signed-run pending)
+
+**Result:** `ImportService` (one-way MusicKit→SQLite, paged, namespace-aware),
+sidebar/detail re-pointed at `LibraryStore`, models de-MusicKit'd, artwork
+from cached URL (pixel-equivalent), UserDefaults favorites/recents one-shot
+migrated, `PlaybackResolver` (library+catalog re-fetch, tolerant) wired to
+the unchanged M1 `PlaybackService` with `recordPlay` on start. `make check`
++ `swift test` (31/8) green; nothing committed. The 🔴 id round-trip is
+**code-complete but runtime-unverified** — only the orchestrator's signed
+run can confirm catalog/library re-resolution + audio. Details in
+PROGRESS.md + `plans/data-and-import.md`.
 
 **Goal:** the app operates from SQLite; Apple is a one-way import source.
 
@@ -107,7 +118,32 @@ resolver; favorites/recents survive the migration. Verify on a signed run.
 
 ---
 
-## Phase 4 — APP OWNERSHIP: PLAYLISTS + PLAY COUNTS
+## Phase 4 — APP OWNERSHIP: PLAYLISTS + PLAY COUNTS ✅ code-complete 2026-05-15; signed gate ran (core PASSED) + UI corrective applied; signed re-gate pending
+
+**Result:** App-playlist CRUD over `LibraryStore` (batch idioms, one-way
+isolation, no schema change — Phase-2 tables sufficed), `AppPlaylistService`,
+a native "My Playlists" sidebar section (always-present, inline `+`/⌘N
+create, Finder-style inline rename, destructive `confirmationDialog`, context
+menu, drag-reorder, song drag-in + "Add to Playlist ▸"), per-song 1:1
+app-playlist re-resolution (`resolveAppPlaylist`: per-id `equalTo` through a
+bounded `TaskGroup`, keyed by the stored id), the Phase-3 play-tracking bug
+fixed (records on the player's confirmed `.playing`, for the resolver-
+reported stored `song.id`), and play count + last played as sortable Table
+columns.
+
+**Signed-gate outcome:** the computer-use signed-build gate confirmed the
+**core works** (CRUD + one-way isolation DB-verified; per-id app-playlist
+playback plays real audio; play-tracking records on confirmed start; native
+context menu + delete dialog) but caught **4 UI defects** (non-functional
+inline rename; phantom empty rounded-gray Table rows; stale "My Playlists"
+sidebar count; stale Plays/Last Played). All four were root-caused and fixed
+as **view/reactivity-only** changes (the verified-good data layer, playback,
+resolution and schema untouched) — see the "Phase 4 UI CORRECTIVE" PROGRESS.md
+top entry. `make check` + `swift test` (**51/11**) green; signed `make` build
+produced; nothing committed. The 4 UI fixes + the per-id `equalTo` re-fetch +
+audio + play-count persistence are **runtime-unverified** — only the
+orchestrator's signed re-gate confirms them. Details in PROGRESS.md +
+`plans/architecture.md`.
 
 **Goal:** the actual product value — user owns their library locally.
 
@@ -121,12 +157,50 @@ resolver; favorites/recents survive the migration. Verify on a signed run.
 - Surface play count + last played in the track table (sortable column);
   optional sort/smart ordering.
 
-**Exit criteria:** can build and manage an app playlist end to end and play
-it; play counts increment and persist; imported data untouched by app edits.
+**Exit criteria (needs the signed run):** can build and manage an app
+playlist end to end and play it; play counts increment and persist; imported
+data untouched by app edits.
 
 ---
 
-## Phase 5 — POLISH, EXTENSION READINESS, HARDENING
+## Phase 5 — POLISH, EXTENSION READINESS, HARDENING ✅ code-complete 2026-05-15; signed gate pending
+
+**Result:** All scope delivered. Smarter cause-inferred empty/error states
+(pure `LibrarySidebarState` cross-checking `MusicSubscription.hasCloudLibrary
+Enabled`/auth — "library not synced" vs "subscription needed" vs "no
+playlists" vs error, native `ContentUnavailableView`). Auto-start polish
+(bounded re-issue of `play()` + immediate snapshot on the confirmed `.playing`
+— no transport nudge; play-recording NOT regressed). The M3 extension
+boundary realized as a real collapsible native `.inspector()` (collapsed by
+default, toolbar toggle) that observes the read-only `MusicContext` and acts
+only via `MusicCommand` — never touches the player. Edge hardening (rapid
+switching cancels in-flight loads, disappeared playlist, unplayable track,
+network-down — graceful + tested where deterministic). Import perf (honest
+finding, Phase-5 corrected): a bounded-parallel `TaskGroup` was tried and
+**measured ineffective on the signed build (~119 s, no improvement over the
+prior serial ~88 s, slightly worse + unstable)** — the cost is MusicKit's
+own per-playlist track resolution on macOS, CPU-bound and internally
+serialized, **not** SQLite and **not** fixable by app-side parallelism — so
+it was **reverted to the simple serial loop**, keeping only the "Importing N
+of M" progress affordance. The SQLite write path is byte-for-byte unchanged
+(one-way isolation NOT regressed). Honest accepted v1 cost: a full re-import
+of a ~270-playlist / ~8200-track library is **~90–120 s**, one-time /
+Refresh-only. (The earlier unmeasured "~88 s → ~20–35 s" estimate was wrong
+and is struck everywhere.) Incremental import investigated and
+**deliberately deferred** (the `lastModifiedDate` signal is
+macOS-14-unreliable; faking it would ship stale snapshots — scope forbids).
+Catalog search **deferred** (documented, not half-built). Final swiftui-pro/
+macos-design/typography pass applied (no new type roles). Distribution
+pipeline reviewed (internally consistent; entitlements distribution-correct);
+the open MusicKit-App-Service question analyzed + exact remaining USER steps
+documented — **nothing notarized by the agent**. `make check` + `swift test`
+(**67/14**) green; signed `make` build produced; **nothing committed**. The
+empty-state branches / auto-start / inspector are **runtime-unverified** —
+the orchestrator's signed gate confirms them; the import wall-clock is now
+re-measured by the orchestrator against the reverted serial loop (no speedup
+is claimed — see the Phase-5 CORRECTIVE in PROGRESS.md).
+Details in PROGRESS.md + `plans/architecture.md` +
+`plans/risks-and-challenges.md`.
 
 **Goal:** make it pleasant, durable, and extensible.
 
@@ -154,9 +228,10 @@ docs (PLAN/PROGRESS/plans) current.
 
 ## Cross-cutting
 
-- CLI builds verify with `CODE_SIGNING_ALLOWED=NO`; real runtime verification
-  requires the Phase 1 signed build. State runtime status honestly in
-  PROGRESS.md — never claim verified playback that wasn't exercised.
+- CLI builds verify with `make check` (`swift build`, no signing); real
+  runtime verification requires a signed `make` build. State runtime status
+  honestly in PROGRESS.md — never claim verified playback that wasn't
+  exercised.
 - Consult `swiftui-pro` before/after code, `macos-design` for UI,
   `typography-designer` for type (CLAUDE.md). Keep PLAN/plans/PROGRESS current.
 - May push PRs; **never merge to `main`**.

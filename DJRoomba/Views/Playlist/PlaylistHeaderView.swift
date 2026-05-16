@@ -7,7 +7,7 @@ struct PlaylistHeaderView: View {
     var body: some View {
         HStack(alignment: .bottom, spacing: 16) {
             ArtworkThumbnail(
-                artwork: detail.artwork,
+                ref: detail.artworkRef,
                 size: 104,
                 cornerRadius: 8,
                 placeholderSymbol: "music.note.list"
@@ -40,9 +40,31 @@ struct PlaylistHeaderView: View {
                     }
                 }
                 .padding(.top, 4)
+
+                if let problem = controller.playbackProblem {
+                    // Inline, unobtrusive native problem surface (D1): a
+                    // colored warning glyph + secondary caption text, the
+                    // same hierarchy tier as the subscription notice — it
+                    // informs without shouting (typography-designer).
+                    Label {
+                        Text(problem)
+                            .foregroundStyle(.secondary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    .font(.caption)
+                    .lineLimit(2)
+                    .padding(.top, 2)
+                    .transition(.opacity)
+                }
             }
             Spacer(minLength: 0)
         }
         .padding(20)
+        // Value-driven animation so the inline problem surface fades in/out
+        // rather than popping (swiftui-pro: never bare `.animation`; always
+        // a watched value).
+        .animation(.easeOut(duration: 0.2), value: controller.playbackProblem)
     }
 }

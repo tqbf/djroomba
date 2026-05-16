@@ -6,7 +6,7 @@ struct PlaylistSidebarRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            ArtworkThumbnail(artwork: summary.artwork, size: 28, cornerRadius: 4)
+            ArtworkThumbnail(ref: summary.artworkRef, size: 28, cornerRadius: 4)
             VStack(alignment: .leading, spacing: 2) {
                 Text(summary.name)
                     .font(.body)

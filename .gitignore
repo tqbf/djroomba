@@ -1,9 +1,12 @@
-# XcodeGen output — regenerate with `xcodegen generate`
+# No XcodeGen / .xcodeproj anymore — SwiftPM + Makefile only (see
+# plans/build-system.md). Keep this ignore so a stray Xcode-generated
+# project never gets committed.
 *.xcodeproj
 
 # Xcode / build
 DerivedData/
 build/
+dist/
 *.xcuserstate
 xcuserdata/
 *.xcscmblueprint

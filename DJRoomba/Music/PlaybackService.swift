@@ -1,9 +1,15 @@
+import Foundation
 import MusicKit
 import Observation
 
 /// Thin wrapper over `ApplicationMusicPlayer.shared`. Deliberately small and
 /// debuggable (per spec): MusicKit owns the real queue/playback state; this
 /// exposes a derived `PlayerStateSnapshot` the now-playing bar binds to.
+///
+/// Local-first pivot: this no longer takes app models that carry live
+/// MusicKit objects. `PlaybackResolver` re-resolves stored ids to playable
+/// `MusicKit.Song`s and hands them here; the player code itself is unchanged
+/// from M1 (queue construction + transport).
 ///
 /// The snapshot is refreshed on a light async tick. MusicKit's player state
 /// isn't trivially Observation-bridgeable and we need a moving elapsed time;
@@ -23,7 +29,7 @@ final class PlaybackService {
     // isolation checking is sound. See plans/musickit-notes.md.
     @ObservationIgnored nonisolated(unsafe) private let player = ApplicationMusicPlayer.shared
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
-    @ObservationIgnored private var playlistContextID: MusicItemID?
+    @ObservationIgnored private var playlistContextID: String?
 
     func startMonitoring() {
         guard monitorTask == nil else { return }
@@ -42,14 +48,24 @@ final class PlaybackService {
 
     // MARK: - Intents
 
-    func play(playlist: PlaylistDetail) async {
-        playlistContextID = playlist.id
-        await setQueueAndPlay(tracks: playlist.tracks.map(\.track), startingAt: nil)
-    }
-
-    func play(playlist: PlaylistDetail, startingAt row: TrackRow) async {
-        playlistContextID = playlist.id
-        await setQueueAndPlay(tracks: playlist.tracks.map(\.track), startingAt: row.track)
+    /// Play a resolved set of `MusicKit.Song`s (already re-fetched by
+    /// `PlaybackResolver`), preserving playlist context, optionally starting
+    /// at a specific song. `playlistContextID` is the app/Apple playlist id.
+    ///
+    /// Returns `true` once the player has **actually entered the playing
+    /// state** (confirmed by polling `player.state.playbackStatus`, not the
+    /// 0.5 s-lagged snapshot) so the caller can record the play against the
+    /// real start signal — the Phase-3 follow-up bug fix. `false` means the
+    /// queue was set but playback did not confirm within the bounded wait
+    /// (error, or interrupted) — the play is then not recorded.
+    @discardableResult
+    func play(
+        songs: [MusicKit.Song],
+        startingAt start: MusicKit.Song?,
+        playlistContextID: String?
+    ) async -> Bool {
+        self.playlistContextID = playlistContextID
+        return await setQueueAndPlay(songs: songs, startingAt: start)
     }
 
     func togglePlayPause() async {
@@ -88,23 +104,74 @@ final class PlaybackService {
 
     // MARK: - Internals
 
-    private func setQueueAndPlay(tracks: [Track], startingAt start: Track?) async {
-        guard !tracks.isEmpty else {
+    private func setQueueAndPlay(
+        songs: [MusicKit.Song],
+        startingAt start: MusicKit.Song?
+    ) async -> Bool {
+        guard !songs.isEmpty else {
             lastError = "This playlist has no playable tracks."
-            return
+            return false
         }
+        var started = false
         do {
             if let start {
-                player.queue = ApplicationMusicPlayer.Queue(for: tracks, startingAt: start)
+                player.queue = ApplicationMusicPlayer.Queue(for: songs, startingAt: start)
             } else {
-                player.queue = ApplicationMusicPlayer.Queue(for: tracks)
+                player.queue = ApplicationMusicPlayer.Queue(for: songs)
             }
             try await player.play()
             lastError = nil
+            started = await confirmPlaybackStarted()
+
+            // Phase 5 auto-start polish (carried Phase-3/4 follow-up):
+            // on macOS, `player.play()` can resolve while the queue is still
+            // loading and the engine settles to `.paused` — the symptom was
+            // the now-playing bar showing ▶ at 0:05 until the transport was
+            // pressed. One bounded re-issue of `play()` reliably kicks it
+            // into `.playing` without a manual nudge. Idempotent (a player
+            // already playing stays playing); structured concurrency only.
+            if !started, !Task.isCancelled {
+                try await player.play()
+                started = await confirmPlaybackStarted()
+            }
         } catch {
             lastError = error.localizedDescription
         }
         refreshSnapshot()
+        return started
+    }
+
+    /// `player.play()` resolving does not guarantee the engine has reached
+    /// `.playing` yet (the queue may still be loading), and the now-playing
+    /// snapshot is only refreshed on a ~0.5 s poll — reading it right after
+    /// `play()` (the old bug) saw a stale `.stopped` so plays never recorded
+    /// *and* the UI sat on ▶ until the transport was pressed. Poll the
+    /// player's *own* live status on a short bounded loop, and the instant it
+    /// reports `.playing` publish a fresh snapshot so the now-playing bar
+    /// flips to "playing" immediately (no waiting for the next 0.5 s tick — the
+    /// Phase-5 auto-start immediacy fix). Structured concurrency only; never
+    /// `Task.sleep(nanoseconds:)`.
+    private func confirmPlaybackStarted(
+        timeout: Duration = .milliseconds(2500),
+        poll: Duration = .milliseconds(50)
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if player.state.playbackStatus == .playing {
+                // Reflect the real start the moment it happens, not on the
+                // next lagged poll — the UI must not need a transport nudge.
+                refreshSnapshot()
+                return true
+            }
+            // .stopped / .interrupted right after play() usually just means
+            // the queue is still loading; keep waiting until the deadline
+            // rather than failing on the first poll.
+            try? await Task.sleep(for: poll)
+        }
+        let confirmed = player.state.playbackStatus == .playing
+        if confirmed { refreshSnapshot() }
+        return confirmed
     }
 
     private func refreshSnapshot() {
@@ -116,14 +183,13 @@ final class PlaybackService {
         if let entry = player.queue.currentEntry {
             snap.title = entry.title
             snap.artist = entry.subtitle
-            snap.artwork = entry.artwork
             switch entry.item {
             case .song(let song):
                 snap.duration = song.duration
-                snap.nowPlayingItemID = song.id
+                snap.nowPlayingItemID = song.id.rawValue
             case .musicVideo(let video):
                 snap.duration = video.duration
-                snap.nowPlayingItemID = video.id
+                snap.nowPlayingItemID = video.id.rawValue
             case .none:
                 break
             @unknown default:

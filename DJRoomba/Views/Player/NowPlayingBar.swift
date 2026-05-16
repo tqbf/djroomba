@@ -11,7 +11,7 @@ struct NowPlayingBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ArtworkThumbnail(artwork: snapshot.artwork, size: 40, cornerRadius: 6)
+            ArtworkThumbnail(ref: snapshot.artworkRef, size: 40, cornerRadius: 6)
 
             VStack(alignment: .leading, spacing: 2) {
                 if snapshot.hasContent {

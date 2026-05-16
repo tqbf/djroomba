@@ -1,23 +1,33 @@
 import Foundation
-import MusicKit
 
 /// Derived UI projection of MusicKit player state. MusicKit owns the real
-/// playback/queue state; this is a read snapshot the now-playing bar binds to.
+/// playback/queue state; this is a read snapshot the now-playing bar binds
+/// to. It carries no live MusicKit objects (local-first pivot): artwork is
+/// re-resolved from the now-playing id and ids are raw strings, so the
+/// snapshot is a plain `Sendable` value.
 struct PlayerStateSnapshot: Sendable {
-    enum Status: Sendable {
+    enum Status: Sendable, Equatable {
         case stopped, playing, paused, interrupted, seekingForward, seekingBackward
     }
 
     var status: Status = .stopped
     var title: String?
     var artist: String?
-    var artwork: Artwork?
     var elapsed: TimeInterval = 0
     var duration: TimeInterval?
     /// App-local context: which playlist playback was started from, if known.
-    var playlistContextID: MusicItemID?
-    var nowPlayingItemID: MusicItemID?
+    var playlistContextID: String?
+    /// `MusicItemID.rawValue` of the now-playing item, if known.
+    var nowPlayingItemID: String?
 
     var hasContent: Bool { title != nil }
     var isPlaying: Bool { status == .playing }
+
+    /// Re-resolvable artwork for the now-playing item (D2). The player
+    /// resolves library Songs (provenance `.library`), so the now-playing id
+    /// re-resolves the same way every other thumbnail does.
+    var artworkRef: ArtworkRef? {
+        guard let nowPlayingItemID, !nowPlayingItemID.isEmpty else { return nil }
+        return .song(nowPlayingItemID, namespace: .library)
+    }
 }

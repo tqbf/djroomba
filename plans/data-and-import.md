@@ -11,32 +11,40 @@ async APIs and Swift-6 concurrency support, `ValueObservation` for live UI.
 Chosen over: SQLite.swift (thinner, less migration tooling), raw `sqlite3`
 (too much boilerplate), SwiftData (hides SQL — wrong fit for "I own the DB").
 
-Added via SPM through XcodeGen (`project.yml`):
+Added as a SwiftPM dependency in `Package.swift` (see
+[build-system.md](build-system.md) — there is no XcodeGen anymore):
 
-```yaml
-packages:
-  GRDB:
-    url: https://github.com/groue/GRDB.swift
-    from: "7.0.0"
-targets:
-  DJRoomba:
-    dependencies:
-      - package: GRDB
+```swift
+dependencies: [
+    .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
+],
+// in the DJRoomba target's dependencies:
+//   .product(name: "GRDB", package: "GRDB.swift"),
 ```
 
 DB file: `Application Support/DJRoomba/library.sqlite` (sandbox-safe;
 `URL.applicationSupportDirectory`). Schema versioned with
 `DatabaseMigrator`; every change is a new named migration (never edit old).
 
-## Schema (initial sketch — refine in M3)
+## Schema (as built — Phase 2, `v1.initialSchema`)
 
-Identifiers: store the MusicKit `MusicItemID` raw string **and** which
-namespace it is (`library` vs `catalog`) so `PlaybackResolver` knows how to
-re-fetch. Never assume the two id spaces are interchangeable.
+Finalized and shipped as the GRDB `DatabaseMigrator` registration
+`v1.initialSchema` (see `DJRoomba/Persistence/Database/LibraryMigrator.swift`).
+Foreign keys are **enforced** (`Configuration.foreignKeysEnabled = true` in
+`AppDatabase`). Codable record types live one-per-file in
+`DJRoomba/Persistence/Records/`; the async API is `LibraryStore`. Dates are
+GRDB `.datetime` (text, ms precision). Bools are `.boolean` (INTEGER 0/1).
+
+Identifiers: store the MusicKit `MusicItemID` raw string **and** its
+namespace (`library` vs `catalog`) so `PlaybackResolver` knows how to
+re-fetch. Never assume the two id spaces are interchangeable. The app's
+**stable** identity is `song.id` (a minted UUID) — *not* the MusicKit id —
+so FK references survive Apple re-issuing ids and re-import is
+non-destructive.
 
 ```
 song(
-  id TEXT PRIMARY KEY,            -- app-stable uuid
+  id TEXT PRIMARY KEY,            -- app-minted UUID (stable; FK target)
   music_item_id TEXT NOT NULL,    -- MusicItemID rawValue
   id_namespace TEXT NOT NULL,     -- 'library' | 'catalog'
   title TEXT NOT NULL,
@@ -45,73 +53,360 @@ song(
   duration REAL,                  -- seconds, nullable
   is_explicit INTEGER NOT NULL DEFAULT 0,
   artwork_url TEXT,               -- resolved/cached, nullable
-  imported_at REAL NOT NULL,
-  UNIQUE(music_item_id, id_namespace)
+  imported_at DATETIME NOT NULL,
+  UNIQUE(music_item_id, id_namespace)            -- import dedupe key
 )
 
-apple_playlist(                   -- read snapshot of an imported Apple list
-  id TEXT PRIMARY KEY,            -- MusicItemID rawValue (library)
+apple_playlist(                   -- read-only snapshot of an Apple list
+  id TEXT PRIMARY KEY,            -- Apple library MusicItemID rawValue
   name TEXT NOT NULL,
   artwork_url TEXT,
   curator TEXT,
-  last_imported_at REAL NOT NULL
+  last_imported_at DATETIME NOT NULL
 )
-apple_playlist_track(apple_playlist_id TEXT, song_id TEXT, position INTEGER,
-                     PRIMARY KEY(apple_playlist_id, position))
+apple_playlist_track(
+  apple_playlist_id TEXT NOT NULL REFERENCES apple_playlist ON DELETE CASCADE,
+  song_id          TEXT NOT NULL REFERENCES song          ON DELETE RESTRICT,
+  position         INTEGER NOT NULL,
+  PRIMARY KEY(apple_playlist_id, position))
+INDEX idx_apple_playlist_track_song (song_id)
 
-app_playlist(                     -- user-created, SQLite-only
-  id TEXT PRIMARY KEY,            -- app uuid
+app_playlist(                     -- user-created, SQLite-only, never to Apple
+  id TEXT PRIMARY KEY,            -- app-minted UUID
   name TEXT NOT NULL,
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL,
-  sort_index INTEGER NOT NULL
-)
-app_playlist_track(app_playlist_id TEXT, song_id TEXT, position INTEGER,
-                    PRIMARY KEY(app_playlist_id, position))
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  sort_index INTEGER NOT NULL)
+INDEX idx_app_playlist_sort_index (sort_index)
+app_playlist_track(
+  app_playlist_id TEXT NOT NULL REFERENCES app_playlist ON DELETE CASCADE,
+  song_id         TEXT NOT NULL REFERENCES song         ON DELETE RESTRICT,
+  position        INTEGER NOT NULL,
+  PRIMARY KEY(app_playlist_id, position))
+INDEX idx_app_playlist_track_song (song_id)
 
-play_event(song_id TEXT, played_at REAL)         -- one row per play
-song_stat(song_id TEXT PRIMARY KEY,              -- denormalized for sort/UI
-          play_count INTEGER NOT NULL DEFAULT 0,
-          last_played_at REAL)
+play_event(                       -- append-only history, one row per play
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  song_id   TEXT NOT NULL REFERENCES song ON DELETE RESTRICT,
+  played_at DATETIME NOT NULL)
+INDEX idx_play_event_song_played_at (song_id, played_at)
 
-favorite_playlist(playlist_id TEXT PRIMARY KEY,  -- apple or app id
-                  source TEXT NOT NULL)          -- 'apple' | 'app'
-recent_playlist(playlist_id TEXT PRIMARY KEY, source TEXT, played_at REAL)
+song_stat(                        -- denormalized rollup for sort/UI
+  song_id        TEXT PRIMARY KEY REFERENCES song ON DELETE CASCADE,
+  play_count     INTEGER NOT NULL DEFAULT 0,
+  last_played_at DATETIME)
+INDEX idx_song_stat_last_played_at (last_played_at)
+INDEX idx_song_stat_play_count     (play_count)
+
+favorite_playlist(                -- replaces UserDefaults FavoritesStore
+  playlist_id TEXT PRIMARY KEY,   -- apple library id OR app uuid
+  source      TEXT NOT NULL)      -- 'apple' | 'app'  (no FK: 2 referents)
+recent_playlist(                  -- replaces UserDefaults RecentlyPlayedStore
+  playlist_id TEXT PRIMARY KEY,   -- one row/playlist; ordered+capped on read
+  source      TEXT NOT NULL,
+  played_at   DATETIME NOT NULL)
+INDEX idx_recent_playlist_played_at (played_at)
 ```
 
-`play_count`/`last_played_at` maintained from `play_event` (trigger or in the
-write that records a play). Favorites/recents replace the UserDefaults stores.
+**FK cascade vs restrict — deliberate choices (documented in the migrator):**
 
-## ImportService (MusicKit → SQLite, one-way)
+- Deleting an `apple_playlist` / `app_playlist` **cascades** its
+  `*_playlist_track` rows: a playlist owns its membership.
+- Deleting a `song` is **RESTRICTed** while it's referenced by any playlist
+  track or `play_event`. Listening history must never be silently destroyed
+  as a side effect of an import edge case; pruning a song is an explicit,
+  separate operation. (This is also why the snapshot-replace transaction is
+  atomic: a bad `song_id` makes the whole replace roll back to the prior
+  snapshot — tested.)
+- `song_stat` **cascades** with its `song` (a stat is meaningless without
+  the song; history in `play_event` is the durable record).
+- `favorite_playlist` / `recent_playlist` have **no DB FK**: the referent
+  is in one of two tables chosen by `source`. Integrity is enforced in app
+  code; stale rows are harmless (filtered at merge time).
 
-- Read library playlists via `MusicLibraryRequest<Playlist>` (paged, as M1).
-- For each, lazily fetch tracks (`playlist.with([.tracks])`, paged).
-- Upsert songs (dedupe on `(music_item_id, id_namespace)`), replace the
-  `apple_playlist` + its `apple_playlist_track` rows transactionally.
-- Incremental + manual (⌘R). Full re-import is acceptable for v1 (volumes are
-  modest); optimize later only if needed.
-- Pure import — never deletes app playlists or play stats.
+`play_count`/`last_played_at` are maintained **in the write that records a
+play** (`LibraryStore.recordPlay`, one transaction) — deliberately *not* a
+SQL trigger, so the rollup logic is visible and unit-tested.
+`last_played_at` only ever advances (a backfilled older event won't move it
+backward). Favorites/recents replace the UserDefaults stores.
 
-## PlaybackResolver (SQLite id → playable MusicKit item)
+## Migration-extensibility rules (enforced; do not violate)
 
-At play time, take the song rows for the queue, group by `id_namespace`, batch
-re-fetch: `MusicLibraryRequest`/`MusicCatalogResourceRequest` filtered by
-`MusicItemID`, then build `ApplicationMusicPlayer.Queue(for:)` /
-`(for:startingAt:)` (same player code as M1). Record a `play_event` for the
-starting track when playback actually begins.
+The schema **will** grow (tags, ratings, smart playlists, multi-source sync
+state, artwork variants, artist/album entities, soft-delete). The migrator
+is built so that is painless. These rules are also stated in a comment block
+at the top of `LibraryMigrator.swift` — the code is the source of truth:
 
-## Concurrency
+1. **Never edit a shipped migration.** Once `v1.initialSchema` (or any later
+   one) has run on a real DB, its closure is frozen forever. Every change is
+   a **new** `migrator.registerMigration("vN.<change>") { ... }` appended
+   below the previous one. Editing a shipped migration silently diverges
+   installed databases.
+2. **`eraseDatabaseOnSchemaChange` MUST stay `false`.** The DB is the source
+   of truth (local-first pivot) — never auto-wipe user data.
+3. Migrations run in registration order, each exactly once, in a
+   transaction. Re-running the migrator on an up-to-date DB is a **no-op**
+   (idempotent — tested).
+4. The migrator is a standalone `static var` with no app/MusicKit deps, so
+   migration tests don't need the app to run.
+5. Adding a nullable column or a new table = one new migration + one record
+   file + (maybe) one `LibraryStore` method. The coarse, intent-named store
+   API and Codable records keep it a localized change, never a refactor.
 
-- `LibraryStore` wraps a GRDB `DatabaseQueue`; DB work via `try await
-  dbQueue.read/write { }` off the main actor. GRDB types are Sendable-aware.
-- `MusicController` stays `@MainActor @Observable`; it `await`s store calls and
-  republishes results as observable state. `ValueObservation` may drive live
-  sidebar updates later; start with explicit reload after import.
-- Strict Swift 6 concurrency retained; same `nonisolated(unsafe)` note for
-  `ApplicationMusicPlayer` applies (see `plans/musickit-notes.md`).
+## ImportService (MusicKit → SQLite, one-way) — as built (Phase 3)
 
-## Migration from M1/M2
+`DJRoomba/Music/ImportService.swift`, `@MainActor @Observable` (MusicKit
+request/response types are main-actor-friendly and volumes are modest). It
+`await`s the `Sendable`, off-main `LibraryStore`; only `Sendable` values
+(`Song`, `ApplePlaylist`, ids) cross that boundary.
 
-Favorites/recents currently in UserDefaults: on first M3 launch, migrate any
-existing values into the new tables, then stop using the UserDefaults keys
-(leave a one-shot migration; don't keep dual writes).
+- Read library playlists via `MusicLibraryRequest<Playlist>` (paged, the
+  proven M1 loop, capped `maxPlaylistBatches`).
+- Per playlist: `playlist.with([.tracks])` then page `detailed.tracks`
+  (capped `maxTrackBatches`). Per-playlist failures are tolerated (collected
+  into `lastError`) so one bad playlist never aborts the whole import.
+- Map `Track`→`Song`; dedupe per playlist on the import key
+  `(music_item_id, id_namespace)` while preserving full playlist order
+  (a song twice in a list keeps both positions). `upsertSongs` (store
+  preserves the stable `song.id`), then ONE batched id lookup
+  (`songIDsByKey`), then `replaceApplePlaylistSnapshot` (transactional).
+  Only `song` + `apple_playlist*` are written — the store guarantees
+  app-owned tables are untouched (Phase 2 test still green).
+- **Underlying-item id + provenance namespace (the D1 corrective —
+  supersedes the deleted string classifier).** A MusicKit `Track` is an
+  enum (`.song(Song)` / `.musicVideo(MusicVideo)`); its own `track.id` is an
+  opaque library `MusicItemID` that does **not** round-trip. `song(from:)`
+  unwraps the case and stores the **underlying item's** id
+  (`song.id.rawValue` / `musicVideo.id.rawValue`). Because every track here
+  comes from a *library* playlist, `id_namespace` is fixed by **provenance**
+  to `.library` — never inferred from the id's shape. The old
+  `namespace(forRawID:)` heuristic (`i.`→library / bare-numeric→catalog)
+  is **deleted**: it degenerated to integer sign on real macOS library
+  ids and broke the round trip (caught by the signed gate). Library vs
+  catalog id spaces are still NOT interchangeable — provenance, not
+  string-sniffing, decides which.
+- Wired to the Refresh affordance (⌘R / toolbar) via
+  `MusicController.refreshLibrary()`, and run on first authorized launch
+  when `store.songCount() == 0`. Full re-import is the v1 cost
+  (**~90–120 s for a ~270-playlist / ~8200-track library — dominated by
+  MusicKit's per-playlist track resolution on macOS, NOT SQLite and NOT
+  fixable by app-side parallelism**; the loop is strictly serial after a
+  bounded-parallel attempt was measured ineffective and reverted in the
+  Phase-5 corrective — see `architecture.md` → "Import performance shape").
+  Incremental import was investigated and deliberately deferred (unreliable
+  `lastModifiedDate` on the macOS library → stale-snapshot risk). Pure
+  import — never deletes app playlists or play stats.
+
+## PlaybackResolver (SQLite id → playable MusicKit item) — as built
+
+`DJRoomba/Music/PlaybackResolver.swift`, `@MainActor @Observable`. At play
+time, take the selected playlist's stored `TrackRow`s:
+
+1. `groupByNamespace` (pure, unit-tested) splits + de-dupes ids per
+   namespace.
+2. Library ids → `MusicLibraryRequest<MusicKit.Song>().filter(matching:
+   \.id, memberOf: ids)` — the **live, dev-signed path Phase 1 proved**
+   (no catalog/MusicKit-App-Service entitlement). Since import is now
+   provenance-`.library` for everything, this branch carries the whole
+   queue. The catalog branch (`MusicCatalogResourceRequest<Song>`) is
+   wired but **dormant**: it receives nothing today (no catalog-namespace
+   ids are imported) and is kept only for a future catalog-import feature;
+   it must only ever get genuinely catalog ids. The two re-fetches are
+   independent: a catalog failure keeps the library resolutions.
+3. `reassemble` (pure, unit-tested) rebuilds the queue in original row
+   order, **dropping unresolvable rows and reporting them**
+   (`unresolvedMusicItemIDs`) — one bad/region-removed/user-upload id never
+   breaks the queue (risk register). The start song falls back to the first
+   resolved row if the requested start dropped.
+4. Hand the resolved `[MusicKit.Song]` to the **unchanged** M1
+   `PlaybackService` (it now takes resolved songs, builds
+   `ApplicationMusicPlayer.Queue(for:)` / `(for:startingAt:)` exactly as
+   before). `MusicController` records a `play_event` (`store.recordPlay`,
+   which also rolls `song_stat`) for the track that actually started.
+
+Pure grouping/reassembly are `nonisolated static` so they unit-test without
+a live MusicKit session; the re-fetch itself is verified only on a signed
+run (the 🔴 id round-trip — diagnosed + corrected, runtime re-verification
+pending). A visible inline error surface (`MusicController.playbackProblem`,
+rendered as a `.caption` `.orange`-glyph `Label` in the playlist header)
+means a resolve/playback failure is no longer silent.
+
+## Batch write idioms (the D3 corrective — user-flagged)
+
+Row-by-row import pegged a core for ~90s. Reworked into SQLite batch
+idioms, behavior identical (re-import still non-destructive, snapshot
+replace still one atomic transaction, app-owned tables still never touched
+— the existing tests stay green, new `BatchImportTests` add coverage):
+
+- `LibraryStore.upsertSongs` = ONE `write` of chunked multi-row
+  `INSERT … VALUES (…),(…),… ON CONFLICT(music_item_id, id_namespace)
+  DO UPDATE SET col = excluded.col …`. The `DO UPDATE` deliberately
+  **omits `id`** so an existing row keeps its stable PK (and every
+  playlist/history FK) while metadata refreshes — this *is* the
+  non-destructive-re-import guarantee, now enforced by the UPSERT itself.
+- `LibraryStore.songIDsByKey(_:)` resolves every import key → stored
+  `song.id` in ONE chunked `WHERE (music_item_id, id_namespace) IN
+  (VALUES …)` read, replacing `ImportService`'s per-song N-await loop.
+- `replaceApplePlaylistSnapshot` membership insert is chunked multi-row.
+- All multi-row statements chunk via `Array.chunked(into:)` so a single
+  statement never exceeds SQLite's 999 bound-parameter cap, regardless of
+  library size. `SongKey` lives on `LibraryStore` (the import key type).
+
+## App-playlist CRUD (Phase 4 — SQLite-only, never to Apple)
+
+User-owned playlists are the product. They live **only** in
+`app_playlist` / `app_playlist_track` (the Phase-2 tables; **no schema
+change was needed** — the v1 cascade FK already drops membership on delete,
+v1 stays frozen). `AppPlaylistService` (`@MainActor @Observable`) owns the
+listing + CRUD; it `await`s the off-main store and reloads from SQLite after
+every write (no dual store). The `LibraryStore` additions, all single
+transactions, all batch idioms (never an N-await per-row loop), all proven
+by `AppPlaylistCRUDTests` to leave `apple_playlist*`/song/stat/history
+untouched (the one-way-isolation invariant for Phase 4):
+
+- `createAppPlaylist(named:)` — inserts with `sort_index = MAX(sort_index)+1`
+  computed **inside the write** so two quick creates can't collide.
+- `renameAppPlaylist` / `deleteAppPlaylist` — one UPDATE / one DELETE
+  (membership cascades via the v1 FK; songs are delete-RESTRICTed so history
+  survives).
+- `addSongsToAppPlaylist` — append at tail; the next position is read once
+  inside the txn; chunked multi-row INSERT (≤999-var cap). Duplicates allowed
+  (a song may appear twice).
+- `removeTracksFromAppPlaylist(positions:)` — chunked `IN` delete **then**
+  dense renumber to `0..<count` (the composite PK `(playlist,position)` must
+  stay gap-free), one atomic txn.
+- `setAppPlaylistTracks` — bulk-delete + chunked multi-row re-insert; this is
+  the full-membership replace used by drag-to-reorder.
+- `reorderAppPlaylists(orderedIDs:)` — one chunked `UPDATE … SET sort_index =
+  CASE id WHEN ? THEN ? … END WHERE id IN (…)` per chunk; never a per-row
+  statement loop.
+- `appPlaylistTrackCounts()` — one grouped `COUNT(*)` for the sidebar counts.
+- `songsWithStats(in{App,Apple}Playlist:)` — one indexed LEFT JOIN of the
+  ordered membership against `song_stat` so the track table's play-count /
+  last-played columns populate in a single query (no per-song stat fetch;
+  stays fast for large playlists). Membership table/column are interpolated
+  from a fixed allow-list, never user input.
+
+## App-playlist playback re-resolution (Phase 4 — per-song, 1:1)
+
+Imported Apple playlists re-resolve at **playlist granularity** (above).
+App playlists are arbitrary song collections with **no backing Apple
+playlist**, so that path doesn't apply. The Phase-3 probe established the
+shape that *does* round-trip: a stored `music_item_id` (the underlying
+library `Song`'s id, captured by import provenance) re-resolves **1:1** via
+`MusicLibraryRequest<MusicKit.Song>.filter(matching:\.id, equalTo: storedID)`
+when queried **one id at a time** — only batch `memberOf` loses the
+query→result correspondence (the returned `Song.id` differs).
+
+`PlaybackResolver.resolveAppPlaylist(rows:startAt:)`:
+1. `groupByNamespace` (pure, unit-tested) → unique library ids (catalog
+   branch dormant, no catalog imports).
+2. `resolveLibrarySongsIndividually` — one `equalTo` request per **unique**
+   id, issued through a **bounded** `TaskGroup` (sliding window of 8;
+   structured concurrency, no GCD, doesn't flood MusicKit on a large list),
+   each task swallowing its own error and yielding nil (one miss never
+   aborts the rest), the result map keyed by the **stored** id.
+3. `reassemble` (pure, unit-tested) — rebuild in playlist order, duplicates
+   re-expanded, misses dropped + reported (`unresolvedMusicItemIDs` →
+   inline `playbackProblem`), and `Resolution.startSongID` set to the
+   started track's **stored `song.id`** (the FK target for play recording —
+   the resolved `Song.id` ≠ the stored id, so id-matching back to a row is
+   unreliable; this carries the right id directly).
+4. Hand the `[MusicKit.Song]` to the **unchanged** `PlaybackService`.
+
+The disproven Phase-3 batch-`memberOf` `resolve(rows:startAt:)` (+ its
+`fetchLibrarySongs` helper) was **removed** — it keyed by the resolved
+`Song.id` while `reassemble` looked up by the stored id (zero matches, the
+documented gate failure). The pure helpers it shared are kept and now back
+the working per-id path. The per-id re-fetch itself is signed-run
+verification (no live MusicKit session in tests).
+
+## Play tracking (Phase 4 — fires on the *real* start)
+
+`recordPlay`/`song_stat` (Phase 2) is unchanged. The Phase-3 follow-up bug
+— the `if playback.snapshot.isPlaying` guard read the 0.5 s-polled snapshot
+too early so a play was never recorded — is fixed at the trigger:
+`PlaybackService.play` now returns `Bool`; after `player.play()`,
+`confirmPlaybackStarted()` polls the player's **own** `state.playbackStatus`
+on a short bounded loop (50 ms / ≤2.5 s, `Task.sleep(for:)` only) until
+`.playing`. `MusicController` records the play **only on a confirmed start**,
+for `Resolution.startSongID` (the stored `song.id` the resolver attributes
+the start to — deterministic for both the imported and app-playlist paths).
+
+## Artwork (the D2 corrective)
+
+Phase 3 stored `Artwork.url(...)`, which for *library* items on macOS is a
+private `musicKit://…` scheme `URLSession` cannot fetch — every thumbnail
+regressed to the placeholder. Phase 1 showed real art by handing a live
+`MusicKit.Artwork` to MusicKit's own `ArtworkImage` view (it fetches +
+caches the bitmap itself, private scheme included); `plans/musickit-notes.md`
+already recommends `ArtworkImage`. Restored exactly that, staying
+local-first (only the id is stored):
+
+- `ArtworkProvider` (`actor`): given a stored `MusicItemID` + namespace +
+  kind, lazily re-resolves the owning library item
+  (`MusicLibraryRequest<Song>` / `<Playlist>` — an imported Apple
+  playlist's own id is a library id) and returns its `Artwork`. Process-
+  wide cache + in-flight de-dup + **negative caching** (a known-artless id
+  isn't re-requested every scroll). No GCD; only `Sendable` values cross.
+- `ArtworkThumbnail` renders `ArtworkImage(artwork, width:height:)`
+  (Phase-1-identical) from a new `ArtworkRef`; same fixed frame / corner
+  radius / `.quaternary`+SF-Symbol placeholder / 0.2s value-driven
+  cross-fade / no layout shift. The unfetchable `artwork_url` column is
+  retained but written `nil` — **no schema migration** (v1 stays frozen).
+  `ArtworkImageLoader` (the URL loader) is deleted. Offline: a miss
+  degrades to the same native placeholder; once shown, MusicKit's own
+  on-disk artwork cache serves it again.
+
+## Concurrency (as built)
+
+- `LibraryStore` and `AppDatabase` are `Sendable` **value types**,
+  intentionally **not `@MainActor`**. The only stored state is GRDB's
+  internally-serialized, `Sendable` `DatabaseQueue`; there is no app-level
+  shared mutable state and no external locking. All DB work runs off the
+  main actor via `try await dbQueue.read/write { }`. `read` = snapshot
+  read; `write` = a single transaction (commit on success, roll back on
+  throw) — multi-step invariants (snapshot replace, play accounting) are
+  done inside ONE `write` so they're atomic.
+- `MusicController` stays `@MainActor @Observable`; it `await`s store calls
+  and republishes results as observable state (the documented data-flow
+  boundary). Phase 3 uses an explicit reload after import (`library.load()`
+  then sidebar reads SQLite); `ValueObservation` for a live sidebar is a
+  Phase 5 option if warranted.
+- Phase 3 services `ImportService` / `PlaybackResolver` / `LibraryReadService`
+  / `PlaylistDetailService` are `@MainActor @Observable` like the M1 MusicKit
+  services and `await` the off-main store. Pure logic (resolver
+  grouping/reassembly) is `nonisolated static` so it is testable without an
+  actor hop or a live MusicKit session. (The string namespace classifier is
+  gone — namespace is provenance, decided at import, not classified.)
+- Artwork: `ArtworkProvider` is a process-wide `actor` (serialized cache +
+  in-flight de-dup + negative cache; `MusicLibraryRequest` re-resolve via a
+  `nonisolated static`). No GCD, no locks; only `Sendable` values cross
+  actors (`MusicKit.Artwork` is `Sendable`). SQLite stores only the id;
+  nothing live (`MusicKit.Artwork`) is persisted — it is re-derived on
+  demand and `ArtworkImage` renders it.
+- Strict Swift 6 concurrency retained and clean (`swift build` +
+  `swift test` both green). Same `nonisolated(unsafe)` note for
+  `ApplicationMusicPlayer` applies (see `plans/musickit-notes.md`); GRDB
+  added no new concurrency friction.
+- `swift test` (`.testTarget` `DJRoombaTests`) is the store/migration gate.
+  `@testable import DJRoomba` of the `@main` executable target links and
+  runs on the Swift 6.3 SwiftPM toolchain, so **no `@main` restructuring
+  was needed** and app behavior is unchanged.
+
+## Migration from M1/M2 — as built (Phase 3)
+
+`DJRoomba/Persistence/LegacyPreferencesMigration.swift`. On first authorized
+launch it reads the M2 UserDefaults keys `favoritePlaylistIDs` /
+`recentlyPlayedPlaylistIDs` once and writes them into `favorite_playlist` /
+`recent_playlist` (source `.apple` — every M2 favorite was an Apple library
+playlist; app playlists are Phase 4). Recents are stamped oldest→newest so
+reading back `ORDER BY played_at DESC` reproduces the legacy
+most-recent-first list. A sentinel `legacyPrefsMigratedToSQLite_v1` gates
+re-runs; after it is set the legacy keys are **never read or written again**
+(no dual write — SQLite is the sole source of truth). The legacy keys are
+left in place (cheap; avoids data loss on a hypothetical downgrade) but
+inert. `FavoritesStore` / `RecentlyPlayedStore` were deleted;
+`UserPreferencesStore` (last selection) deliberately stays in UserDefaults.
+The pure `plan(...)` derivation is unit-tested; the one-shot run is tested
+end-to-end against an in-memory store + an isolated `UserDefaults` suite.

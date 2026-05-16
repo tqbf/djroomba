@@ -5,9 +5,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>$(EXECUTABLE_NAME)</string>
+	<string>DJRoomba</string>
 	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<string>org.sockpuppet.djroomba</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -15,13 +15,13 @@
 	<key>CFBundleDisplayName</key>
 	<string>DJ Roomba</string>
 	<key>CFBundlePackageType</key>
-	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>$(MARKETING_VERSION)</string>
+	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<string>14.0</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
 	<key>NSPrincipalClass</key>
@@ -34,5 +34,20 @@
 	<true/>
 	<key>NSSupportsSuddenTermination</key>
 	<true/>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.sockpuppet.djroomba.song</string>
+			<key>UTTypeDescription</key>
+			<string>DJ Roomba Song</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict/>
+		</dict>
+	</array>
 </dict>
 </plist>
