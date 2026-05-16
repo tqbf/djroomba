@@ -49,10 +49,31 @@ lazily-scrolled list of recently-played songs (built on the Phase-1–4
   `RecentlyPlayedTests`: distinct/newest-first, cross-boundary keyset
   no-overlap/terminate, re-float, empty, seeder member-only/min-count/
   zero/accumulate+cap); `swiftformat` 0, `swiftlint` 0.
-- **Next:** live computer-use validation on a dev-signed build — seed 500
-  via the Debug menu, confirm the scroll renders and lazy-loads, play a
-  row. (`playRecentlyPlayed` carries the same class of MusicKit signed
-  gate as Phases 2–4.)
+- **Live computer-use validation — PASSED (dev-signed build, real
+  imported library).** Seeded 500 via the Debug menu; the surface
+  replaces "Select a Playlist"; native rows (artwork / title /
+  artist • album / relative time), distinct & newest-first; scrolling
+  **lazy-loads** (subtitle count 50 → 100 as keyset pages append,
+  smooth); double-click **plays real audio** (now-playing bar advances)
+  via `playRecentlyPlayed` — which itself recorded the manual start +
+  an auto-advance, and on relaunch those two real plays correctly
+  floated to the top ("2 minutes ago") above the synthetic seed
+  ("28 minutes ago"): **Phases 1–4 dogfooded end-to-end on a signed
+  run.** Relaunch with no persisted selection opened **straight to
+  Recently Played** (the original ask). One UI bug found & fixed: the
+  header subtitle rendered the literal `^[N song](inflect: true)` markup
+  — `subtitle` was a `String` passed to `Text` (verbatim init);
+  changed to `LocalizedStringKey` so SwiftUI applies grammar agreement
+  (now "50 songs"). Rebuilt/re-verified; `swift build` clean, 107/19
+  green, lint 0. This signed run also incidentally exercised the
+  Phase 2–4 playback/auto-advance gate via the Recently Played queue
+  (worked); the dedicated Phase 2–4 signed-gate checklist still stands
+  for the playlist paths.
+- **Note (minor, not fixed):** the debug seeder staggers synthetic
+  `last_played_at` by `index*3s` while `seq` is insertion-order, so
+  synthetic rows' relative-time labels run slightly opposite to seq
+  order (cosmetic, synthetic-data only; real plays are correct — see
+  the dogfood result above).
 
 ## 2026-05-16 — ✅ Play statistics Phase 4 + FEATURE CODE-COMPLETE
 

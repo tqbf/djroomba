@@ -74,8 +74,11 @@ struct RecentlyPlayedView: View {
     .padding(20)
   }
 
-  /// The header's secondary line. Built out of `body` (swiftui-pro).
-  private var subtitle: String {
+  /// The header's secondary line. A `LocalizedStringKey` (NOT `String`) so
+  /// `Text` applies automatic grammar agreement — `Text(someString)` is the
+  /// verbatim initializer and would render the `^[…](inflect:)` markup
+  /// literally. Built out of `body` (swiftui-pro).
+  private var subtitle: LocalizedStringKey {
     let count = controller.recentlyPlayed.rows.count
     guard count > 0 else { return "Songs you play show up here" }
     return "^[\(count) song](inflect: true)"
