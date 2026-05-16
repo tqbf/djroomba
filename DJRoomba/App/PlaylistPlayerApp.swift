@@ -1,7 +1,44 @@
 import SwiftUI
 
+#if DEBUG || PROFILE_RECORDER
+import Logging
+import ProfileRecorderServer
+#endif
+
+// MARK: - PlaylistPlayerApp
+
 @main
 struct PlaylistPlayerApp: App {
+
+  // MARK: Lifecycle
+
+  init() {
+    #if DEBUG || PROFILE_RECORDER
+    // In-process sampling profiler (apple/swift-profile-recorder), for the
+    // perf investigations documented in plans/profiling.md. This is
+    // **inert** unless `PROFILE_RECORDER_SERVER_URL_PATTERN` (or
+    // `PROFILE_RECORDER_SERVER_URL`) is set at launch: with neither,
+    // `parseFromEnvironment()` returns `.default` (no bind target) and the
+    // server never listens. Compiled only in DEBUG builds, or release builds
+    // explicitly opted in with `-Xswiftc -DPROFILE_RECORDER` (for
+    // release-accurate profiles); the normal release / notarized `make dist`
+    // build defines neither, so it never references or starts it.
+    // `Task.detached` (not GCD) is the correct way to launch this
+    // process-lifetime background service from a synchronous `App.init`;
+    // `runIgnoringFailures` swallows any bind error (e.g. sandbox) so it can
+    // never affect the app.
+    Task.detached(priority: .utility) {
+      do {
+        let configuration = try await ProfileRecorderServerConfiguration.parseFromEnvironment()
+        await ProfileRecorderServer(configuration: configuration)
+          .runIgnoringFailures(logger: Logger(label: "profile-recorder"))
+      } catch {
+        // Only reached for a malformed PROFILE_RECORDER_SERVER_URL* value.
+        // Never started → never affects the app; nothing else to do.
+      }
+    }
+    #endif
+  }
 
   // MARK: Internal
 
@@ -70,6 +107,11 @@ struct PlaylistPlayerApp: App {
           Task { await controller.refreshLibrary() }
         }
         .keyboardShortcut("r", modifiers: .command)
+
+        Button("Reimport Everything") {
+          Task { await controller.reimportEverything() }
+        }
+        .keyboardShortcut("r", modifiers: [.command, .shift])
       }
 
       CommandGroup(after: .sidebar) {

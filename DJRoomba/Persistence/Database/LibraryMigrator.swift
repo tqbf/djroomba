@@ -185,6 +185,21 @@ enum LibraryMigrator {
 
     // ── v2+ migrations go BELOW this line. Never touch v1. ──────────
 
+    // v2: a per-playlist change token for incremental import. Nullable
+    // INTEGER = `Int(Playlist.lastModifiedDate.timeIntervalSince1970)` from
+    // the cheap library-list fetch (NOT the expensive per-playlist track
+    // fetch). Append-only nullable column: existing rows get NULL, which
+    // the import decision treats as "no comparable signal → re-fetch", so
+    // the change is non-destructive and degrades safely. Stored as an
+    // opaque Int token (not a `.datetime`) on purpose: GRDB round-trips
+    // dates at millisecond precision, which would break exact equality;
+    // an integer second-token compares exactly.
+    migrator.registerMigration("v2.applePlaylistChangeToken") { db in
+      try db.alter(table: "apple_playlist") { t in
+        t.add(column: "change_token", .integer)
+      }
+    }
+
     return migrator
   }
 }

@@ -18,6 +18,7 @@ struct ApplePlaylist: Codable, Identifiable, Hashable, Sendable {
     case artworkURL = "artwork_url"
     case curator
     case lastImportedAt = "last_imported_at"
+    case changeToken = "change_token"
   }
 
   /// Library-namespace `MusicItemID.rawValue`. Primary key.
@@ -26,6 +27,14 @@ struct ApplePlaylist: Codable, Identifiable, Hashable, Sendable {
   var artworkURL: String?
   var curator: String?
   var lastImportedAt: Date
+  /// Opaque per-playlist change token for incremental import:
+  /// `Int(Playlist.lastModifiedDate.timeIntervalSince1970)` captured at
+  /// import time from the cheap library-list fetch. `nil` when MusicKit
+  /// didn't provide a `lastModifiedDate` (common on macOS — see
+  /// musickit-notes) or the row predates the v2 migration; the import
+  /// decision treats `nil` as "no comparable signal → re-fetch", so the
+  /// default keeps every existing call site (and old rows) correct.
+  var changeToken: Int? = nil
 
 }
 
@@ -38,6 +47,7 @@ extension ApplePlaylist: FetchableRecord, MutablePersistableRecord {
     static let artworkURL = Column(CodingKeys.artworkURL)
     static let curator = Column(CodingKeys.curator)
     static let lastImportedAt = Column(CodingKeys.lastImportedAt)
+    static let changeToken = Column(CodingKeys.changeToken)
   }
 
   static let databaseTableName = "apple_playlist"

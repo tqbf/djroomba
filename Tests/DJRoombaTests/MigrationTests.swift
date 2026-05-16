@@ -19,9 +19,18 @@ struct MigrationTests {
   }
 
   @Test
-  func `migrator registers exactly V 1`() {
+  func `migrator registers V 1 then V 2 in order`() {
     let applied = LibraryMigrator.migrator.migrations
-    #expect(applied == ["v1.initialSchema"])
+    #expect(applied == ["v1.initialSchema", "v2.applePlaylistChangeToken"])
+  }
+
+  @Test
+  func `V 2 adds the apple playlist change token column`() throws {
+    let db = try AppDatabase()
+    let hasColumn = try db.dbQueue.read { db in
+      try db.columns(in: "apple_playlist").contains { $0.name == "change_token" }
+    }
+    #expect(hasColumn, "v2 must add apple_playlist.change_token")
   }
 
   @Test
@@ -48,7 +57,7 @@ struct MigrationTests {
     let songExists = try second.dbQueue.read { db in
       try db.tableExists("song")
     }
-    #expect(appliedAfterFirst == ["v1.initialSchema"])
+    #expect(appliedAfterFirst == ["v1.initialSchema", "v2.applePlaylistChangeToken"])
     #expect(appliedAfterSecond == appliedAfterFirst)
     #expect(songExists)
   }

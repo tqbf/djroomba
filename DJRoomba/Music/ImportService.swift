@@ -46,11 +46,22 @@ final class ImportService {
 
   // MARK: Internal
 
+  /// Whether one playlist must be re-fetched, or its existing snapshot is
+  /// provably still current.
+  enum PlaylistImportDecision: Equatable {
+    case fetch
+    case skipUnchanged
+  }
+
   private(set) var isImporting = false
   private(set) var lastError: String?
-  /// Coarse progress for the UI: playlists written / total discovered.
+  /// Coarse progress for the UI: playlists processed / total discovered.
   private(set) var importedPlaylistCount = 0
   private(set) var totalPlaylistCount = 0
+  /// Of `importedPlaylistCount`, how many were the incremental fast path
+  /// (unchanged → expensive track fetch skipped). Surfaced for the
+  /// profiling finding / a future "N updated, M unchanged" affordance.
+  private(set) var skippedPlaylistCount = 0
 
   /// Map a library playlist `Track` to a stored `Song`.
   ///
@@ -104,6 +115,37 @@ final class ImportService {
     )
   }
 
+  /// Incremental-import decision for ONE playlist, from the **cheap**
+  /// list-fetch metadata only. Conservative by construction:
+  /// `.skipUnchanged` ONLY when a snapshot exists AND both the stored and
+  /// the current change tokens exist AND are equal. Any uncertainty —
+  /// `force`, no current token (MusicKit gave no `lastModifiedDate`), no
+  /// snapshot yet, or no stored token — yields `.fetch`. Correctness is
+  /// never traded for speed: the worst case is a redundant fetch, never a
+  /// stale skip. Pure & `nonisolated` so it's unit-tested with no MusicKit
+  /// and no signing.
+  nonisolated static func importDecision(
+    currentToken: Int?,
+    storedToken: Int?,
+    hasStoredSnapshot: Bool,
+    force: Bool,
+  ) -> PlaylistImportDecision {
+    if force { return .fetch }
+    guard hasStoredSnapshot else { return .fetch }
+    guard let currentToken, let storedToken else { return .fetch }
+    return currentToken == storedToken ? .skipUnchanged : .fetch
+  }
+
+  /// The opaque per-playlist change token from the cheap list fetch:
+  /// `Int(playlist.lastModifiedDate.timeIntervalSince1970)`, or `nil` when
+  /// MusicKit supplied no `lastModifiedDate` (common on macOS — see
+  /// musickit-notes; the decision then conservatively re-fetches).
+  /// Integer seconds so it survives GRDB's millisecond date round-trip
+  /// under exact equality.
+  nonisolated static func changeToken(for playlist: Playlist) -> Int? {
+    playlist.lastModifiedDate.map { Int($0.timeIntervalSince1970) }
+  }
+
   /// Read the whole library and write it into SQLite one-way. Per-playlist
   /// failures are tolerated (logged into `lastError`) so one bad playlist
   /// doesn't abort the whole import.
@@ -119,36 +161,74 @@ final class ImportService {
   /// (`importedPlaylistCount` / `totalPlaylistCount`) advances as each
   /// playlist is *written*, so the sidebar shows "Importing N of M
   /// playlists…" — the one affordance kept from the reverted perf pass.
-  func runImport() async {
+  /// Incremental by default: per playlist, decide from the **cheap**
+  /// list-fetch metadata whether its membership can have changed, and only
+  /// run the expensive `fetchTracks` when it might have. `force: true`
+  /// re-fetches everything (the recovery / "Reimport Everything" path —
+  /// also what a smart/auto playlist whose contents changed server-side
+  /// without bumping `lastModifiedDate` needs). The write path is
+  /// unchanged and still strictly one-way isolated.
+  func runImport(force: Bool = false) async {
     guard !isImporting else { return }
     isImporting = true
     lastError = nil
     importedPlaylistCount = 0
     totalPlaylistCount = 0
+    skippedPlaylistCount = 0
     defer { isImporting = false }
 
     do {
       let playlists = try await fetchAllLibraryPlaylists()
       totalPlaylistCount = playlists.count
 
+      // Cheap: existing snapshot ids → stored change token (no track
+      // scan). The basis for skipping the expensive per-playlist fetch.
+      let existing = try await store.applePlaylistChangeTokens()
+
       var failures = [String]()
 
-      // Serial: fetch this playlist's tracks, write it, advance the
-      // progress count, move on. One playlist in flight at a time.
+      // Serial, one playlist in flight at a time. For each: decide skip
+      // vs fetch from list metadata only; only `.fetch` pays the
+      // MusicKit per-playlist track-resolution cost (the ~99% — see
+      // plans/profiling.md).
       for playlist in playlists {
-        do {
-          let tracks = try await Self.fetchTracks(
-            of: playlist,
-            maxTrackBatches: maxTrackBatches,
-          )
-          try await writePlaylist(playlist, tracks: tracks)
-        } catch {
-          failures.append(
-            "\(playlist.name): \(error.localizedDescription)"
-          )
+        let id = playlist.id.rawValue
+        let decision = Self.importDecision(
+          currentToken: Self.changeToken(for: playlist),
+          storedToken: existing[id] ?? nil,
+          hasStoredSnapshot: existing.keys.contains(id),
+          force: force,
+        )
+
+        switch decision {
+        case .skipUnchanged:
+          // Provably current — keep the snapshot, just record that this
+          // import saw it. The expensive `fetchTracks` is NOT called.
+          try? await store.touchApplePlaylistImportDate(id, to: Date.now)
+          skippedPlaylistCount += 1
+
+        case .fetch:
+          do {
+            let tracks = try await Self.fetchTracks(
+              of: playlist,
+              maxTrackBatches: maxTrackBatches,
+            )
+            try await writePlaylist(playlist, tracks: tracks)
+          } catch {
+            failures.append(
+              "\(playlist.name): \(error.localizedDescription)"
+            )
+          }
         }
         importedPlaylistCount += 1
       }
+
+      // Drop snapshots whose upstream playlist vanished. Cheap: the live
+      // id set is from the list fetch already done; FK cascade removes
+      // only their membership (one-way isolation preserved).
+      try? await store.pruneApplePlaylists(
+        keeping: Set(playlists.map { $0.id.rawValue })
+      )
 
       if !failures.isEmpty {
         lastError = "Some playlists could not be imported:\n"
@@ -267,6 +347,10 @@ final class ImportService {
       artworkURL: nil,
       curator: playlist.curatorName,
       lastImportedAt: now,
+      // Persist the change token alongside the snapshot it describes, so
+      // the next import can skip re-fetching this playlist if MusicKit
+      // reports the same `lastModifiedDate`.
+      changeToken: Self.changeToken(for: playlist),
     )
     try await store.replaceApplePlaylistSnapshot(record, songIDs: songIDs)
   }

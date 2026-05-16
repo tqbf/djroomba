@@ -42,6 +42,7 @@ playlist-forward and intentionally simple.
 | [plans/build-system.md](plans/build-system.md) | **mdv-cloned build env** — SwiftPM + Makefile, no Xcode IDE/xcodebuild, signing, dist pipeline |
 | [plans/project-setup.md](plans/project-setup.md) | Signing, MusicKit entitlement/plist, how to build (points at build-system.md) |
 | [plans/musickit-notes.md](plans/musickit-notes.md) | MusicKit-on-macOS API specifics, gotchas, identity risks |
+| [plans/profiling.md](plans/profiling.md) | **Import perf investigation** — swift-profile-recorder runbook + the self-time hypotheses to test |
 | [plans/typography.md](plans/typography.md) | Semantic-font type system + hierarchy rules |
 | [plans/milestone-1.md](plans/milestone-1.md) | _Historical_ — original "Play a library playlist" notes |
 | [plans/milestone-2.md](plans/milestone-2.md) | _Historical_ — original "Make it pleasant" notes |

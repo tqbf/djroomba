@@ -23,13 +23,29 @@ let package = Package(
     .macOS(.v14)
   ],
   dependencies: [
-    .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0")
+    .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
+    // apple/swift-profile-recorder: in-process sampling profiler for perf
+    // investigations. Dormant unless PROFILE_RECORDER_SERVER_URL_PATTERN is
+    // set at launch; the server is only started behind `#if DEBUG` (see
+    // App/PlaylistPlayerApp.swift), so release/notarized builds never run it.
+    // Used to profile the known import hot path (see plans/profiling.md).
+    .package(
+      url: "https://github.com/apple/swift-profile-recorder.git",
+      .upToNextMinor(from: "0.3.0"),
+    ),
+    // swift-log: required to construct the `Logger` that
+    // `ProfileRecorderServer.runIgnoringFailures(logger:)` takes. Already in
+    // the graph transitively via swift-profile-recorder; declared directly
+    // so the target can `import Logging`. Only referenced behind `#if DEBUG`.
+    .package(url: "https://github.com/apple/swift-log.git", from: "1.6.1"),
   ],
   targets: [
     .executableTarget(
       name: "DJRoomba",
       dependencies: [
-        .product(name: "GRDB", package: "GRDB.swift")
+        .product(name: "GRDB", package: "GRDB.swift"),
+        .product(name: "ProfileRecorderServer", package: "swift-profile-recorder"),
+        .product(name: "Logging", package: "swift-log"),
       ],
       path: "DJRoomba",
       exclude: [

@@ -237,6 +237,63 @@ struct LibraryStore: Sendable {
     }
   }
 
+  /// Cheap snapshot state for the incremental-import decision: every
+  /// existing Apple-playlist `id` → its stored `change_token` (which may
+  /// be `nil`). Key present ⇒ a snapshot exists for that id. Reads only
+  /// `apple_playlist` (no track scan), so it stays trivial at library
+  /// scale. See `ImportService.importDecision`.
+  func applePlaylistChangeTokens() async throws -> [String: Int?] {
+    try await database.dbQueue.read { db in
+      var result = [String: Int?]()
+      let rows = try Row.fetchCursor(
+        db,
+        sql: "SELECT id, change_token FROM apple_playlist",
+      )
+      while let row = try rows.next() {
+        result[row["id"]] = row["change_token"] as Int?
+      }
+      return result
+    }
+  }
+
+  /// Mark an Apple playlist as seen by the current import without
+  /// rewriting its (unchanged) membership — the incremental fast path.
+  /// Touches only `apple_playlist.last_imported_at`; never the snapshot
+  /// tracks, app data, stats, favorites or recents.
+  func touchApplePlaylistImportDate(_ id: String, to date: Date) async throws {
+    try await database.dbQueue.write { db in
+      try db.execute(
+        sql: "UPDATE apple_playlist SET last_imported_at = ? WHERE id = ?",
+        arguments: [date, id],
+      )
+    }
+  }
+
+  /// Delete Apple-playlist snapshots whose upstream playlist no longer
+  /// exists (gone from the library since the last import). FK cascade
+  /// drops only their `apple_playlist_track` membership; by schema this
+  /// can never touch `app_playlist*`, `song`, `song_stat`, `play_event`,
+  /// favorites or recents — the one-way isolation invariant holds. A
+  /// no-op when nothing vanished.
+  func pruneApplePlaylists(keeping liveIDs: Set<String>) async throws {
+    try await database.dbQueue.write { db in
+      let storedIDs = try String.fetchSet(
+        db,
+        sql: "SELECT id FROM apple_playlist",
+      )
+      let stale = Array(storedIDs.subtracting(liveIDs))
+      guard !stale.isEmpty else { return }
+      for chunk in stale.chunked(into: Self.sqliteVariableLimit) {
+        let placeholders = Array(repeating: "?", count: chunk.count)
+          .joined(separator: ", ")
+        try db.execute(
+          sql: "DELETE FROM apple_playlist WHERE id IN (\(placeholders))",
+          arguments: StatementArguments(chunk),
+        )
+      }
+    }
+  }
+
   /// Songs of an imported playlist, in stored playlist order.
   func songs(inApplePlaylist playlistID: String) async throws -> [Song] {
     try await database.dbQueue.read { db in

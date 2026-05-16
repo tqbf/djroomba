@@ -216,20 +216,21 @@ final class MusicController {
     }
   }
 
-  /// The Refresh affordance (⌘R / toolbar). Re-imports from Apple Music
-  /// one-way, then reloads the sidebar/detail from SQLite.
+  /// The Refresh affordance (⌘R / toolbar). **Incremental** one-way
+  /// import — unchanged playlists skip the expensive MusicKit track
+  /// fetch — then reload the sidebar/detail from SQLite.
   func refreshLibrary() async {
     await runImport()
-    if
-      let id = selectedPlaylistID,
-      !allSummaries.contains(where: { $0.id == id })
-    {
-      // Playlist disappeared between refreshes — clear silently.
-      selectedPlaylistID = nil
-    } else if let summary = selectedSummary {
-      // Re-fetch fresh detail for the still-selected playlist.
-      detailService.select(summary)
-    }
+    reconcileSelectionAfterImport()
+  }
+
+  /// "Reimport Everything" (⇧⌘R / menu): **force** a full re-fetch of
+  /// every playlist. The recovery path for when the incremental change
+  /// signal can't be trusted — e.g. a smart/auto playlist whose contents
+  /// changed server-side without bumping `lastModifiedDate`.
+  func reimportEverything() async {
+    await runImport(force: true)
+    reconcileSelectionAfterImport()
   }
 
   func isFavorite(_ summary: PlaylistSummary) -> Bool {
@@ -411,9 +412,25 @@ final class MusicController {
     restoreSelection()
   }
 
-  /// Run the one-way import, then reload the store-backed sidebar.
-  private func runImport() async {
-    await importService.runImport()
+  /// After any import, keep the selection coherent: drop it if the
+  /// selected playlist vanished, else refresh its detail.
+  private func reconcileSelectionAfterImport() {
+    if
+      let id = selectedPlaylistID,
+      !allSummaries.contains(where: { $0.id == id })
+    {
+      // Playlist disappeared between refreshes — clear silently.
+      selectedPlaylistID = nil
+    } else if let summary = selectedSummary {
+      // Re-fetch fresh detail for the still-selected playlist.
+      detailService.select(summary)
+    }
+  }
+
+  /// Run the one-way import (incremental by default; `force` re-fetches
+  /// every playlist), then reload the store-backed sidebar.
+  private func runImport(force: Bool = false) async {
+    await importService.runImport(force: force)
     detailService.invalidate()
     await library.load()
   }

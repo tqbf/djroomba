@@ -5,6 +5,93 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ Incremental import implemented (the only real lever)
+
+Acted on the profiling finding: don't re-fetch tracks for playlists that
+didn't change.
+
+- **Migration `v2.applePlaylistChangeToken`** (append-only, nullable
+  `apple_playlist.change_token` INTEGER; v1 untouched per the discipline).
+  Stored as `Int(Playlist.lastModifiedDate.timeIntervalSince1970)` —
+  integer seconds, exact `==` despite GRDB ms date round-trip.
+- **Pure decision** `ImportService.importDecision(...)` — conservative:
+  `.skipUnchanged` only on a confident snapshot+token match; every
+  uncertainty → `.fetch`. Never a stale skip (worst case: redundant
+  fetch). `runImport(force:)` skips via `touchApplePlaylistImportDate`
+  (no MusicKit track fetch) and `pruneApplePlaylists(keeping:)` drops
+  vanished snapshots (FK-cascade only — one-way isolation preserved).
+- **Escape hatch** ⇧⌘R "Reimport Everything" →
+  `MusicController.reimportEverything()` → `runImport(force: true)`;
+  recovery for smart/auto playlists that change server-side without
+  bumping `lastModifiedDate`. ⌘R stays incremental.
+- **Tests:** new `IncrementalImportTests` (10) — pure decision matrix +
+  store plumbing + the prune one-way-isolation invariant; `MigrationTests`
+  updated for v2 (list + new change_token-column check). Unsigned, no
+  MusicKit. **Gate: 78 tests / 16 suites green** (`ImportPerfBench`
+  still `.enabled(if:)`-skipped). `swift build` clean,
+  swiftformat/swiftlint clean.
+- **Honest caveat (in plans/data-and-import.md + profiling.md):** the
+  mechanism is correct/safe regardless; the *speedup* depends on macOS
+  MusicKit populating `lastModifiedDate` (often nil per musickit-notes) —
+  verifiable only on a signed Refresh. When nil it degrades to today's
+  full import: **no regression, worst case unchanged.** Not committed.
+
+## 2026-05-16 — ✅ Import perf ANSWERED: ~99% is MusicKit, not our code
+
+`ImportPerfBench` (env-gated test, unsigned, no MusicKit) runs the exact
+`ImportService.writePlaylist` app-side path over a real-scale synthetic
+library (270 playlists / ~18.8k slots / ~7.9k songs, file-backed SQLite):
+**total app-side write path ~1.08 s** (snapshot-replace 50%, upsert 34%,
+lookup 13%, mapping 1%) vs the **~90–120 s** real import. ⇒ **≈99% of
+import time is MusicKit's `playlist.with([.tracks])` fetch; there is no
+reducible app-side hotspot.** Confirms the long-standing H1 with a real
+isolated measurement (prior finding was only coarse wall-clock A/B);
+refutes H2/H3. **Only lever = incremental import** (skip MusicKit re-fetch
+for playlists unchanged since `lastImportedAt`) — a structural change, not
+a hotspot fix; app-side parallelism stays ruled out. Detail + table in
+`plans/profiling.md` findings log. No signed run needed for this
+conclusion (a signed profile would only show MusicKit's *internal*
+breakdown, which isn't our code). Normal `swift test` gate unchanged (67
+real tests green; the benchmark is `.enabled(if:)`-skipped — runtime
+still ~0.1 s). swiftformat/swiftlint clean. Not committed.
+
+## 2026-05-16 — 🔬 Profiling wired in (import perf investigation set up)
+
+Wired [apple/swift-profile-recorder](https://github.com/apple/swift-profile-recorder)
+into the app to profile the known ~90–120 s full-re-import cost; created the
+global `swift-profiling` skill (speedscope + computer-use +
+`scripts/hotspots.sh`).
+
+- **Package.swift:** added `swift-profile-recorder` (`.upToNextMinor(from:
+  "0.3.0")`, resolved 0.3.16) + `swift-log` (`Logging`, for the required
+  `Logger`; already transitive). GRDB pin untouched. `swift build` resolves
+  and links clean.
+- **`PlaylistPlayerApp.init()`:** starts `ProfileRecorderServer` via
+  `Task.detached` (structured concurrency, not GCD) behind
+  `#if DEBUG || PROFILE_RECORDER`. **Inert** unless
+  `PROFILE_RECORDER_SERVER_URL_PATTERN` is set (no env var ⇒ `.default`,
+  server never binds); `runIgnoringFailures` swallows sandbox bind errors;
+  the normal release/`make dist` build defines neither symbol so it's
+  never compiled in. Verified the real v0.3.16 API
+  (`parseFromEnvironment()` is `async throws`; blog snippet was stale).
+- **No new "reimport" feature needed:** ⌘R "Refresh Playlists" →
+  `refreshLibrary()` → `runImport()` is already a full, non-incremental
+  re-import — repeatable for profile/iterate. Documented rather than adding
+  redundant UI.
+- **`plans/profiling.md`** added (PLAN.md index updated): the signed-build
+  + sandbox-container-socket runbook, the ⌘R/curl/`hotspots.sh`/speedscope
+  loop, and the **self-time hypotheses** to test — notably that the prior
+  "it's all MusicKit, not reducible" finding came from coarse wall-clock
+  A/B, not a self-time profile, so the profile may still surface app-side
+  self-time (`song(from:)`/write-path/ARC) or point at incremental import.
+- Verification: `swift build` clean, `swift test` **67/67 / 14 suites**,
+  `swiftformat --lint` clean, `swiftlint` 0 on changed files. Behavior
+  unchanged when the env var is unset (i.e. always, in normal use).
+- **Open:** the actual capture needs a *signed* run against a real Apple
+  Music library (MusicKit + sandbox) — that's a USER step (runbook in
+  `plans/profiling.md`); I can drive `hotspots.sh`/speedscope analysis once
+  a `.perf` exists. Not committed (no instruction to; on `main`).
+
 ## 2026-05-15 — ✅ Airbnb Swift style pass (formatter + linter wired up)
 
 Applied the Swift skills (`airbnb-swift-style`, `swiftui-pro`) across the

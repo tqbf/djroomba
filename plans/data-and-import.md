@@ -193,9 +193,44 @@ request/response types are main-actor-friendly and volumes are modest). It
   fixable by app-side parallelism**; the loop is strictly serial after a
   bounded-parallel attempt was measured ineffective and reverted in the
   Phase-5 corrective — see `architecture.md` → "Import performance shape").
-  Incremental import was investigated and deliberately deferred (unreliable
-  `lastModifiedDate` on the macOS library → stale-snapshot risk). Pure
-  import — never deletes app playlists or play stats.
+  Pure import — never deletes app playlists or play stats. **Incremental
+  by default since 2026-05-16** (see next section); `force` re-fetches all.
+
+## Incremental import (2026-05-16 — the profiling lever)
+
+`plans/profiling.md` proved the ~90–120 s is ≈99% MusicKit's per-playlist
+`playlist.with([.tracks])`; the app-side write path is ~1 s. The only lever
+is **not fetching tracks for playlists that didn't change** — structural,
+not a hotspot fix.
+
+- **Cheap signal:** the playlist *list* fetch (`MusicLibraryRequest<Playlist>`,
+  already done, cheap) carries `Playlist.lastModifiedDate`. Stored per
+  snapshot as `apple_playlist.change_token` =
+  `Int(lastModifiedDate.timeIntervalSince1970)` (migration
+  `v2.applePlaylistChangeToken`; integer seconds so it survives GRDB's ms
+  date round-trip under exact `==`). `nil` when MusicKit gave no date.
+- **Decision** (`ImportService.importDecision`, pure / `nonisolated` /
+  unit-tested, no MusicKit): `.skipUnchanged` **only** when a snapshot
+  exists AND stored & current tokens both exist AND are equal; every
+  uncertainty (`force`, nil current, no snapshot, nil stored) →`.fetch`.
+  Conservative by construction: worst case a redundant fetch, **never a
+  stale skip**. Skip path = `touchApplePlaylistImportDate` (no track
+  fetch, no membership rewrite).
+- **Deletions:** the list fetch gives the full live id set, so
+  `pruneApplePlaylists(keeping:)` drops vanished snapshots; FK cascade
+  removes only their membership — one-way isolation preserved (tested:
+  app playlists / stats / favorites / recents untouched).
+- **Escape hatch:** ⇧⌘R "Reimport Everything" →
+  `MusicController.reimportEverything()` → `runImport(force: true)`. This
+  is the recovery for the one real risk — a **smart/auto playlist whose
+  contents change server-side without bumping `lastModifiedDate`** (also
+  the profiling vehicle, and what `ImportPerfBench` exercises at scale).
+- **Effectiveness caveat (honest):** the *mechanism* is correct & safe
+  regardless. Its *speedup* depends on macOS MusicKit actually populating
+  `lastModifiedDate` on library playlists — which `musickit-notes` flags
+  as often-nil. Verifiable only on a signed run; when nil, it simply
+  degrades to today's full import (no regression). Measured payoff TBD on
+  a signed Refresh; the worst case is unchanged from before.
 
 ## PlaybackResolver (SQLite id → playable MusicKit item) — as built
 
