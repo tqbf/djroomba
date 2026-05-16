@@ -73,6 +73,35 @@ final class PlaybackService {
     refreshSnapshot()
   }
 
+  /// The **live** playhead, read straight off `ApplicationMusicPlayer`
+  /// at the call instant: `player.playbackTime` and the current entry's
+  /// song/video `duration`. Synchronous and side-effect-free.
+  ///
+  /// Why not `snapshot`: the snapshot is only refreshed on the ~0.5 s
+  /// monitor tick, so near the `duration / 2` boundary it can be up to
+  /// half a second stale and **misclassify** a skip vs. a replay (a press
+  /// just before the half mark could read as just after, or vice versa).
+  /// The Phase-3 decision (`PlaybackResolver.skipKind`) hinges on that
+  /// exact boundary, so it must see the playhead as it is *now*, not as
+  /// the last poll saw it. Uses the same `@MainActor` /
+  /// `nonisolated(unsafe)` access to the shared player as
+  /// `refreshSnapshot()`; `duration` is `nil` when there is no current
+  /// entry or its item carries no duration (then `skipKind` → `.none`).
+  ///
+  /// SIGNED GATE (still pending — user): only a real signed run can
+  /// confirm that reading this *before* the transport call actually beats
+  /// MusicKit mutating `queue.currentEntry`, and that the returned
+  /// `elapsed` is accurate to the half-second the boundary needs. The
+  /// decision itself is pure and fully unit-tested; this read is the part
+  /// the live gate must verify.
+  func livePlayhead() -> (elapsed: TimeInterval, duration: TimeInterval?) {
+    let elapsed = player.playbackTime
+    guard let entry = player.queue.currentEntry else {
+      return (elapsed, nil)
+    }
+    return (elapsed, Self.itemDuration(of: entry))
+  }
+
   func skipNext() async {
     do {
       try await player.skipToNextEntry()
@@ -104,6 +133,22 @@ final class PlaybackService {
   @ObservationIgnored nonisolated(unsafe) private let player = ApplicationMusicPlayer.shared
   @ObservationIgnored private var monitorTask: Task<Void, Never>?
   @ObservationIgnored private var playlistContextID: String?
+
+  /// The playable `duration` of a queue entry's item (song or music
+  /// video), or `nil` when it has none / is an unknown kind. The single
+  /// place this 4-arm `entry.item` switch lives — `livePlayhead()` (the
+  /// Phase-3 skip/replay decision) and `refreshSnapshot()` (the
+  /// now-playing bar) both read duration the same way, so they can't drift.
+  private static func itemDuration(
+    of entry: ApplicationMusicPlayer.Queue.Entry
+  ) -> TimeInterval? {
+    switch entry.item {
+    case .song(let song): song.duration
+    case .musicVideo(let video): video.duration
+    case .none: nil
+    @unknown default: nil
+    }
+  }
 
   private static func map(
     _ status: MusicPlayer.PlaybackStatus
@@ -207,13 +252,12 @@ final class PlaybackService {
       // auto-advance/skip.)
       snap.queueIndex = player.queue.entries
         .firstIndex { $0.id == entry.id }
+      snap.duration = Self.itemDuration(of: entry)
       switch entry.item {
       case .song(let song):
-        snap.duration = song.duration
         snap.nowPlayingItemID = song.id.rawValue
 
       case .musicVideo(let video):
-        snap.duration = video.duration
         snap.nowPlayingItemID = video.id.rawValue
 
       case .none:

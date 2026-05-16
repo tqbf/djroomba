@@ -45,7 +45,7 @@ playlist-forward and intentionally simple.
 | [plans/musickit-notes.md](plans/musickit-notes.md) | MusicKit-on-macOS API specifics, gotchas, identity risks |
 | [plans/profiling.md](plans/profiling.md) | **Import perf investigation** — swift-profile-recorder runbook + the self-time hypotheses to test |
 | [plans/memory-and-laziness.md](plans/memory-and-laziness.md) | **Residency plan (A+B done)** — killed per-`body` recompute + bounded detail cache; records why GRDB observation was rejected (single-writer) and the mutation-chokepoint forward pattern |
-| [plans/play-statistics.md](plans/play-statistics.md) | Capped 50k numeric play history (`song.local_id`) + skip/replay counters; canonical attribution (no Apple ids as app keys); drops `play_event`. **Phase 1 ✅ shipped** (v3 schema + store API), **Phase 2 ✅ code-complete** (canonical play context; signed-gate pending); Phases 3–4 (skip-replay / auto-advance) unbuilt, signed-gated |
+| [plans/play-statistics.md](plans/play-statistics.md) | Capped 50k numeric play history (`song.local_id`) + skip/replay counters; canonical attribution (no Apple ids as app keys); drops `play_event`. **Phase 1 ✅ shipped** (v3 schema + store API), **Phases 2–3 ✅ code-complete** (canonical play context; skip/replay counting; signed-gate pending); Phase 4 (auto-advance recording) unbuilt, signed-gated |
 | [plans/typography.md](plans/typography.md) | Semantic-font type system + hierarchy rules |
 | [plans/milestone-1.md](plans/milestone-1.md) | _Historical_ — original "Play a library playlist" notes |
 | [plans/milestone-2.md](plans/milestone-2.md) | _Historical_ — original "Make it pleasant" notes |

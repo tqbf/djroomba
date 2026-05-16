@@ -294,11 +294,21 @@ final class MusicController {
     await playback.togglePlayPause()
   }
 
+  /// "Next" pressed. Before delegating to the transport — which mutates
+  /// `queue.currentEntry` and therefore `currentStoredSongID` — capture
+  /// the song that *was* playing and the *live* playhead, decide whether
+  /// this is a skip (Phase 3, ask #2), then run the unchanged transport.
   func skipNext() async {
+    recordTransportStat(button: .next)
     await playback.skipNext()
   }
 
+  /// "Back" pressed. Same capture-before-delegate ordering as
+  /// `skipNext()`; a press past halfway counts as a replay (Phase 3,
+  /// ask #3). The transport is unchanged — whatever MusicKit then does
+  /// (restart vs. previous entry) is irrelevant to the count.
   func skipPrevious() async {
+    recordTransportStat(button: .previous)
     await playback.skipPrevious()
   }
 
@@ -579,6 +589,60 @@ final class MusicController {
     Task {
       do {
         try await store.recordRecent(playlistID: id, source: source)
+      } catch {
+        storeError = error.localizedDescription
+      }
+    }
+  }
+
+  /// Phase 3 — decide and (fire-and-forget) record a skip/replay for the
+  /// track that *was* playing when a transport button was pressed. The
+  /// capture order is load-bearing and must run **before**
+  /// `playback.skip…` (the transport mutates `queue.currentEntry`, and
+  /// thus `currentStoredSongID` / the live playhead):
+  ///
+  /// 1. `songID` — the pre-skip current stored song (Phase 2; **our**
+  ///    `song.id` by structural queue position, never an Apple id).
+  /// 2. `(elapsed, duration)` — the **live** playhead off the player at
+  ///    the press instant, not the up-to-0.5 s-stale snapshot, so the
+  ///    `duration / 2` boundary can't be misclassified (see
+  ///    `PlaybackService.livePlayhead()`).
+  /// 3. `skipKind(…)` — the pure, deterministic decision.
+  /// 4. The caller then runs the unchanged transport.
+  ///
+  /// Recording is fire-and-forget off the optimistic path (mirrors
+  /// `recordRecentlyPlayed`): a store error sets `storeError` and never
+  /// blocks or delays the transport. A `.none` decision, an unknown
+  /// `songID`, or no store records nothing. `recordReplay` only bumps a
+  /// counter — it never appends `play_history` (Decision R4; guaranteed
+  /// by `LibraryStore.recordReplay` itself).
+  ///
+  /// Counting is a pure observer: it does not change how playback or
+  /// queueing behaves. The signed gate (pending — user) must confirm this
+  /// capture actually beats MusicKit's `currentEntry` mutation under a
+  /// real session; the decision is already deterministic & unit-tested.
+  private func recordTransportStat(button: PlaybackResolver.TransportButton) {
+    guard let store else { return }
+    let songID = currentStoredSongID
+    let playhead = playback.livePlayhead()
+    let kind = PlaybackResolver.skipKind(
+      elapsed: playhead.elapsed,
+      duration: playhead.duration,
+      button: button,
+    )
+    guard kind != .none, let songID else { return }
+    Task {
+      do {
+        switch kind {
+        case .skip:
+          try await store.recordSkip(songID: songID)
+
+        case .replay:
+          try await store.recordReplay(songID: songID)
+
+        case .none:
+          break
+        }
       } catch {
         storeError = error.localizedDescription
       }

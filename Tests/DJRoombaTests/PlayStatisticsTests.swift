@@ -286,6 +286,62 @@ struct PlayStatisticsTests {
     #expect(try await store.recentlyPlayedSongIDs() == ["s1"])
   }
 
+  /// Phase 3 structural freight: the capture → decide → record ordering,
+  /// to the extent it's unit-testable with no live MusicKit session.
+  /// Drives the *exact* pieces `MusicController.recordTransportStat` wires
+  /// together — `skipKind` on a live-style playhead, the pre-skip
+  /// `storedSongID` attribution (Phase 2 pure mapping), and the matching
+  /// `LibraryStore` write — and asserts: the recorded song is the
+  /// **pre-skip** current stored song, a `.none` decision records nothing,
+  /// and a replay adds **zero** `play_history` rows (Decision R4).
+  @Test
+  func `transport recording attributes to the pre skip song and obeys R4`() async throws {
+    let store = try TestSupport.freshStore()
+    try await store.upsertSongs([sample(id: "A", mid: "mA"), sample(id: "B", mid: "mB")])
+
+    // The canonical play context (Phase 2): our song.ids by structural
+    // position. "A" is the pre-skip current song (index 0); the transport
+    // would advance to "B" (index 1) — attribution must use the song that
+    // WAS playing, captured before that mutation.
+    let context: [String?] = ["A", "B"]
+    let preSkipSongID = try #require(PlaybackResolver.storedSongID(in: context, at: 0))
+    #expect(preSkipSongID == "A", "captured before the transport advances")
+
+    // 90 s track @ 10 s, "next" → a skip (1 s < 10 < 45), attributed to A.
+    let skip = PlaybackResolver.skipKind(elapsed: 10, duration: 90, button: .next)
+    #expect(skip == .skip)
+    try await store.recordSkip(songID: preSkipSongID)
+    var statA = try #require(try await store.songStat(songID: "A"))
+    #expect(statA.skipCount == 1)
+    #expect(try await store.songStat(songID: "B") == nil, "B (post-skip) untouched")
+
+    // 90 s track @ 60 s, "back" → a replay (60 > 45), attributed to A.
+    let replay = PlaybackResolver.skipKind(elapsed: 60, duration: 90, button: .previous)
+    #expect(replay == .replay)
+    try await store.recordReplay(songID: preSkipSongID)
+    statA = try #require(try await store.songStat(songID: "A"))
+    #expect(statA.replayCount == 1)
+
+    // A `.none` decision (e.g. exactly half) records nothing — the
+    // controller's `guard kind != .none` short-circuits before any write.
+    let none = PlaybackResolver.skipKind(elapsed: 45, duration: 90, button: .next)
+    #expect(none == .none)
+    // (no store call made for .none, mirroring the controller)
+    statA = try #require(try await store.songStat(songID: "A"))
+    #expect(statA.skipCount == 1, ".none never bumps a counter")
+    #expect(statA.replayCount == 1)
+
+    // Decision R4 — the load-bearing Phase-4 dependency: recordReplay (and
+    // recordSkip) leave play_history EMPTY and only move song_stat. A
+    // replay must NEVER become a history entry.
+    #expect(statA.playCount == 0, "skip/replay never touch play_count")
+    #expect(
+      try await store.recentlyPlayedSongLocalIDs().isEmpty,
+      "R4: a replay adds zero play_history rows (Phase-4 dependency)",
+    )
+    #expect(try await store.recentlyPlayedSongIDs().isEmpty)
+  }
+
   // MARK: Private
 
   private func sample(

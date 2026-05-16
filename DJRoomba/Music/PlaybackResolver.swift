@@ -77,6 +77,26 @@ final class PlaybackResolver {
     var catalogIDs: [MusicItemID]
   }
 
+  /// Which transport direction the user pressed. The only two inputs the
+  /// skip/replay decision distinguishes — `next` ("skip forward") vs
+  /// `previous` ("go back / replay"). MusicKit-free so the pure decision
+  /// (`skipKind`) stays unit-testable with no live session.
+  enum TransportButton: Sendable {
+    case next
+    case previous
+  }
+
+  /// What a transport press *means* for play statistics, decided purely
+  /// from the elapsed/duration/button triple (Phase 3, asks #2 & #3):
+  /// a `skip` (next pressed before halfway, past the intent dead-zone), a
+  /// `replay` (back pressed after halfway), or `none` (no countable
+  /// intent). `none` is the common case and never records anything.
+  enum SkipKind: Equatable, Sendable {
+    case skip
+    case replay
+    case none
+  }
+
   private(set) var lastError: String?
   /// Ids that could not be re-resolved on the most recent attempt — the
   /// UI/PROGRESS can surface this honestly rather than failing silently.
@@ -178,6 +198,52 @@ final class PlaybackResolver {
   ) -> String? {
     guard playContext.indices.contains(index) else { return nil }
     return playContext[index]
+  }
+
+  /// Decide whether a transport press counts as a **skip**, a **replay**,
+  /// or **nothing**, purely from how far into the track the user was when
+  /// they pressed (`elapsed`), how long the track is (`duration`), and
+  /// which direction they pressed (`button`). This is the entire Phase-3
+  /// policy: deterministic, MusicKit-free, and the only place the rule
+  /// lives, so it can be exhaustively unit-tested at every boundary with
+  /// no live session (mirrors `startIndex`/`groupByNamespace`).
+  ///
+  /// Rules (`plans/play-statistics.md` — Phase 3, Decisions R2 & R4):
+  /// - **Unknown / non-positive `duration`** (`nil` or `<= 0`) → `.none`.
+  ///   A missing duration is not signal (library songs almost always have
+  ///   one); without it the half-boundary is undefined.
+  /// - **`next`** → `.skip` iff `1 s < elapsed < duration / 2` (strict
+  ///   both ends). `elapsed <= 1 s` is the **intent dead-zone** (R2 —
+  ///   rapidly skipping through tracks carries no "didn't like it"
+  ///   signal); `elapsed >= duration / 2` is past the strict half rule.
+  ///   Both → `.none`.
+  /// - **`previous`** → `.replay` iff `elapsed > duration / 2` (strict).
+  ///   Otherwise `.none`. No dead-zone is needed: a replay already
+  ///   requires `elapsed > duration / 2`, unreachable at `elapsed <= 1 s`
+  ///   unless the track is `<= 2 s` (an absurd edge — no special-casing).
+  /// - Exactly 50 % is **neither** (strict `<` / `>`). On an ultra-short
+  ///   track where `duration / 2 <= 1 s` the skip window
+  ///   `1 < elapsed < duration / 2` is empty, so no skip ever counts —
+  ///   correct, and it falls straight out of the rule with no extra case.
+  ///
+  /// **Never appends history** (R4): a `.replay` only bumps a counter; the
+  /// caller routes it through `LibraryStore.recordReplay`, which by
+  /// construction never writes `play_history`. This function decides; it
+  /// performs no I/O.
+  nonisolated static func skipKind(
+    elapsed: TimeInterval,
+    duration: TimeInterval?,
+    button: TransportButton,
+  ) -> SkipKind {
+    guard let duration, duration > 0 else { return .none }
+    let half = duration / 2
+    switch button {
+    case .next:
+      return (elapsed > 1 && elapsed < half) ? .skip : .none
+
+    case .previous:
+      return elapsed > half ? .replay : .none
+    }
   }
 
   /// Re-resolve an imported Apple playlist for playback by its stored

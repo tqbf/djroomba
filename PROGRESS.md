@@ -5,6 +5,55 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ Play statistics Phase 3 (skip/replay counting; code-complete)
+
+`plans/play-statistics.md` **Phase 3** (asks #2 & #3). Count a **skip**
+("next" before halfway, past the intent dead-zone) and a **replay**
+("back" after halfway), attributed to the song that *was* playing,
+captured **before** the transport mutates the queue. Counters only —
+**R4: a replay never adds a `play_history` row** (Phase-1 `recordReplay`
+already guarantees this). No UI; recording-only.
+
+- **Pure decision core** `PlaybackResolver.skipKind(elapsed:duration:
+  button:) -> {skip,replay,none}` (`nonisolated static`, MusicKit-free).
+  Rules exactly: nil/`<=0` duration → none; `next` → skip iff
+  `1 < elapsed < duration/2` (strict both ends — R2 dead-zone inclusive
+  at 1.0, half-rule strict); `previous` → replay iff
+  `elapsed > duration/2` (strict); exactly 50% → none; ultra-short
+  (`duration/2 <= 1`) → empty skip window falls out with no special case.
+  `TransportButton`/`SkipKind` enums alongside the existing pure-core
+  precedent.
+- **`PlaybackService.livePlayhead()`** — synchronous `(elapsed,
+  duration)` read straight off the live player (NOT the ≤0.5 s-stale
+  snapshot: the `duration/2` boundary needs the playhead as it is *now*,
+  or a press near half misclassifies). Same `@MainActor`/
+  `nonisolated(unsafe) player` access as `refreshSnapshot`.
+- **`MusicController.recordTransportStat(button:)`** called first thing
+  in `skipNext()`/`skipPrevious()`, fully synchronous, **before** `await
+  playback.skip…`: capture `currentStoredSongID` (Phase-2 structural
+  attribution — our `song.id`, no Apple id), `livePlayhead()`,
+  `skipKind`; then fire-and-forget `store.recordSkip/recordReplay`
+  (mirrors `recordRecentlyPlayed`'s `Task{}`/`storeError` shape; never
+  blocks or delays the transport, which runs regardless of the decision).
+- **Cleanup gate (R6):** reuse/quality + swiftui-pro/efficiency 3-agent
+  pass — **no real defects**. Every R2 boundary walked and verified
+  exact (no `<=`/`<` slip); capture-before-delegate ordering confirmed
+  sound; R4 confirmed structural (`bumpStatCounter` never touches
+  `play_history`). swiftui-pro: zero new Observation surface (only the
+  existing `storeError`), O(1) at human cadence off every tick/`body`.
+  Applied one proactive DRY win: extracted the duplicated `entry.item →
+  duration` 4-arm switch into one `PlaybackService.itemDuration(of:)`
+  used by both `livePlayhead` and `refreshSnapshot` (prevents Phase-4
+  drift; `refreshSnapshot` keeps its own `nowPlayingItemID` UI extract).
+- **Verify:** `swift build` clean; **96 tests / 18 suites** green
+  (exhaustive `skipKind` boundary test + structural capture/R4 guard in
+  `PlayStatisticsTests`); `swiftformat` 0, `swiftlint` 0.
+- **Signed gate PENDING (user):** only a real signed run confirms the
+  pre-skip live capture actually beats MusicKit's `currentEntry`
+  mutation and that real `elapsed` is accurate to the half-boundary.
+  The decision itself is pure & fully unit-tested; this capture-vs-
+  mutation race is the sole unverified bit (documented at the code).
+
 ## 2026-05-16 — ✅ Play statistics Phase 2 (canonical play context; code-complete)
 
 `plans/play-statistics.md` **Phase 2** — THE enabler. Carry *our*

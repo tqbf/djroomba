@@ -214,6 +214,87 @@ struct PlaybackResolverTests {
     #expect(unresolved == ["L3"], "the single miss is tolerated + reported")
   }
 
+  /// THE falsifiable freight (Phase 3): the pure skip/replay decision at
+  /// **every** boundary from the plan's "Pays its freight". Deterministic,
+  /// MusicKit-free — exactly the case the pure core exists to lock down.
+  @Test
+  func `skipKind decides skip replay or none at every boundary`() {
+    typealias R = PlaybackResolver
+
+    // --- unknown / non-positive duration → always none (no signal) ---
+    #expect(R.skipKind(elapsed: 30, duration: nil, button: .next) == .none)
+    #expect(R.skipKind(elapsed: 30, duration: nil, button: .previous) == .none)
+    #expect(R.skipKind(elapsed: 5, duration: 0, button: .next) == .none)
+    #expect(R.skipKind(elapsed: 5, duration: 0, button: .previous) == .none)
+    #expect(R.skipKind(elapsed: 5, duration: -10, button: .next) == .none)
+    #expect(R.skipKind(elapsed: 5, duration: -10, button: .previous) == .none)
+
+    // --- next: skip iff 1 s < elapsed < duration/2 (strict both ends) ---
+    let d = 100.0 // half == 50
+    #expect(
+      R.skipKind(elapsed: 1.0, duration: d, button: .next) == .none,
+      "elapsed == 1 s is the dead-zone (R2, inclusive lower)",
+    )
+    #expect(
+      R.skipKind(elapsed: 1.01, duration: d, button: .next) == .skip,
+      "just past the dead-zone ⇒ skip",
+    )
+    #expect(
+      R.skipKind(elapsed: 0.5, duration: d, button: .next) == .none,
+      "well inside the dead-zone ⇒ no skip",
+    )
+    #expect(
+      R.skipKind(elapsed: 49.9, duration: d, button: .next) == .skip,
+      "49.9 % (< half) ⇒ skip",
+    )
+    #expect(
+      R.skipKind(elapsed: 50.0, duration: d, button: .next) == .none,
+      "exactly 50 % is neither (strict <)",
+    )
+    #expect(
+      R.skipKind(elapsed: 50.1, duration: d, button: .next) == .none,
+      "past half ⇒ no skip (it's a play-through, not a skip)",
+    )
+
+    // --- previous: replay iff elapsed > duration/2 (strict, no dead-zone) ---
+    #expect(
+      R.skipKind(elapsed: 50.1, duration: d, button: .previous) == .replay,
+      "50.1 % (> half) ⇒ replay",
+    )
+    #expect(
+      R.skipKind(elapsed: 50.0, duration: d, button: .previous) == .none,
+      "exactly 50 % is neither (strict >)",
+    )
+    #expect(
+      R.skipKind(elapsed: 49.9, duration: d, button: .previous) == .none,
+      "before half ⇒ not a replay",
+    )
+
+    // --- a 2 s track: dead-zone still bites; replay still possible ---
+    #expect(
+      R.skipKind(elapsed: 0.5, duration: 2, button: .next) == .none,
+      "2 s @ 0.5 s next ⇒ dead-zone, no skip",
+    )
+    #expect(
+      R.skipKind(elapsed: 1.5, duration: 2, button: .previous) == .replay,
+      "2 s @ 1.5 s back ⇒ past half ⇒ replay (no dead-zone on replay)",
+    )
+
+    // --- ultra-short track: duration/2 <= 1 s ⇒ skip window empty ---
+    // 1.5 s track: half == 0.75. The skip window is 1 < elapsed < 0.75,
+    // which is empty, so NO elapsed can ever count a skip (falls out of
+    // the rule — no special case).
+    for elapsed in [0.0, 0.5, 0.74, 0.75, 0.76, 1.0, 1.5] {
+      #expect(
+        R.skipKind(elapsed: elapsed, duration: 1.5, button: .next) == .none,
+        "ultra-short (half <= 1 s) ⇒ no skip at any elapsed (\(elapsed))",
+      )
+    }
+    // The same ultra-short track still replays correctly past its half.
+    #expect(R.skipKind(elapsed: 0.76, duration: 1.5, button: .previous) == .replay)
+    #expect(R.skipKind(elapsed: 0.75, duration: 1.5, button: .previous) == .none)
+  }
+
   // MARK: Private
 
   private func row(
