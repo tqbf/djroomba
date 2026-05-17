@@ -31,6 +31,7 @@ final class MusicController {
     detailService = PlaylistDetailService(store: safeStore)
     recentlyPlayed = RecentlyPlayedService(store: safeStore)
     importService = ImportService(store: safeStore)
+    genreImportService = GenreImportService(store: safeStore)
     resolver = PlaybackResolver()
     if openedStore == nil {
       storeError = "The local library database could not be opened."
@@ -51,6 +52,10 @@ final class MusicController {
   /// playlist is selected). Reads the keyset-paginated distinct history.
   let recentlyPlayed: RecentlyPlayedService
   let importService: ImportService
+  /// Album→track genre enrichment. Runs **only** on a full import
+  /// (Reimport Everything ⇧⌘R) or the empty-DB first import — never on the
+  /// fast incremental Refresh; see `runImport(force:firstImport:)`.
+  let genreImportService: GenreImportService
   let resolver: PlaybackResolver
 
   /// Observable mirrors of the persisted app state. SQLite is authoritative;
@@ -538,7 +543,10 @@ final class MusicController {
     // the user sees their playlists (matches the M1/M2 behavior of the
     // sidebar populating on launch, now via SQLite).
     if let store, (try? await store.songCount()) == 0 {
-      await runImport()
+      // Empty DB → first import. Pass `firstImport` so the genre pass
+      // runs once here too (it would otherwise only run on the explicit
+      // Reimport Everything path).
+      await runImport(firstImport: true)
     } else {
       await library.load()
     }
@@ -568,7 +576,16 @@ final class MusicController {
 
   /// Run the one-way import (incremental by default; `force` re-fetches
   /// every playlist), then reload the store-backed sidebar.
-  private func runImport(force: Bool = false) async {
+  ///
+  /// **Genre pass trigger decision.** Album genres are refreshed only when
+  /// `force` (Reimport Everything ⇧⌘R) **or** `firstImport` (the empty-DB
+  /// first import). The incremental Refresh path (`refreshLibrary` →
+  /// `runImport()` with both flags false) stays genre-free **on purpose**:
+  /// incremental Refresh deliberately skips unchanged playlists for speed,
+  /// and a full `MusicLibraryRequest<Album>` + per-album `.tracks` scan
+  /// every Refresh would defeat exactly that. The genre pass runs after
+  /// the playlist import so it tags rows the import has just (re)written.
+  private func runImport(force: Bool = false, firstImport: Bool = false) async {
     await importService.runImport(force: force)
     // Targeted (Phase B): drop only the cached details whose snapshot the
     // import actually changed/pruned. `.skipUnchanged` playlists keep
@@ -576,6 +593,13 @@ final class MusicController {
     // longer cold-re-reads the on-screen playlist. `force` re-fetches all,
     // so this naturally degrades to "invalidate everything that existed".
     detailService.invalidate(playlistIDs: importService.changedPlaylistIDs)
+    if force || firstImport {
+      // Full / first import only — refines `song.genre_names` on rows the
+      // import just wrote. Tolerant like the playlist import: its own
+      // per-album failures are collected into `genreImportService
+      // .lastError` and never abort startup/refresh.
+      await genreImportService.importAlbumGenres()
+    }
     await library.load()
     rebuildDerivedSummaries()
   }

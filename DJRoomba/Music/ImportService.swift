@@ -71,55 +71,57 @@ final class ImportService {
   /// a multi-day playlist).
   private(set) var changedPlaylistIDs = Set<String>()
 
-  /// Map a library playlist `Track` to a stored `Song`.
+  /// The durable underlying-item id for a library `Track` — the value we
+  /// store as `song.music_item_id`.
   ///
-  /// **The D1 corrective.** A MusicKit `Track` is an enum
-  /// (`.song(Song)` / `.musicVideo(MusicVideo)`); its own `track.id` is an
-  /// opaque library `MusicItemID` that does **not** round-trip through any
-  /// re-fetch. We unwrap the **underlying item** and store *its* id:
-  /// `song.id.rawValue` (or `musicVideo.id.rawValue`). And because these
-  /// tracks come exclusively from the user's *library* playlists, the
-  /// namespace is fixed by **provenance** to `.library` — `PlaybackResolver`
-  /// re-resolves these via `MusicLibraryRequest<Song>` (the dev-signed path
-  /// Phase 1 proved; no catalog/MusicKit-App-Service entitlement). The old
-  /// string-sniffing `namespace(forRawID:)` heuristic is deleted entirely:
-  /// provenance decides the namespace, never the shape of the id string.
+  /// A MusicKit `Track` is an enum (`.song` / `.musicVideo`); its own
+  /// `track.id` is an opaque library `MusicItemID` that does **not**
+  /// round-trip through any re-fetch (the D1 corrective). We always store
+  /// the **underlying item's** id instead — `song.id.rawValue` /
+  /// `musicVideo.id.rawValue`, falling back to `track.id.rawValue` for a
+  /// future `@unknown` case so import never drops a row. Provenance fixes
+  /// the namespace to `.library` separately; this returns only the id.
   ///
-  /// A `.musicVideo` is tolerated (stored with `.library` namespace too);
-  /// the resolver simply won't find it via `MusicLibraryRequest<Song>` and
-  /// will report it unresolved rather than crashing.
+  /// `nonisolated static` and pure (only `Sendable` in/out) so it crosses
+  /// the `@MainActor` boundary freely and is shared verbatim by
+  /// `ImportService.song(from:)` (playlist import) and
+  /// `GenreImportService` (album→track genre attribution) — the
+  /// id-extraction rule must be identical on both, so it lives here once
+  /// rather than being copy-pasted.
+  nonisolated static func underlyingItemID(of track: Track) -> String {
+    switch track {
+    case .song(let song):
+      song.id.rawValue
+
+    case .musicVideo(let video):
+      video.id.rawValue
+
+    @unknown default:
+      track.id.rawValue
+    }
+  }
+
   nonisolated static func song(from track: Track, importedAt: Date) -> Song {
     // Underlying-item id (NOT track.id). `Track` exposes the common
     // display fields directly; we keep using those for the snapshot's
-    // metadata. The enum payload gives both the durable id AND the "free"
-    // v4 metadata: those nine fields live on `MusicKit.Song` (already
-    // fetched by `playlist.with([.tracks])` — zero extra API calls), so we
-    // read them only when the track IS a song. A `.musicVideo` (or a
-    // future @unknown case) has no track/disc/composer/etc. in our model →
-    // those columns stay nil/[] (tolerated, never crash); the
-    // underlying-id + provenance-namespace logic is unchanged.
-    let underlyingID: String
-    let metadataSong: MusicKit.Song?
-    switch track {
-    case .song(let song):
-      underlyingID = song.id.rawValue
-      metadataSong = song
-
-    case .musicVideo(let video):
-      underlyingID = video.id.rawValue
-      metadataSong = nil
-
-    @unknown default:
-      // Forward-compat: fall back to the track id so import never
-      // drops a row; provenance namespace still applies. No song
-      // payload → no v4 metadata.
-      underlyingID = track.id.rawValue
-      metadataSong = nil
-    }
+    // metadata. The enum payload also gives the "free" v4 metadata: those
+    // nine fields live on `MusicKit.Song` (already fetched by
+    // `playlist.with([.tracks])` — zero extra API calls), so we read them
+    // only when the track IS a song. A `.musicVideo` (or a future @unknown
+    // case) has no track/disc/composer/etc. in our model → those columns
+    // stay nil/[] (tolerated, never crash). The durable id itself comes
+    // from the shared `underlyingItemID(of:)` unwrap so the
+    // id-extraction rule lives in exactly one place (it's reused verbatim
+    // by `GenreImportService` for album→track attribution).
+    let metadataSong: MusicKit.Song? =
+      switch track {
+      case .song(let song): song
+      default: nil
+      }
 
     return Song(
       id: UUID().uuidString,
-      musicItemID: underlyingID,
+      musicItemID: Self.underlyingItemID(of: track),
       // Provenance: library playlists → library namespace. Period.
       idNamespace: .library,
       title: track.title,

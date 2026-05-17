@@ -191,8 +191,23 @@ request/response types are main-actor-friendly and volumes are modest). It
   album↔track key (the `Album.id`/`.tracks` relationship, or requesting
   more Album properties). Album-granular by nature (a compilation gets
   one genre) and partial coverage (~58% of sampled albums carry no genre
-  tag — singles/podcasts/untagged). Not yet built; this is the spec for
-  it.
+  tag — singles/podcasts/untagged).
+- **IMPLEMENTED (v5, 2026-05-17).** `GenreImportService` pages
+  `MusicLibraryRequest<Album>`, skips empty-`genreNames` albums *before*
+  the per-album `album.with([.tracks])` fetch, unwraps each track via the
+  shared `ImportService.underlyingItemID(of:)` (== our
+  `song.music_item_id`), and `LibraryStore.applyAlbumGenres` batch-writes
+  (`CASE … WHEN ? THEN ? … WHERE music_item_id IN (…) AND
+  id_namespace='library'`, chunked ≤997 vars) onto `song.genre_names` —
+  **no album entity/table, no migration** (the v4 column). Runs **only**
+  on full import (Reimport Everything ⇧⌘R) / first import, never on the
+  fast incremental Refresh. The album→track id-join sidesteps the
+  empty-`album.title` wrinkle (we never needed the title). **Signed
+  verification on the real library:** `genre_names` 0 → **6362/8229
+  (77.3%)**, correctly attributed (Pearl Jam→Alternative, The Cars→Rock,
+  Underworld→Electronic), user hierarchical tags preserved ("Alt/Indie",
+  "Alt/Punk/Pixies-Related"); the ~23% blank are untagged-album tracks
+  (singles/podcasts/loose), as predicted.
 - Map `Track`→`Song`; dedupe per playlist on the import key
   `(music_item_id, id_namespace)` while preserving full playlist order
   (a song twice in a list keeps both positions). `upsertSongs` (store

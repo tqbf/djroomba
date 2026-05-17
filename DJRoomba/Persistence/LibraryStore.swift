@@ -238,6 +238,73 @@ struct LibraryStore: Sendable {
     }
   }
 
+  /// Apply album-derived genres onto the matching library `song` rows in
+  /// ONE write transaction.
+  ///
+  /// Input is keyed by the track's library `music_item_id` — NOT `song.id`
+  /// — because that is the only id the caller has: `GenreImportService`
+  /// walks `MusicLibraryRequest<Album>` → `album.with([.tracks])` and
+  /// unwraps each `Track` to its underlying-item id exactly the way
+  /// `ImportService.song(from:)` does (the durable id we already store as
+  /// `song.music_item_id`). It never sees our minted `song.id`. There is no
+  /// album entity/table — genre lives on the track rows, where the v4
+  /// `genre_names` column already is; this only writes that one column.
+  ///
+  /// Batch idiom: the same chunked `CASE`-driven UPDATE as
+  /// `reorderAppPlaylists` — one `UPDATE song SET genre_names =
+  /// CASE music_item_id WHEN ? THEN ? … END WHERE music_item_id IN (…) AND
+  /// id_namespace = ?` per chunk, never an N-statement per-row loop and
+  /// never an UPSERT (these rows already exist — import wrote them; genre
+  /// is a refinement, not an insert). The JSON form goes through
+  /// `Song.encodeGenreNames` so it round-trips identically to the
+  /// `upsertSongs` path; callers don't pass empty lists (an empty album
+  /// genre is skipped upstream), so the `[]`→NULL branch is not exercised
+  /// here. Library namespace only — every imported track is `.library` by
+  /// provenance (the D1 corrective), so a catalog row that happens to share
+  /// a `music_item_id` is deliberately untouched.
+  ///
+  /// Returns the accumulated `db.changesCount` (rows updated) so the caller
+  /// can surface coarse progress / verify the pass did work.
+  @discardableResult
+  func applyAlbumGenres(_ genreByMusicItemID: [String: [String]]) async throws -> Int {
+    guard !genreByMusicItemID.isEmpty else { return 0 }
+    // Each entry contributes 2 bind vars to the CASE (WHEN id THEN json)
+    // plus 1 to the IN list → 3/entry; the namespace adds one fixed var
+    // per statement. The `-1` reserves that trailing namespace bind so the
+    // worst-case chunk is 3·332+1 = 997 ≤ the 999-variable budget (unlike
+    // `reorderAppPlaylists`, which has no trailing bind and lands at 999).
+    let maxPerChunk = (Self.sqliteVariableLimit - 1) / 3
+    let entries = Array(genreByMusicItemID)
+    return try await database.dbQueue.write { db in
+      var changed = 0
+      for chunk in entries.chunked(into: maxPerChunk) {
+        let whenClauses = chunk
+          .map { _ in "WHEN ? THEN ?" }
+          .joined(separator: " ")
+        let inList = Array(repeating: "?", count: chunk.count)
+          .joined(separator: ", ")
+        var arguments = [(any DatabaseValueConvertible)?]()
+        arguments.reserveCapacity(chunk.count * 3 + 1)
+        for (musicItemID, genreNames) in chunk {
+          arguments.append(musicItemID)
+          arguments.append(Song.encodeGenreNames(genreNames))
+        }
+        arguments.append(contentsOf: chunk.map { $0.key })
+        arguments.append(Song.IDNamespace.library.rawValue)
+        try db.execute(
+          sql: """
+            UPDATE song
+            SET genre_names = CASE music_item_id \(whenClauses) END
+            WHERE music_item_id IN (\(inList)) AND id_namespace = ?
+            """,
+          arguments: StatementArguments(arguments),
+        )
+        changed += db.changesCount
+      }
+      return changed
+    }
+  }
+
   func song(id: String) async throws -> Song? {
     try await database.dbQueue.read { db in
       try Song.fetchOne(db, key: id)

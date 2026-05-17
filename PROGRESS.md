@@ -5,6 +5,53 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-17 — ✅ v5: album genres imported onto song.genre_names
+
+Acted on the probe finding. Genre lives on the library `Album`; the user
+wants it stored **on the track rows** (`song.genre_names`, the v4 column
+— **no album entity, no migration**).
+
+- **`GenreImportService`** (mirrors `ImportService`'s serial-loop /
+  cap / tolerate-per-item-failure shape): pages
+  `MusicLibraryRequest<Album>`, **skips empty-`genreNames` albums before
+  the per-album `album.with([.tracks])` fetch** (≈halves the work),
+  unwraps each track via the **shared** `ImportService.underlyingItemID(
+  of:)` (extracted; the id-rule now lives once — used by both playlist
+  import and this) which == our `song.music_item_id`, builds
+  `[musicItemID: genreNames]` (last-album-wins, documented).
+- **`LibraryStore.applyAlbumGenres`**: one-transaction chunked
+  `UPDATE … SET genre_names = CASE music_item_id WHEN ? THEN ? … END
+  WHERE music_item_id IN (…) AND id_namespace='library'` — the
+  `reorderAppPlaylists` batch idiom; library-namespace-only; touches
+  only `genre_names`; returns rows-updated.
+- **Trigger:** `runImport(force:firstImport:)` runs the genre pass iff
+  `force || firstImport` — Reimport Everything (⇧⌘R) / first import
+  only; the fast incremental Refresh stays genre-free (documented).
+- **The album→track id-join sidesteps the empty-`album.title` wrinkle**
+  the probe found — we never needed the title; the underlying library
+  Song id is the reliable key.
+- **Cleanup gate (R6):** correctness review confirmed the `song(from:)`
+  refactor is provably behavior-preserving (no library-wide-corruption
+  vector) and the batch CASE/IN/namespace bind alignment is exact with
+  non-vacuous tests. Fixed two low-sev hygiene items: an orphaned
+  duplicate doc block (stale `song(from:)` doc above `underlyingItemID`)
+  and a chunk-math off-by-one vs the file's own 999-var budget
+  (`(limit-1)/3` → worst case 997 ≤ 999, restores the invariant /
+  matches `reorderAppPlaylists` discipline).
+- **Verify:** `swift build` clean; **122 tests / 21 suites** green (new
+  `AlbumGenreApplyTests`: multi-id, 700-row unordered chunk boundary,
+  library-only, untouched-ids, idempotent, full one-way isolation, JSON
+  round-trip); `swiftformat`/`swiftlint` 0.
+- **Signed verification on the real 8229-song library:** Reimport
+  Everything → `genre_names` **0 → 6362/8229 (77.3 %)**, correctly
+  attributed (Pearl Jam→Alternative, The Cars→Rock, Underworld→
+  Electronic), user hierarchical tags preserved ("Alt/Indie",
+  "Alt/Punk/Pixies-Related"); top genres Rock 1667 / Alternative 1625 /
+  Pop 780 … The ~23 % blank are untagged-album tracks (singles /
+  podcasts / loose), exactly as the probe predicted.
+- Surfacing genre as a track-table column / sidebar grouping is the
+  trivial follow-on (existing sortable-column pattern) — out of scope.
+
 ## 2026-05-17 — 🔬 Genre probe: genre is on the library Album, not Song
 
 Throwaway signed diagnostic (Debug-menu `GenreProbe`, **reverted after**
