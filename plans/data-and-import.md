@@ -177,6 +177,22 @@ request/response types are main-actor-friendly and volumes are modest). It
   `Song` may not populate every field — NULL just means "not provided",
   harmless. All mutable (the UPSERT `DO UPDATE`s them, like `title`).
   Empirically-observed population on the real library: see PROGRESS.md.
+- **Genre lives on the library `Album`, not the `Song`** (signed probe,
+  2026-05-17): `Song.genreNames` 0/40 (library `Song` has no `.genres`
+  relationship to even request), `Artist.genreNames` 0/40,
+  **`Album.genreNames` ~17/40** with real user tags
+  (`["Alt/Goth/Industrial"]`, `["Pop/Rock/60s-70s/Classic"]`). The free
+  path to genre = a bulk `MusicLibraryRequest<Album>` (paged, no
+  per-item/catalog, no rate limit — a new request *type*, not an option
+  on the existing playlist fetch) → attribute each album's genre to its
+  tracks. **Open design wrinkle:** in that bulk Album request
+  `album.title`/`artistName` came back EMPTY, so album→song attribution
+  cannot naively join on the stored `album_title` — it needs a reliable
+  album↔track key (the `Album.id`/`.tracks` relationship, or requesting
+  more Album properties). Album-granular by nature (a compilation gets
+  one genre) and partial coverage (~58% of sampled albums carry no genre
+  tag — singles/podcasts/untagged). Not yet built; this is the spec for
+  it.
 - Map `Track`→`Song`; dedupe per playlist on the import key
   `(music_item_id, id_namespace)` while preserving full playlist order
   (a song twice in a list keeps both positions). `upsertSongs` (store

@@ -5,6 +5,37 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-17 — 🔬 Genre probe: genre is on the library Album, not Song
+
+Throwaway signed diagnostic (Debug-menu `GenreProbe`, **reverted after**
+— not in the repo; only this finding committed) to answer "where does
+genre live in MusicKit's macOS library graph, since Get Info shows it
+but our `Song.genreNames` is empty."
+
+- `Song.genreNames`: **0/40**. A library `Song` has no `.genres`
+  relationship to even request (`song.with([.genres])` does not compile).
+- `Artist.genreNames`: **0/40**.
+- **`Album.genreNames`: 17/40** — real, the user's own hierarchical
+  tags: `["Alt/Goth/Industrial"]`, `["Alt/Indie"]`,
+  `["Pop/Rock/60s-70s/Classic"]`. **Hypothesis confirmed: genre rides
+  on the Album.**
+- ~58% of sampled albums had no genre (singles / podcasts / comedy /
+  untagged) — album-genre is partial, album-granular (a compilation =
+  one genre across its tracks), exactly as Apple models it / the album
+  view shows.
+- **Path to get genres (free, no rate limit):** bulk
+  `MusicLibraryRequest<Album>` (paged, no per-item, no catalog
+  entitlement — a *new request type*, not an option on the existing
+  playlist fetch) → attribute album genre to its tracks. **NOT yet
+  built.**
+- **Open wrinkle the probe surfaced:** in the bulk Album request
+  `album.title`/`artistName` came back EMPTY, so album→song attribution
+  can't naively join on the stored `album_title`; it needs a real
+  album↔track key (the `Album.id`/`.tracks` relationship, or requesting
+  more Album properties). That's the design question for the
+  implementation — flagged, not hand-waved. Spec recorded in
+  `plans/data-and-import.md`.
+
 ## 2026-05-16 — ✅ Schema v4: free track metadata + EMPIRICAL signed verification
 
 Added migration `v4.songMetadata` (9 nullable `song` columns) and made
