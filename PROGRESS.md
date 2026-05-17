@@ -5,6 +5,50 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-16 — ✅ Schema v4: free track metadata + EMPIRICAL signed verification
+
+Added migration `v4.songMetadata` (9 nullable `song` columns) and made
+`ImportService.song(from:)` read the direct properties already on the
+`.song(let s)` payload `playlist.with([.tracks])` ALREADY returns —
+**Bucket 1 only: zero extra Apple calls, no per-item/catalog fan-out,
+no rate-limit exposure.** Code-complete & cleanup-gated (correctness
+review confirmed the genre dual-decode is one GRDB `FetchableRecord`
+decoder, the 19-col `upsertSongs` SQL is exact-aligned, frozen-migration
+rules intact). `swift build` clean, **114 tests / 20 suites** green,
+`swiftformat`/`swiftlint` 0.
+
+**Signed-DB verification (the empirical answer to "is this data free?").**
+v4 migrated the real **8229-song** container DB non-destructively
+(v3→v4, existing rows NULL); a signed `make` build + **Reimport
+Everything** repopulated via `song(from:)`; `sqlite3` on the live
+container DB after completion:
+
+| column | populated / 8229 | verdict |
+|---|---|---|
+| `release_date` | 8191 (99.5%) | **FREE** — real dates |
+| `disc_number` | 7708 (93.7%) | **FREE** |
+| `track_number` | 7646 (92.9%) | **FREE** |
+| `has_lyrics` | 8229 non-null (all `false`) | present-but-always-false (lyrics availability is catalog-side; the Bool is non-optional so stored, honestly, as false) |
+| `work_name` / `movement_name` | 11 (0.13%) | **FREE**, sparse by nature — classical only (verified real, e.g. "Suite bergamasque, L. 75" / "Clair de lune") |
+| `genre_names` | **0** | **NOT free** — empty on a macOS *library* `Song` |
+| `composer_name` | **0** | **NOT free** — ditto |
+| `isrc` | **0** | **NOT free** — ditto |
+
+Conclusion (definitive, measured — not doc-guessed): the write path
+provably works (release/track/disc/lyrics/work all carry real values;
+`has_lyrics` 100 % non-null proves the `.song` unwrap + v4 write fires
+for every song). **`genre_names`, `composer_name`, `isrc` are uniformly
+empty across all 8229 tracks** → MusicKit's *library-scoped* `Song`
+simply does not carry them on macOS; they are catalog-side and would
+require per-item `MusicCatalogResourceRequest` (the rate-limited Bucket 3
+we deliberately don't do and lack the entitlement for). So we now pull
+everything genuinely free; the three that aren't free are confirmed
+catalog-only, not a code defect. Columns are kept (harmless NULLs;
+they'd populate if a catalog path is ever added). Surfacing any of the
+populated fields in the track table is a trivial follow-on (the existing
+sortable-column pattern) — out of scope here (schema+import only).
+`plans/data-and-import.md` / `PLAN.md` updated; committed `4cf68bd`.
+
 ## 2026-05-16 — ✅ Recently Played landing surface (code-complete; live test next)
 
 New user request: opening the app with no playlist selected should show a
