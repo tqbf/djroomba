@@ -25,6 +25,7 @@ struct MigrationTests {
       "v1.initialSchema",
       "v2.applePlaylistChangeToken",
       "v3.playStatistics",
+      "v4.songMetadata",
     ])
   }
 
@@ -35,6 +36,64 @@ struct MigrationTests {
       try db.columns(in: "apple_playlist").contains { $0.name == "change_token" }
     }
     #expect(hasColumn, "v2 must add apple_playlist.change_token")
+  }
+
+  @Test
+  func `V 4 adds every free metadata column to song`() throws {
+    let db = try AppDatabase()
+    let columns = try db.dbQueue.read { db in
+      Set(try db.columns(in: "song").map { $0.name })
+    }
+    #expect(Self.v4SongColumns.isSubset(of: columns), "v4 must add all nine metadata columns")
+  }
+
+  /// v4 is non-destructive on a real v2/v3 DB: a `song` row written before
+  /// v4 survives the migration unchanged, and each new column reads NULL
+  /// (mirrors the Phase-1 `PlayStatisticsTests` v3-backfill pattern).
+  @Test
+  func `V 4 is non destructive on a v3 db existing rows preserved new columns null`() async throws {
+    let dbQueue = try DatabaseQueue()
+    // Migrate up to and including v3 only — none of the v4 columns exist.
+    try LibraryMigrator.migrator.migrate(dbQueue, upTo: "v3.playStatistics")
+    try await dbQueue.write { db in
+      try db.execute(sql: """
+        INSERT INTO song
+          (id, music_item_id, id_namespace, title, artist_name,
+           is_explicit, imported_at, local_id)
+        VALUES
+          ('idA', 'mA', 'library', 'A', 'Artist', 0,
+           '2026-01-01 00:00:00.000', 1)
+        """)
+    }
+
+    // Apply the rest of the migrator (v4).
+    try LibraryMigrator.migrator.migrate(dbQueue)
+
+    let applied = try await dbQueue.read { db in
+      try LibraryMigrator.migrator.appliedMigrations(db)
+    }
+    #expect(applied.contains("v4.songMetadata"))
+
+    let row = try await dbQueue.read { db in
+      try Row.fetchOne(db, sql: "SELECT * FROM song WHERE id = 'idA'")
+    }
+    let unwrapped = try #require(row)
+    // Existing data intact.
+    #expect(unwrapped["title"] as String == "A")
+    #expect(unwrapped["artist_name"] as String == "Artist")
+    #expect(unwrapped["local_id"] as Int == 1)
+    // Every new column present and NULL on the pre-existing row.
+    for column in Self.v4SongColumns {
+      #expect(
+        unwrapped[column] == nil,
+        "pre-v4 row must read NULL for \(column)",
+      )
+    }
+    // No new table was added by v4.
+    let tables = try await dbQueue.read { db in
+      Set(try Self.expectedTables.filter { try db.tableExists($0) })
+    }
+    #expect(tables == Self.expectedTables)
   }
 
   @Test
@@ -65,6 +124,7 @@ struct MigrationTests {
       "v1.initialSchema",
       "v2.applePlaylistChangeToken",
       "v3.playStatistics",
+      "v4.songMetadata",
     ])
     #expect(appliedAfterSecond == appliedAfterFirst)
     #expect(songExists)
@@ -108,6 +168,20 @@ struct MigrationTests {
     "song_stat",
     "favorite_playlist",
     "recent_playlist",
+  ]
+
+  /// The nine nullable "free" Apple-library metadata columns v4 adds to
+  /// `song` (no new table, no new index).
+  private static let v4SongColumns: Set = [
+    "track_number",
+    "disc_number",
+    "genre_names",
+    "release_date",
+    "composer_name",
+    "isrc",
+    "has_lyrics",
+    "work_name",
+    "movement_name",
   ]
 
 }

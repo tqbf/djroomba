@@ -102,29 +102,42 @@ struct LibraryStore: Sendable {
   /// the chunk loop (see the inline allocator comment).
   func upsertSongs(_ songs: [Song]) async throws {
     guard !songs.isEmpty else { return }
-    // 10 columns/row → keep chunks comfortably under the 999-variable cap.
-    let columnsPerRow = 10
+    // 10 base + 9 "free" v4 metadata columns/row = 19 → 999 / 19 = 52 rows
+    // per chunk, ~988 bound vars: still comfortably under the 999 cap.
+    let columnsPerRow = 19
     let maxRowsPerChunk = Self.sqliteVariableLimit / columnsPerRow
     try await database.dbQueue.write { db in
       for chunk in songs.chunked(into: maxRowsPerChunk) {
         let placeholders = Array(
-          repeating: "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          repeating: "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            + "?, ?, ?, ?, ?, ?, ?, ?, ?)",
           count: chunk.count,
         ).joined(separator: ", ")
         let sql = """
           INSERT INTO song
             (id, music_item_id, id_namespace, title, artist_name,
              album_title, duration, is_explicit, artwork_url,
-             imported_at)
+             imported_at,
+             track_number, disc_number, genre_names, release_date,
+             composer_name, isrc, has_lyrics, work_name, movement_name)
           VALUES \(placeholders)
           ON CONFLICT(music_item_id, id_namespace) DO UPDATE SET
-            title       = excluded.title,
-            artist_name = excluded.artist_name,
-            album_title = excluded.album_title,
-            duration    = excluded.duration,
-            is_explicit = excluded.is_explicit,
-            artwork_url = excluded.artwork_url,
-            imported_at = excluded.imported_at
+            title         = excluded.title,
+            artist_name   = excluded.artist_name,
+            album_title   = excluded.album_title,
+            duration      = excluded.duration,
+            is_explicit   = excluded.is_explicit,
+            artwork_url   = excluded.artwork_url,
+            imported_at   = excluded.imported_at,
+            track_number  = excluded.track_number,
+            disc_number   = excluded.disc_number,
+            genre_names   = excluded.genre_names,
+            release_date  = excluded.release_date,
+            composer_name = excluded.composer_name,
+            isrc          = excluded.isrc,
+            has_lyrics    = excluded.has_lyrics,
+            work_name     = excluded.work_name,
+            movement_name = excluded.movement_name
           """
         var arguments = [(any DatabaseValueConvertible)?]()
         arguments.reserveCapacity(chunk.count * columnsPerRow)
@@ -139,6 +152,18 @@ struct LibraryStore: Sendable {
           arguments.append(song.isExplicit)
           arguments.append(song.artworkURL)
           arguments.append(song.importedAt)
+          // "Free" v4 metadata. genre_names is the JSON-array string (nil
+          // when empty); has_lyrics Bool? → 0/1/NULL via DatabaseValue;
+          // release_date is a Date? passed exactly like imported_at.
+          arguments.append(song.trackNumber)
+          arguments.append(song.discNumber)
+          arguments.append(Song.encodeGenreNames(song.genreNames))
+          arguments.append(song.releaseDate)
+          arguments.append(song.composerName)
+          arguments.append(song.isrc)
+          arguments.append(song.hasLyrics)
+          arguments.append(song.workName)
+          arguments.append(song.movementName)
         }
         try db.execute(sql: sql, arguments: StatementArguments(arguments))
       }

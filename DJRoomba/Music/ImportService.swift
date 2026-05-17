@@ -91,18 +91,31 @@ final class ImportService {
   nonisolated static func song(from track: Track, importedAt: Date) -> Song {
     // Underlying-item id (NOT track.id). `Track` exposes the common
     // display fields directly; we keep using those for the snapshot's
-    // metadata and only need the enum payload for the durable id.
-    let underlyingID: String =
-      switch track {
-      case .song(let song):
-        song.id.rawValue
-      case .musicVideo(let video):
-        video.id.rawValue
-      @unknown default:
-        // Forward-compat: fall back to the track id so import never
-        // drops a row; provenance namespace still applies.
-        track.id.rawValue
-      }
+    // metadata. The enum payload gives both the durable id AND the "free"
+    // v4 metadata: those nine fields live on `MusicKit.Song` (already
+    // fetched by `playlist.with([.tracks])` — zero extra API calls), so we
+    // read them only when the track IS a song. A `.musicVideo` (or a
+    // future @unknown case) has no track/disc/composer/etc. in our model →
+    // those columns stay nil/[] (tolerated, never crash); the
+    // underlying-id + provenance-namespace logic is unchanged.
+    let underlyingID: String
+    let metadataSong: MusicKit.Song?
+    switch track {
+    case .song(let song):
+      underlyingID = song.id.rawValue
+      metadataSong = song
+
+    case .musicVideo(let video):
+      underlyingID = video.id.rawValue
+      metadataSong = nil
+
+    @unknown default:
+      // Forward-compat: fall back to the track id so import never
+      // drops a row; provenance namespace still applies. No song
+      // payload → no v4 metadata.
+      underlyingID = track.id.rawValue
+      metadataSong = nil
+    }
 
     return Song(
       id: UUID().uuidString,
@@ -120,6 +133,19 @@ final class ImportService {
       // corrective, Phase-1-identical). Kept nil here deliberately.
       artworkURL: nil,
       importedAt: importedAt,
+      // "Free" v4 metadata, only when the track is a song; sparse/nil is
+      // expected and harmless (a macOS library `Song` may not populate
+      // every field). No catalog/per-item fetch — only the already-fetched
+      // object is read.
+      trackNumber: metadataSong?.trackNumber,
+      discNumber: metadataSong?.discNumber,
+      genreNames: metadataSong?.genreNames ?? [],
+      releaseDate: metadataSong?.releaseDate,
+      composerName: metadataSong?.composerName,
+      isrc: metadataSong?.isrc,
+      hasLyrics: metadataSong?.hasLyrics,
+      workName: metadataSong?.workName,
+      movementName: metadataSong?.movementName,
     )
   }
 

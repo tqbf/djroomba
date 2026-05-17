@@ -20,6 +20,63 @@ import GRDB
 /// Because persistence is Codable-driven, adding a nullable column is a
 /// localized change here — no store-API refactor.
 struct Song: Codable, Identifiable, Hashable, Sendable {
+
+  // MARK: Lifecycle
+
+  /// Explicit memberwise init. Needed (unlike the other records, which keep
+  /// the synthesized one) because `genreNames` is a computed accessor over
+  /// the private `genreNamesJSON` storage — the synthesized init would
+  /// surface `genreNamesJSON` instead of `genreNames` and wouldn't be
+  /// visible across files. Every `v4` parameter is defaulted so existing
+  /// `Song(...)` constructions and `TestSupport.sampleSong` keep compiling
+  /// (same shape as `localID = 0`). `genreNames` is taken as `[String]`
+  /// here and JSON-encoded into the backing column via the computed setter.
+  init(
+    id: String,
+    localID: Int = 0,
+    musicItemID: String,
+    idNamespace: IDNamespace,
+    title: String,
+    artistName: String,
+    albumTitle: String? = nil,
+    duration: Double? = nil,
+    isExplicit: Bool,
+    artworkURL: String? = nil,
+    importedAt: Date,
+    trackNumber: Int? = nil,
+    discNumber: Int? = nil,
+    genreNames: [String] = [],
+    releaseDate: Date? = nil,
+    composerName: String? = nil,
+    isrc: String? = nil,
+    hasLyrics: Bool? = nil,
+    workName: String? = nil,
+    movementName: String? = nil,
+  ) {
+    self.id = id
+    self.localID = localID
+    self.musicItemID = musicItemID
+    self.idNamespace = idNamespace
+    self.title = title
+    self.artistName = artistName
+    self.albumTitle = albumTitle
+    self.duration = duration
+    self.isExplicit = isExplicit
+    self.artworkURL = artworkURL
+    self.importedAt = importedAt
+    self.trackNumber = trackNumber
+    self.discNumber = discNumber
+    self.releaseDate = releaseDate
+    self.composerName = composerName
+    self.isrc = isrc
+    self.hasLyrics = hasLyrics
+    self.workName = workName
+    self.movementName = movementName
+    genreNamesJSON = Self.encodeGenreNames(genreNames)
+  }
+
+  // MARK: Internal
+
   /// The MusicKit id space an id belongs to. Library and catalog ids are
   /// not interchangeable; `PlaybackResolver` keys re-fetch on this.
   enum IDNamespace: String, Codable, Sendable, CaseIterable {
@@ -30,6 +87,10 @@ struct Song: Codable, Identifiable, Hashable, Sendable {
   /// Swift camelCase ⇄ SQLite snake_case. Explicit so the migrated schema
   /// stays readable SQL and renaming a Swift property never silently
   /// renames a shipped column.
+  ///
+  /// `genreNamesJSON` (the `genre_names` column) is the **only** coded key
+  /// for genres — see the `genreNames` computed accessor below; there is no
+  /// `genreNames` key because the array never has its own column.
   enum CodingKeys: String, CodingKey {
     case id
     case localID = "local_id"
@@ -42,6 +103,15 @@ struct Song: Codable, Identifiable, Hashable, Sendable {
     case isExplicit = "is_explicit"
     case artworkURL = "artwork_url"
     case importedAt = "imported_at"
+    case trackNumber = "track_number"
+    case discNumber = "disc_number"
+    case genreNamesJSON = "genre_names"
+    case releaseDate = "release_date"
+    case composerName = "composer_name"
+    case isrc
+    case hasLyrics = "has_lyrics"
+    case workName = "work_name"
+    case movementName = "movement_name"
   }
 
   /// App-stable identity (UUID string). Primary key.
@@ -82,6 +152,79 @@ struct Song: Codable, Identifiable, Hashable, Sendable {
   /// When this row was first written / last refreshed by import.
   var importedAt: Date
 
+  /// Direct properties already present on the library `Song`/`Track`
+  /// objects import ALREADY fetches (`playlist.with([.tracks])`) — zero
+  /// extra API calls, zero per-item/catalog fan-out. **Nullable/sparse by
+  /// nature:** a library `Song` on macOS may not populate every field;
+  /// that's expected and harmless — NULL just means we didn't get it. All
+  /// mutable: a re-import refreshes them (the UPSERT `DO UPDATE`s them, like
+  /// `title`). Read-through like the rest (decoded via GRDB Codable AND
+  /// `try Song(row:)`).
+  var trackNumber: Int?
+  var discNumber: Int?
+  var releaseDate: Date?
+  var composerName: String?
+  var isrc: String?
+  /// `true`/`false` for a song, `nil` when the item isn't a song (a music
+  /// video has no lyrics in our model). Stored as the `has_lyrics` 0/1/NULL
+  /// BOOLEAN column.
+  var hasLyrics: Bool?
+  /// Classical-work title (`MusicKit.Song.workName`), usually `nil`.
+  var workName: String?
+  /// Classical-movement title (`MusicKit.Song.movementName`), usually `nil`.
+  var movementName: String?
+
+  /// The full ordered genre list (`MusicKit.Song.genreNames`). Persisted as
+  /// the single `genre_names` TEXT column, JSON-encoded — deliberately NOT a
+  /// normalized `song_genre` table (out of scope); the JSON array preserves
+  /// the entire list, which is the ask. Empty ⇒ stored NULL.
+  ///
+  /// Backed by an explicit private JSON `String?` coded property rather
+  /// than GRDB's default Codable handling for `[String]`: `Song` is decoded
+  /// on two paths — GRDB `Song.fetchAll`/`fetchOne` (Codable) **and**
+  /// `try Song(row:)` in `songsWithStats`/`recentlyPlayedPage` — and the
+  /// hand-rolled raw multi-row `INSERT` in `LibraryStore.upsertSongs` binds
+  /// one scalar per column. A single explicit JSON string round-trips
+  /// cleanly and identically on every one of those paths (verified by
+  /// `SongMetadataTests`); letting Codable synthesize array handling would
+  /// not match that single-scalar column.
+  var genreNames: [String] {
+    get {
+      guard
+        let genreNamesJSON,
+        let data = genreNamesJSON.data(using: .utf8),
+        let decoded = try? JSONDecoder().decode([String].self, from: data)
+      else {
+        return []
+      }
+      return decoded
+    }
+    set {
+      genreNamesJSON = Self.encodeGenreNames(newValue)
+    }
+  }
+
+  /// JSON-array form of `genreNames` (the `genre_names` column), or `nil`
+  /// for an empty list. The codable/persisted representation; app code uses
+  /// the `genreNames` computed accessor instead.
+  static func encodeGenreNames(_ names: [String]) -> String? {
+    guard !names.isEmpty else { return nil }
+    guard
+      let data = try? JSONEncoder().encode(names),
+      let json = String(data: data, encoding: .utf8)
+    else {
+      return nil
+    }
+    return json
+  }
+
+  // MARK: Private
+
+  /// JSON-encoded `genreNames` ⇄ the `genre_names` TEXT column. `nil`/absent
+  /// ⇒ an empty list. See the `genreNames` accessor for why this is
+  /// explicit rather than synthesized.
+  private var genreNamesJSON: String?
+
 }
 
 // MARK: FetchableRecord, MutablePersistableRecord
@@ -99,6 +242,17 @@ extension Song: FetchableRecord, MutablePersistableRecord {
     static let isExplicit = Column(CodingKeys.isExplicit)
     static let artworkURL = Column(CodingKeys.artworkURL)
     static let importedAt = Column(CodingKeys.importedAt)
+    // "Free" Apple-library metadata (v4). `genreNamesJSON` is the
+    // `genre_names` TEXT column (the `genreNames` accessor is computed).
+    static let trackNumber = Column(CodingKeys.trackNumber)
+    static let discNumber = Column(CodingKeys.discNumber)
+    static let genreNamesJSON = Column(CodingKeys.genreNamesJSON)
+    static let releaseDate = Column(CodingKeys.releaseDate)
+    static let composerName = Column(CodingKeys.composerName)
+    static let isrc = Column(CodingKeys.isrc)
+    static let hasLyrics = Column(CodingKeys.hasLyrics)
+    static let workName = Column(CodingKeys.workName)
+    static let movementName = Column(CodingKeys.movementName)
   }
 
   static let databaseTableName = "song"

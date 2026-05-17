@@ -281,6 +281,31 @@ enum LibraryMigrator {
       try db.drop(table: "play_event")
     }
 
+    // v4: the "free" Apple-library track metadata — direct properties
+    // already present on the library `Song` objects import ALREADY fetches
+    // via `playlist.with([.tracks])` (zero new API calls, zero per-item /
+    // catalog fan-out, no rate-limit risk). Nine nullable, descriptive
+    // columns appended to `song`; an existing v1/v2/v3 row gets NULL for
+    // each (non-destructive, idempotent — `registerMigration` runs once).
+    // `genre_names` is the full ordered genre list as a JSON-array TEXT
+    // string (NULL when empty) — deliberately NOT a normalized `song_genre`
+    // table (out of scope); the JSON array preserves the entire list. No
+    // new indexes: these are descriptive columns, and whether/what to index
+    // is a separate future decision, not implied by adding them.
+    migrator.registerMigration("v4.songMetadata") { db in
+      try db.alter(table: "song") { t in
+        t.add(column: "track_number", .integer)
+        t.add(column: "disc_number", .integer)
+        t.add(column: "genre_names", .text)
+        t.add(column: "release_date", .datetime)
+        t.add(column: "composer_name", .text)
+        t.add(column: "isrc", .text)
+        t.add(column: "has_lyrics", .boolean)
+        t.add(column: "work_name", .text)
+        t.add(column: "movement_name", .text)
+      }
+    }
+
     return migrator
   }
 }

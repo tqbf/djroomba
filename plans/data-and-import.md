@@ -165,6 +165,18 @@ request/response types are main-actor-friendly and volumes are modest). It
 - Per playlist: `playlist.with([.tracks])` then page `detailed.tracks`
   (capped `maxTrackBatches`). Per-playlist failures are tolerated (collected
   into `lastError`) so one bad playlist never aborts the whole import.
+- **`v4` "free" track metadata.** `song(from:)` also reads the direct
+  properties already present on the `.song(let s)` payload that
+  `playlist.with([.tracks])` ALREADY returns — `trackNumber`,
+  `discNumber`, `genreNames`, `releaseDate`, `composerName`, `isrc`,
+  `hasLyrics`, `workName`, `movementName` — into nullable `song` columns
+  (migration `v4.songMetadata`; `genre_names` is a JSON array string).
+  **Zero extra requests, no per-item/catalog fan-out, no rate-limit
+  exposure** (Bucket 1 only — Bucket 3 catalog enrichment stays out by
+  design / lacks the entitlement). Sparse by nature: a macOS library
+  `Song` may not populate every field — NULL just means "not provided",
+  harmless. All mutable (the UPSERT `DO UPDATE`s them, like `title`).
+  Empirically-observed population on the real library: see PROGRESS.md.
 - Map `Track`→`Song`; dedupe per playlist on the import key
   `(music_item_id, id_namespace)` while preserving full playlist order
   (a song twice in a list keeps both positions). `upsertSongs` (store
