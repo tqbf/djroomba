@@ -1364,6 +1364,58 @@ Smallest-possible Phase-0 access test for `plans/catalog-playlists.md`.
   Mac registered as a device), embed it via `PROVISION_PROFILE`
   (agent build-wiring), rebuild, re-probe. Phase 0 stays the hard gate;
   nothing else proceeds. Not committed.
+## 2026-05-18 — 🟡 `.djroomba` library snapshot export / import (code-complete)
+
+Branch `feature/snapshot-export-import`. Motivation: macOS-14 genre import
+tags <1/3 of the library; rather than fix that import, **carry good
+metadata over** from a machine where it works.
+
+- **Export** (`File ▸ Export Library Snapshot…`): `LibraryStore.snapshot`
+  = GRDB `vacuum(into:)` (clean consistent copy, queue stays open) →
+  `SnapshotCodec` prepends magic `DJRMBA01` + zlib-compresses → `.djroomba`
+  via `.fileExporter` (minimal `SnapshotDocument: FileDocument`, bytes
+  built off-main *before* presenting).
+- **Import**: `.fileImporter` (security-scoped URL handled) → quiet
+  pre-import backup (`store.snapshot` → `Backups/pre-import.djroomba-backup`)
+  → decompress to a temp sqlite → open as `AppDatabase` (**runs the
+  migrator** → older-schema snapshots upgrade before read; forward-compat)
+  → pure tiered `MetadataMatcher` (ISRC → music_item_id → norm
+  title/artist/album → norm title/artist; source-wins-only-when-present,
+  emits a row only if a field actually changes) → `LibraryStore
+  .applyImportedMetadata` (one chunked `CASE`/`IN` `UPDATE song …`, the
+  `applyAlbumGenres` idiom, **song-only / one-way isolated**) → full view
+  reload + genre-graph reanalyze. Playlists / app playlists / play
+  history / stats / favorites / recents are **never** touched (matches
+  "don't blitz the library").
+- **Revert**: `LibraryStore.restore` opens the backup read-only and uses
+  GRDB's SQLite **online-backup** API to overwrite the live DB pages
+  *through the already-open connection* — the user's "swap the SQLite
+  databases", done safely (no fd swap / object-graph rebuild). Surfaced
+  as a dismissible `.status` chip after import ("Updated N — Revert",
+  reusing the `genreImportNotice` chip/popover pattern) **and** a
+  File-menu item enabled while the backup file exists.
+- **Sandbox/UTType**: added `com.apple.security.files.user-selected
+  .read-write` (required — Powerbox would silently fail without it) and a
+  proper `org.sockpuppet.djroomba.snapshot` `UTExportedTypeDeclarations`
+  entry + `UTType(exportedAs:)` (ext `djroomba`). Pre-existing stray
+  `…djroomba.song` declaration left untouched.
+- **Non-MusicKit** ⇒ no signed gate: pure `MetadataMatcher` /
+  `SnapshotCodec` are exhaustively unit-tested; store snapshot/restore/
+  apply tested against real on-disk GRDB incl. the one-way isolation
+  assertion and a full export→merge→revert round trip.
+- **Tier-4 refinement (caught in test).** The first cut keyed tier 4 on
+  album-less *source* rows only; tier 3 already matches both-album-absent
+  (norm `""=="" `), so that was dead code. Redefined: tier 4 = title+artist
+  over **all** source rows, accepted only when album is absent on **a
+  side** (target's or the matched source's) — genuinely additive (bridges
+  the same recording album-tagged on one machine, untagged on the other)
+  while two *different named* albums still never link (covered by 3 tests).
+- **Verify.** `make check` (compiles, debug) clean; `swift build` clean
+  under Swift 6 strict concurrency; **212 tests / 34 suites** green
+  (+17 / +3: `MetadataMatcherTests` 10, `SnapshotStoreTests` 3,
+  `SnapshotCodecTests` 4); `swiftformat --lint` 0 (auto-organized) and
+  `swiftlint` 0 on all touched files. swiftui-pro + macos-design
+  consulted before & after (CLAUDE.md). Not committed/merged (branch).
 
 ## 2026-05-17 — ✅ Always-visible import progress + error surfacing
 

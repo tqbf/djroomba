@@ -34,6 +34,7 @@ final class MusicController {
     genreImportService = GenreImportService(store: safeStore)
     genreGraphService = GenreGraphService(store: safeStore)
     catalogIngestService = CatalogIngestService(store: safeStore)
+    snapshotService = SnapshotService(store: safeStore)
     resolver = PlaybackResolver()
     autoReanalyzeGenreGraph = preferences.autoReanalyzeGenreGraph
     if openedStore == nil {
@@ -64,6 +65,11 @@ final class MusicController {
   /// automatically after a playlist change when `autoReanalyzeGenreGraph`
   /// is on.
   let genreGraphService: GenreGraphService
+  /// `.djroomba` library snapshot export / import + revert
+  /// (`plans/snapshot-export-import.md`). Non-MusicKit; the controller
+  /// owns the post-op UI reload + genre reanalyze, exactly as it does for
+  /// `ImportService` ↔ `runImport`.
+  let snapshotService: SnapshotService
   let resolver: PlaybackResolver
 
   /// Phase 1 (`plans/catalog-playlists.md`): catalog `Song` → SQLite `song`
@@ -163,6 +169,14 @@ final class MusicController {
   /// starts empty each launch.
   private(set) var navBackStack = DetailNavStack()
 
+  /// `.fileExporter` / `.fileImporter` presentation, bound from
+  /// `MainShellView` via `@Bindable` (swiftui-pro: no `Binding(get:set:)`).
+  /// The exporter is only flipped true *after* `snapshotExportDocument` is
+  /// built off-main, so the picker always has its bytes ready.
+  var isPresentingSnapshotExporter = false
+  var isPresentingSnapshotImporter = false
+  private(set) var snapshotExportDocument: SnapshotDocument?
+
   /// Observable mirror of `UserPreferencesStore.autoReanalyzeGenreGraph`
   /// (default on). Same pattern as `lastSelectedPlaylistID`: the
   /// UserDefaults store is the durable truth (it can't live inside an
@@ -208,7 +222,11 @@ final class MusicController {
   /// existing "Loading playlists…" state so first-launch import doesn't
   /// briefly flash "No Playlists" (same UI, just honest about the import).
   var isLibraryBusy: Bool {
-    importService.isImporting || genreImportService.isImporting || library.isLoading
+    importService.isImporting
+      || genreImportService.isImporting
+      || snapshotService.isExporting
+      || snapshotService.isImporting
+      || library.isLoading
   }
 
   /// Coarse import progress for the sidebar's loading affordance (Phase 5):
@@ -250,7 +268,35 @@ final class MusicController {
   /// `GenreImportService.lastError` on a populated library was previously in
   /// *no* surface at all, so a failed album-genre pass was completely silent.
   var libraryProblem: String? {
-    storeError ?? importService.lastError ?? genreImportService.lastError ?? library.loadError
+    storeError
+      ?? importService.lastError
+      ?? genreImportService.lastError
+      ?? snapshotService.lastError
+      ?? library.loadError
+  }
+
+  /// The quiet `.status` spinner text: the playlist/genre import wins
+  /// (the load-bearing precedence `ImportActivity` owns), else a snapshot
+  /// export/import in flight, else nil. Keeps the existing tested
+  /// `ImportActivity` contract untouched while folding in the new op.
+  var activityText: String? {
+    if let importActivity { return importActivity }
+    if snapshotService.isExporting { return "Exporting library snapshot…" }
+    if snapshotService.isImporting { return "Importing library snapshot…" }
+    return nil
+  }
+
+  /// The dismissible post-import result for the `.status` chip (reuses the
+  /// `genreImportNotice` chip/popover pattern). `nil` before any import /
+  /// once dismissed / after a revert.
+  var snapshotResult: SnapshotMergeSummary? {
+    snapshotService.lastResult
+  }
+
+  /// Whether "Revert Last Snapshot Import" is available (a pre-import
+  /// backup exists). Drives the menu item's enabled state.
+  var canRevertSnapshot: Bool {
+    snapshotService.canRevert
   }
 
   /// The sidebar's state *with the cause inferred* (Phase 5 smarter empty
@@ -402,6 +448,67 @@ final class MusicController {
   /// surfaced via the service's `lastError`, never thrown.
   func analyzeGenreGraph() async {
     await runGenreAnalysis()
+  }
+
+  /// File ▸ Export Library Snapshot…. Build the compressed `.djroomba`
+  /// bytes off-main first, then present `.fileExporter` (only if the build
+  /// succeeded — a failure surfaces via `libraryProblem`).
+  func beginSnapshotExport() async {
+    let document = await snapshotService.prepareExport()
+    guard let document else { return }
+    snapshotExportDocument = document
+    isPresentingSnapshotExporter = true
+  }
+
+  /// `.fileImporter` completion: merge the picked snapshot's metadata onto
+  /// the current library (content-matched, song-only — never blitzes
+  /// playlists/history), then reload all derived UI and reanalyze the
+  /// genre graph (genres changed). The pre-import backup + Revert
+  /// affordance are handled by `SnapshotService`.
+  func applySnapshot(from url: URL) async {
+    let summary = await snapshotService.apply(snapshotAt: url)
+    guard summary != nil else { return }
+    await reloadAfterSnapshotChange()
+  }
+
+  /// Revert the last snapshot import by swapping the pre-import backup DB
+  /// back in (File-menu item or the `.status` chip's button), then reload.
+  func revertSnapshotImport() async {
+    let ok = await snapshotService.revert()
+    guard ok else { return }
+    await reloadAfterSnapshotChange()
+  }
+
+  /// Dismiss the post-import `.status` chip without reverting.
+  func dismissSnapshotResult() {
+    snapshotService.dismissResult()
+  }
+
+  /// `.fileExporter` completion. Frees the built bytes; surfaces a real
+  /// write failure (user cancellation is silent).
+  func completeSnapshotExport(_ result: Result<URL, Error>) {
+    snapshotExportDocument = nil
+    if case .failure(let error) = result, !Self.isCancellation(error) {
+      snapshotService.noteFailure(
+        "Could not write the snapshot: \(error.localizedDescription)"
+      )
+    }
+  }
+
+  /// `.fileImporter` completion → merge on success; surface a real open
+  /// failure (user cancellation is silent).
+  func completeSnapshotImport(_ result: Result<URL, Error>) async {
+    switch result {
+    case .success(let url):
+      await applySnapshot(from: url)
+
+    case .failure(let error):
+      if !Self.isCancellation(error) {
+        snapshotService.noteFailure(
+          "Could not open the snapshot: \(error.localizedDescription)"
+        )
+      }
+    }
   }
 
   /// Debug menu action: seed `count` synthetic plays drawn at random from
@@ -833,6 +940,10 @@ final class MusicController {
       ?? selectedPlaylistID.map(DetailDestination.playlist)
   }
 
+  private static func isCancellation(_ error: Error) -> Bool {
+    (error as? CocoaError)?.code == .userCancelled
+  }
+
   /// Last-resort in-memory store so `store == nil` never crashes the app.
   /// An in-memory `DatabaseQueue` failing to open means the process is
   /// fundamentally broken (no allocatable SQLite); a clear `fatalError` is
@@ -844,6 +955,23 @@ final class MusicController {
     } catch {
       fatalError("Could not open an in-memory SQLite database: \(error)")
     }
+  }
+
+  /// A snapshot merge/revert rewrites `song` metadata in place (genres,
+  /// etc.) but never touches playlist/app/history structure. Every cached
+  /// `PlaylistDetail` embeds song fields, so invalidate them all and
+  /// reload the on-screen surfaces; rebuild the sidebar derivations; and
+  /// reanalyze the genre graph since `genre_names` changed. Mirrors the
+  /// post-`runImport` reload, scoped to what a metadata-only change needs.
+  private func reloadAfterSnapshotChange() async {
+    await library.load()
+    await appPlaylistService.load()
+    await reloadFavoritesAndRecents()
+    detailService.invalidateAll()
+    rebuildDerivedSummaries()
+    reconcileSelectionAfterImport()
+    recentlyPlayed.reload()
+    reanalyzeGenreGraphIfEnabled()
   }
 
   private func startAuthorizedSession() async {

@@ -85,6 +85,26 @@ struct PlaylistPlayerApp: App {
         .keyboardShortcut("n", modifiers: .command)
       }
 
+      // The native File-menu home for document import/export
+      // (`plans/snapshot-export-import.md`). No shortcuts: Apple's own
+      // apps leave import/export unbound and the app's shortcut space is
+      // already dense (⌘R/⇧⌘R/⌥⌘A/⌘N/⌘[). "Revert" is enabled only while
+      // a pre-import backup exists (also surfaced as the post-import
+      // `.status` chip).
+      CommandGroup(after: .importExport) {
+        Button("Export Library Snapshot…") {
+          Task { await controller.beginSnapshotExport() }
+        }
+        Button("Import Library Snapshot…") {
+          controller.isPresentingSnapshotImporter = true
+        }
+        Button("Revert Last Snapshot Import") {
+          Task { await controller.revertSnapshotImport() }
+        }
+        .disabled(!controller.canRevertSnapshot)
+        Divider()
+      }
+
       CommandMenu("Playback") {
         Button("Play / Pause") {
           Task { await controller.togglePlayPause() }
