@@ -1,0 +1,14 @@
+# SwiftPM
+/.build/
+.swiftpm/
+Package.resolved
+
+# Generated app bundle wrapper (rebuilt by scripts/make-app.sh)
+/ForceGraphLab.app/
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# Phase-gate screenshots are regenerated each gate; keep the dir, not the shots
+/artifacts/**/*.png

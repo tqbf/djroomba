@@ -5,6 +5,575 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-17 — ✅ Always-visible import progress + error surfacing
+
+Field report (a 2nd machine, same library): "Reimport Everything" gave
+**no indication anything was happening**, and **no genres** on playlists.
+
+- **Root cause of "no indication" (confirmed defect, machine-independent).**
+  Import progress was only ever rendered by the sidebar's *empty/loading*
+  state (`PlaylistSidebar`), so a reimport over an **already-populated**
+  library (90–120 s playlists + the genre album-pass) showed nothing. The
+  `GenreImportService` pass had **zero** UI. And `genreImportService
+  .lastError` wasn't even in `libraryProblem`, which itself only renders in
+  the empty sidebar — so a swallowed genre-pass failure was completely
+  invisible.
+- **Fix.** New pure, unit-tested `ImportActivity.text(…)` (precedence:
+  playlists → genres → nil; wording byte-identical to the existing
+  `libraryLoadingMessage` for the playlist case). `MusicController`:
+  `isLibraryBusy` now also covers `genreImportService.isImporting`; new
+  `importActivity`; `libraryProblem` now includes
+  `genreImportService.lastError`. `MainShellView`: one always-visible
+  `ToolbarItem(placement: .status)` — small `ProgressView` + the activity
+  text while importing (any phase, any sidebar state), else a tappable
+  orange warning whose `.popover` shows the full import/genre error, else
+  nothing. Existing first-launch sidebar progress + Refresh-disabled
+  behaviour untouched.
+- **Verify.** `make check` clean, **181 tests / 29 suites** (+7/+1
+  `ImportActivityTests`), `swiftformat`/`swiftlint` 0, no schema change.
+  **Live signed build:** Reimport Everything over the fully-populated
+  sidebar now shows the centred toolbar spinner + "Importing 100 of 270
+  playlists…", then clears cleanly when idle. Not committed.
+- **"No genres" on the 2nd machine — separate, likely environmental
+  (open).** The album-genre pass runs on `force` and writes only when
+  `MusicLibraryRequest<Album>.genreNames` is non-empty (genre lives on the
+  library *Album*, ~77% coverage on the dev machine). A different Mac's
+  Music library can lack album-level genre metadata, or a dev-signed
+  (non-notarized, machine-scoped) build can have degraded MusicKit/
+  iTunesLibrary access — both yield empty genres. The error-surfacing
+  above now makes a *failed* pass visible; a pass that simply finds **0
+  album genres** is honest emptiness, not a bug. Pending user info
+  (install/sign method, auth/subscription on that Mac, whether Music.app
+  there shows album Genres, whether the genre graph populates).
+
+## 2026-05-17 — ✅ Playlist header shows its associated genres
+
+Follow-on to genre browsing (`plans/genre-browsing.md`). A selected
+playlist's header now shows its distinct genres as a quiet, tappable
+capsule strip between the "N tracks" subtitle and the Play button.
+
+- **Derived, zero new query.** `PlaylistDetail.genreTally(_ songs:)` —
+  pure, unit-tested: per song, trim each `genreNames` entry, drop empty,
+  dedupe within a song, sort by **count desc then localized
+  case-insensitive name**. Computed in `PlaylistDetailService.load` from
+  the already-fetched `withStats.map(\.song)` (no extra `dbQueue.read`,
+  no schema change); `refreshStats` carries the prior value (membership
+  unchanged); a genre detail (`isGenre`) gets `[]` (no self-chips).
+  Surfaced as `PlaylistDetail.genres` (defaulted ⇒ non-breaking).
+- **UI.** `PlaylistHeaderView.genreStrip`: a single hidden-indicator
+  horizontal `ScrollView` of `.caption`/`.secondary` `.quaternary`-capsule
+  `.plain` buttons (consistent with `GenreAssociationsCard`; no new type
+  styles; header never grows vertically — shows *all* genres compactly).
+  Each chip → `controller.showGenre(genre)`, so it reuses the
+  Back-stack-integrated genre nav.
+- **Verify:** `make check` clean, **174 tests / 28 suites** (+8/+1:
+  `PlaylistGenresTests`), `swiftformat`/`swiftlint` 0. **Live signed
+  build:** sidebar "2-Tone" → header strip "Pop · Rock · New Wave ·
+  Alternative · Alt/Punk · Reggae"; tap "Reggae" → Reggae genre view
+  (35 tracks); Back → 2-Tone with chips intact. Not committed.
+
+## 2026-05-17 — ✅ Genre browsing + top-pane Back/nav stack
+
+New navigation feature (full design: `plans/genre-browsing.md`):
+
+- **Genre → tracks.** Selecting/centering a genre node loads that genre's
+  songs into the top pane. New `LibraryStore.songsWithStats(matchingGenre:)`
+  (one `dbQueue.read`, `json_each(genre_names)`+`TRIM`+`EXISTS`,
+  `song_stat` LEFT JOIN, ordered title→artist; **no schema change** — the
+  v4 `genre_names` column). `PlaylistDetailService.selectGenre` builds a
+  synthetic `"genre:<name>"` `PlaylistDetail` (`isGenre = true`,
+  app-owned source ⇒ per-song playback path; not LRU-cached, not
+  favoritable/editable, never recorded into recents). Driven off the
+  ForceGraph **committed** selection (`.onChange(of: selectedGenre)`),
+  never hover/preview.
+- **Card → playlist.** Associated-playlists card rows are now plain-style
+  `Button`s (full-row hit target, VoiceOver-focusable) →
+  `MusicController.openAssociatedPlaylist(id:)` navigates the top pane to
+  that playlist (routes through the normal `selectedPlaylistID` path, so
+  sidebar highlight + persistence are correct).
+- **Back/nav stack.** Pure unit-tested `DetailNavStack`
+  (`DetailDestination` = `.playlist`/`.genre`, LIFO, cap 50, nil/dup
+  guarded). Integrated via the existing `selectedPlaylistID.didSet` as the
+  single choke point + a `suppressNavRecording` guard so Back/launch-
+  restore replay records no phantom history. Back control = leading
+  `.navigation` toolbar `chevron.backward` + ⌘[, disabled when empty.
+  In-session only (never persisted); restore/persistence/play flows
+  unchanged (genre `recordRecentlyPlayed` gated by `!isGenre`).
+- **Verify:** `make check` clean, **166 tests / 25→27 suites** (+11/+2:
+  `GenreSongsQueryTests` ×5, `DetailNavStackTests` ×6),
+  `swiftformat`/`swiftlint` 0. **Live signed-build computer-use:**
+  Funk node → "Funk · 9 tracks" (Parliament/Sly & Family Stone…,
+  title-ordered); card "Tarantino" → 69-track Tarantino playlist; Back ←
+  Funk ← Acceptable Air Tracks (LIFO), button disables at empty;
+  sidebar select + launch restore unregressed; graph interaction still
+  beachball-free (PATCH 5 holds). Not committed.
+
+## 2026-05-17 — ✅ ForceGraph hub-cell beachball fixed (DJROOMBA PATCH 5)
+
+Field report after the folder blitz: the app beachballed when interacting
+with the genre graph while a high-degree node ("Alt/Laptop") was selected.
+Profiler-driven root cause (NOT the folder fix — that data is correct and
+safe; the blitz only made the graph denser, which exposed a latent bug):
+`CrossingIndex`'s uniform-grid crossing detector degenerates to **O(E²)
+for a hub star** — the layout centres on the selected hub so all its
+incident edges fall in one grid cell, and that super-cell's all-pairs
+loop pegs the **main thread** on every drag-induced settle
+(`tick → refreshCrossings → CrossingIndex.recompute`, ~67% of the main
+thread, amplified by cross-module Swift generic-metadata instantiation in
+the pair loop).
+
+- **Fix:** `// DJROOMBA PATCH (5)` in `Vendor/ForceGraph/.../Interaction/
+  CrossingIndex.swift` — a `maxCellMembers` (96) cap that skips the pair
+  test for a degenerate hub super-cell (an illegible knot the 600-glyph
+  budget discards anyway; its pairs mostly share the hub endpoint so
+  aren't crossings). Only crossings *interior to a hub core* are omitted
+  ⇒ HUD `count` a lower bound there, consistent with the detector's
+  documented representative-not-exhaustive contract. Normal graphs
+  unaffected (cells far below the cap). Documented in
+  `plans/genre-graph.md` (patch list, now 1–5).
+- **Profiler-verified on the signed build, identical drag repro:**
+  `CrossingIndex.recompute` **11 978 → 10** main-thread samples;
+  `refreshCrossings` **12 376 → 12**; main thread **~99.9% idle in the
+  run loop** during aggressive node dragging (was a multi-second
+  beachball). App stays fully responsive; graph still renders correctly.
+- **Verify:** `make check` clean, **155 tests / 25 suites** green,
+  `swiftformat`/`swiftlint` 0 (Vendor excluded by convention). Signed
+  `build/DJRoomba.app` rebuilt. Mitigation note: collapsing the Genre
+  Graph panel was the interim workaround; no longer needed. Not committed.
+
+## 2026-05-17 — ✅ Playlist folders: signed blitz EXECUTED & PASSED
+
+The Phase-3 blitz was **run on the signed sandboxed build against the real
+library** (not left user-gated). End-to-end verified:
+
+- **A1 (id mapping) — proven on real data.** Throwaway non-sandboxed
+  `iTunesLibrary` probe (reverted; finding kept, the `GenreProbe`
+  precedent): `ITLibrary` sees **5 folders** via `kind == .folder`,
+  incl. "AAA ME"; `Int64(bitPattern: persistentID.uint64Value)` decimal
+  reproduces the stored MusicKit id **exactly** (`AAA ME` →
+  `2807883042140459807`, matched; the negative high-bit case also
+  correct). `PlaylistFolderClassifier` logic confirmed against the real
+  library.
+- **A2 (sandbox) — NOT a hard blocker; proven.** The signed sandboxed
+  build with the `com.apple.security.assets.music.read-only` entitlement
+  (verified embedded via `codesign -d --entitlements`) reads `ITLibrary`
+  and converges: `apple_playlist` **270 → 265**, all 5 folders gone
+  (`… WHERE name LIKE 'AAA%'` → **empty**). One cold-first-import miss
+  was observed and caused **zero regression** (import completed
+  normally) — exactly what the graceful-degradation design guarantees;
+  the next run converged cleanly.
+- **Downstream sane.** Full *Reimport Everything* (⇧⌘R) + auto-reanalyze:
+  `song.genre_names` repopulated **6362/8229** (the documented album-pass
+  figure), `genre_edge` rebuilt **1462 edges**, top weight
+  Alternative~Rock 145→143 — the folder's spurious union no longer
+  inflates cross-genre co-occurrence; the "AAA ME 57" domination symptom
+  is gone.
+- **One-way isolation held across multiple reimport/converge cycles:**
+  `song` 8229 intact, `song_stat`(plays>0) 500, `play_history` 502
+  preserved, **0** orphan `apple_playlist_track` rows (FK cascade clean).
+
+Diagnostic temp-log used to establish the A2 finding was reverted; clean
+state re-verified: `make check` clean, **155 tests / 25 suites** green,
+`swiftformat`/`swiftlint` 0; signed `build/DJRoomba.app` rebuilt clean.
+Not committed.
+
+## 2026-05-17 — ✅ Playlist folders: Phases 1–4 (Option A, exclude-only)
+
+Followed the Phase-0 probe with the full phased fix from
+`plans/playlist-folders.md`. **Decision (orchestrator-delegated, user said
+"don't intervene"): Option A — `iTunesLibrary.framework`, exclude-only.**
+Both "Open decisions" resolved: A over B (A1 id-mapping encoded +
+unit-tested; A2 has no correctness cliff — the
+`com.apple.security.assets.music.read-only` entitlement plus
+graceful-degrade-to-`[]` mean nothing forces B, which stays the recorded
+fallback, **never coded**); exclude-only (Phase 5 hierarchy SKIPPED —
+optional, not requested).
+
+- **Phase 2 (prevent at import):**
+  `com.apple.security.assets.music.read-only` added to
+  `DJRoomba.entitlements`; pure `nonisolated PlaylistFolderClassifier`
+  (id mapping `String(Int64(bitPattern: persistentID))` + `isFolder(_:in:)`,
+  **8 unit tests**); `PlaylistFolderSource.libraryFolderIDs()` (off-main
+  `Task.detached`, graceful-degrades to `[]` if iTunesLibrary
+  unavailable — no exclusion, zero regression); `ImportService.runImport`
+  builds the folder-id set once and skips folder ids **before**
+  `fetchTracks` (dodges the probe's MainActor-hang corollary).
+- **Phase 3 (converge the DB):** `LibraryStore.deleteApplePlaylists(ids:)`
+  (chunked, single-write, FK-cascade, one-way isolation, empty-set no-op)
+  wired into `runImport` to actively delete already-stored folder
+  snapshots. `PlaylistFolderConvergeTests` pins isolation + "converged
+  folder no longer contributes genre edges".
+- **Phase 4 (this pass):** added
+  `PlaylistFolderConvergeTests."converged folder no longer appears in
+  associated playlists"` — seeds Rock/Jazz/Pop, an "AAA ME"-shaped folder
+  (union of children) + a real playlist, `deleteApplePlaylists` +
+  `rebuildGenreGraph`, asserts `associatedPlaylists` (verified signature
+  `(genre:neighbor:limit:) async throws -> [PlaylistAssociation]`) returns
+  **empty for the folder-only genre (Jazz)** and **only the real playlist
+  for Rock** (single-genre *and* `Rock↔Pop` edge). Added a terse
+  defense-in-depth note on `rebuildGenreGraph`'s `maxPlaylistTracks` doc:
+  the oversized-playlist threshold is documented defense-in-depth, **NOT**
+  the folder fix (a small folder still needs the classifier; a big *real*
+  playlist must not be excluded) — no threshold/behavior change. Docs
+  (`playlist-folders.md`, `data-and-import.md`, `musickit-notes.md`,
+  `PLAN.md`, this file) updated.
+- The Option-B "union/superset detection + curated-superset negative"
+  Phase-4 bullet is **N/A** — B was never implemented; that bullet is
+  satisfied by documentation, not code.
+- **Status:** `make check` clean; `swift test` **155 tests / 25 suites**
+  green (was **143/23** pre-Phase-2; +12 across Phases 2–4: 8 classifier +
+  3 converge + this 1 associated-playlists); `swiftformat --lint` 0/103,
+  `swiftlint` 0. No schema change. **Not committed.**
+- **Remaining (USER-gated signed blitz)** — same "signed gate pending
+  (user)" pattern as every prior milestone: ⇧⌘R *Reimport Everything* →
+  ⌥⌘A *Analyze*, then
+  `sqlite3 ~/Library/Containers/org.sockpuppet.djroomba/Data/Library/Application\ Support/DJRoomba/library.sqlite "SELECT id,name FROM apple_playlist WHERE name LIKE 'AAA%';"`
+  → expect **empty**; `genre_edge` no longer folder-dominated; the
+  previously-folder-skewed associations card looks sane.
+
+## 2026-05-17 — 🔬 Probe: playlist folders are imported as playlists
+
+Bug report: "AAA ME" was imported as a playlist but is a Music.app
+**folder** (hierarchical container). Phase-0 throwaway signed
+`PlaylistFolderProbe` (reverted — `GenreProbe` precedent; only the
+finding kept, see `plans/musickit-notes.md`).
+
+- **Root cause:** `ImportService` writes *every*
+  `MusicLibraryRequest<Playlist>` item as an `apple_playlist`; there is
+  zero folder filtering. The probe proved **MusicKit exposes no folder
+  discriminator at all** — across all 270 playlists `kind`/`curatorName`/
+  `lastModifiedDate` are nil and the only `Mirror` children are `id` +
+  an opaque `propertyProvider`; the folder is byte-identical to a real
+  playlist. So a folder (the flattened union of its child playlists) was
+  imported as one huge genre-spanning "playlist", which dominated the
+  genre graph / associations (the "AAA ME 57" symptom). Pre-existing
+  Phase-3 gap; the genre work only surfaced it.
+- **Consequences for the plan:** MusicKit-native detection is
+  **impossible** (no field to filter on). Detection must come from
+  iTunesLibrary.framework (`ITLibPlaylist.kind == .folder`/`parentID`),
+  ScriptingBridge, or a content heuristic. A folder's
+  `.with([.entries])` also *hangs the MainActor* in the probe ⇒ folders
+  must be excluded *before* the per-playlist fetch. Revised phased plan
+  delivered to the user (not yet implemented).
+- Side finding: `lastModifiedDate` nil for all 270 → incremental import
+  always degrades to full re-import on this library (confirms the
+  `data-and-import.md` caveat; not a regression).
+- Tree restored: probe fully reverted; `swift build` clean, **143
+  tests / 23 suites** green.
+
+## 2026-05-17 — ✅ Neighbor-walk + associated-playlists card
+
+Two fast-follow FDG interactions (vendored, "DJROOMBA PATCH 3 & 4").
+
+**Neighbor-walk (PATCH 3).** When a genre is the centred selection and
+search is inactive, the arrow keys cycle its **linked** genres
+(strongest edge first, weighted from `graph.edges`): each press previews
+a neighbour — centre + readable zoom + hover ring, no selection move, no
+snapshot rebuild; `Return` commits it as the new centred genre and the
+walk continues from there; if no `Return` lands within 2 s the view snaps
+back to the original genre (a cancellable MainActor `Task`, no GCD, reset
+each step). `KeyCaptureView` now dispatches ↑↓←→/Return/Esc
+unconditionally and the engine decides (consumes for search-cycle when
+the HUD is up, else for the walk when a genre is selected, else returns
+false so the key passes through to the app unchanged). `selection`'s
+didSet resets the walk so a new/cleared selection starts clean. User-
+confirmed working ("looking good"); the computer-use env can't reliably
+drive standalone synthetic arrows (recurring Accessibility gate), so the
+keyboard path is code-reviewed + user-verified, not screenshot-verified.
+
+**Associated-playlists card (PATCH 4).** Selecting a genre shows a pretty
+corner card (top-trailing of the FDG view) of the playlists tied to it —
+`.regularMaterial` rounded panel, hairline border + soft shadow, source
+icon + name + right-aligned strength, **sorted by strength desc, capped
+at 8**. During neighbour-walk the card **narrows to the previewed edge**
+(playlists where *both* genres co-occur, strength = `min` pair
+co-strength); it resets to the anchor genre's full list on snap-back and
+to the new genre on commit, and clears on deselect. Wiring: a new engine
+`onFocusChange(genre, edgeOther)` callback (fired from select / preview /
+snap-back / commit / deselect — the same transitions PATCH 3 owns),
+surfaced as an optional `ForceGraphView` init param (defaulted, existing
+call site unaffected). `GenreGraphContent` keeps `focus`/`associations`
+`@State`, reloads via `.task(id: focus)` (auto-cancels the prior load so
+rapid previews can't race a stale list). New store read
+`LibraryStore.associatedPlaylists(genre:neighbor:limit:)` (two CTE
+shapes, single-genre vs edge; derived live from `genre_names` +
+membership — association isn't persisted; no eligibility filter — the
+honest "all playlists this genre is in"). `PlaylistAssociation` DTO;
+`GenreGraphService.associatedPlaylists` thin wrapper (cap 8). Computer-use
+**verified the card** end-to-end: select "Alt/Laptop" → card lists 8
+playlists, strength-sorted (57…5), capped, pretty.
+
+- **Skills:** macos-design / swiftui-pro / typography applied (material
+  HUD-style overlay, `.topTrailing`, semantic type, `Text`-from-
+  `LocalizedStringKey` so `^[…]` inflects, `.task(id:)` not manual Task
+  juggling, subviews/types in own files, no `Binding(get:set:)`).
+- **Verify:** `swift build` clean; **143 tests / 23 suites** green (+2
+  `GenreGraphTests`: associated playlists by strength; edge narrowing
+  incl. the both-genres-required filter; the SwiftUI card / FDG patches
+  are layout/dep-internal, not unit-tested per precedent);
+  `swiftformat`/`swiftlint` 0. Not committed.
+
+## 2026-05-17 — ✅ Genre search: vendored fdg + 2 patches (flicker, zoom)
+
+Field report on the search HUD: (1) typing/cycling genres flickered the
+mouse cursor (a tight unnecessary redraw loop); (2) cycled matches stayed
+tiny dots instead of being centred big enough to read. Both root-caused
+into `fdg`'s `GraphEngine`, with **no public API hook** to fix from our
+side.
+
+- **Vendored the dependency.** `tqbf/fdg` was a remote SPM tag; you can't
+  patch a pinned remote. Copied the exact v1.0.0 commit `0a8a43e` into
+  `Vendor/ForceGraph` (trimmed to the library target — Lab/tests/corpus
+  dropped), switched `Package.swift` to `.package(path:)`
+  (product `package:` `fdg` → `ForceGraph`), `Package.resolved` drops the
+  remote. Both fixes carry `// DJROOMBA PATCH` markers for upstreaming.
+- **Patch (1) — flicker / tight loop.** `tick()` kept
+  `wantsContinuousRedraw` pinned the whole time the search HUD was up
+  (`pulseWantsRedraw = searchHUDState.isVisible && !reduceMotion`) just to
+  breathe the match pulse → the opaque `Canvas` redrew the entire graph at
+  display refresh on a *settled* graph the whole time, and the OS reset
+  the cursor over the continuously-invalidating view every frame.
+  `pulseWantsRedraw = false`: a settled search now idles like any static
+  graph (the existing Reduce-Motion no-pulse path, made universal).
+  Matches still light/dim (snapshot-driven); the recenter animation still
+  runs via the finite `keepLiveUntil` tail.
+- **Patch (2) — center+zoom on cycle.** `onSearchCycle`/narrow used
+  `viewport.center(on:)` (pan only, preserves zoom) → matches stayed
+  tiny when zoomed out. Added `Viewport.focus(on:minScale:)` (centre AND
+  raise zoom to a readable floor, never zoom out) + a
+  `recenterViewportForSearch` used by cycle and query-narrowing; the
+  layout-bloom follow and selection pin keep the pan-only path
+  (their zoom is intentionally preserved).
+- **Verify:** `swift build` clean (vendored ForceGraph compiles with both
+  patches); **141 tests / 23 suites** green (our suite unaffected — the
+  patches are dep-internal; `swiftformat`/`swiftlint` run on
+  `DJRoomba`/`Tests` only, never `Vendor`). Computer-use on the signed
+  build: typed "laptop" → 1/3 matches; ↓ cycled 1/3→2/3→3/3, each
+  ("Alt/Laptop/Bristol", "Alt/Laptop/NYC", …) **centred and zoomed
+  readable** with its neighbourhood legible (was tiny dots), and the
+  graph **settled to rest between cycles** (loop paused — no 60 Hz
+  churn). Not committed.
+
+## 2026-05-17 — ✅ Genre analysis: source-level thresholds + Advanced pane
+
+The real fix for "why is the graph so dense": shape it at **analysis
+time** (principled, persisted, user-tunable) instead of re-pruning at
+display time. Two thresholds added to `LibraryStore.rebuildGenreGraph`:
+
+- **(a) Exclude oversized playlists.** A playlist clique-connects all its
+  genres (quadratic), so a few giant lists ("every track WLIR played for
+  8 years") alone push the graph near-complete. New `eligible` CTE drops
+  any playlist whose `COUNT(*)` membership exceeds `maxPlaylistTracks`
+  (default 500); everything downstream joins through it.
+- **(b) Cap edges per playlist.** Each eligible playlist contributes only
+  its **top-`maxPairsPerPlaylist`** (default 30) genre pairs by
+  intra-playlist co-strength `min(distinct tracks of A, distinct tracks
+  of B)` — high only when *both* genres are substantially present, so a
+  stray track / a single dominant genre can't mint a strong pair. Done
+  with a `ROW_NUMBER() OVER (PARTITION BY playlist ORDER BY strength
+  DESC, …)` window CTE (`ranked`/`kept`); the rest of the CTE chain is
+  unchanged. Two `?` binds (maxPlaylistTracks, maxPairsPerPlaylist).
+- **Advanced Settings pane.** New native `Settings` scene (⌘,, SwiftUI
+  auto-wires the menu item) → `SettingsView` (TabView, one "Advanced"
+  tab, fixed 520×320) → `GenreAnalysisAdvancedPane` (grouped `Form`,
+  two bounded `Stepper`s + a `.caption` explainer each + a footer noting
+  changes apply on next analysis). Bound via `@AppStorage` — correct
+  here (a plain view, NOT inside an `@Observable`) on the SAME
+  `UserDefaults` keys `UserPreferencesStore` exposes
+  (`genreAnalysisMaxPlaylistTracks` / `…MaxPairsPerPlaylist`, clamped
+  ≥ 1), so it needs no `controller` wiring. `MusicController` reads the
+  prefs and passes them through the single `runGenreAnalysis()` funnel
+  (both ⌥⌘A and the auto-reanalyze hook).
+- **Sparsification re-evaluated & simplified.** The display-time greedy
+  strongest-neighbour backbone was **removed** — re-pruning a graph
+  already curated at source only obscured it. `buildDisplayGraph` is now
+  a faithful projection: canonical `a<b` fold, **every analyzed genre is
+  a node** (low-degree genres stay searchable/centerable), weight
+  normalised over kept, and a single documented **perf backstop**
+  (`displayEdgeMax = 1200`, strongest-by-weight) that is expected to
+  rarely bind now. `sparsify` + the per-node-degree knob deleted.
+- **Skills:** macos-design / swiftui-pro / typography-designer consulted
+  for the Settings pane; result conforms (native tabbed-Settings chrome,
+  grouped Form, `@AppStorage`-in-plain-view, `LabeledContent` + Stepper,
+  semantic type, no `Binding(get:set:)`, types in own files).
+- **Verify:** `swift build` clean; **141 tests / 23 suites** green (+2
+  `GenreGraphTests`: oversized-playlist exclusion, per-playlist top-N by
+  strength; `GenreGraphDisplayTests` reworked off the removed sparsify
+  to the backstop + all-genres-stay-nodes); `swiftformat`/`swiftlint` 0.
+  Computer-use on the signed real-library build: **Re-analyze with the
+  new defaults took 5,719 → 731 links / 88 genres** (well under the
+  1,200 backstop ⇒ the true analysis-curated graph, far more legible),
+  and the ⌘, Advanced pane renders correctly (both steppers at
+  500 tracks / 30 links, captions, footer). Genre graph blown away &
+  rebuilt (user-sanctioned). Not committed.
+
+## 2026-05-17 — ✅ Genre-graph visualizer: reveal affordance + snappiness
+
+Field feedback on the visualizer: (1) collapsing it left no discoverable
+way to bring it back; (2) typing "americana" to centre it was REALLY slow.
+Both fixed and computer-use-verified on the signed real-library build.
+
+- **Reveal affordance — toolbar toggle.** Added a `MainShellView`
+  toolbar button (the `point.3.connected.trianglepath.dotted` glyph,
+  between Refresh and the Inspector toggle) bound to the **same**
+  `@SceneStorage("genreGraphPanelCollapsed")` key as `GenreGraphPanel`,
+  so the toolbar control and the panel's header chevron stay in sync
+  within the scene (no state-lifting/prop-drilling). This is the
+  native idiom (mirrors the app's own inspector toggle); a collapsed
+  panel is now always re-openable from the toolbar. Verified: clicking
+  it reveals/hides the panel.
+- **Snappiness — sparsify before handing to `ForceGraphView`.** Root
+  cause: a real genre co-occurrence graph is **near-complete** (measured
+  library: 114 genres, **5,719** edges ≈ 89 % of a complete graph).
+  `ForceGraph` is explicitly built for *sparse* graphs — its spring sim,
+  edge-crossing detection and per-frame Canvas redraw all scale with
+  edge count, so a hairball is slow *and* illegible. This is our
+  integration's responsibility, not the dep's. `buildDisplayGraph` now
+  reduces to a **greedy degree-bounded strongest-neighbour backbone**:
+  per-genre top-`maxNeighbors` (8) by weight via a deterministic
+  strongest-first walk, then a global `maxEdges` (600) cap;
+  weights renormalise over survivors. Result on the real library:
+  **5,719 → 600 links** (~9.5× fewer) — search/centre is now snappy and
+  the graph is legible.
+- **…but every genre stays findable.** First cut also derived *nodes*
+  from kept edges, which pruned "Americana" out entirely ("no matches" —
+  the exact reported case). Fixed: **node set = every genre that
+  co-occurs with anything** (full pre-sparsify set); only *edges* are
+  sparsified. A genre whose weak links were pruned still appears (floats
+  free of springs — honest "no strong ties") and stays
+  searchable/centerable. Node count was never the cost; edges were.
+  `ForceGraph` explicitly supports partly-disconnected graphs.
+  Verified: "americana" → **1 match**, highlight, `Return` centres &
+  pins it, fast.
+- **Verify:** `swift build` clean; **139 tests / 23 suites** green (+4
+  net `GenreGraphDisplayTests`: backbone keeps strong/drops weak tail,
+  global cap, sparse-graph untouched, **pruned genre still a searchable
+  node**); `swiftformat`/`swiftlint` 0. Computer-use on the signed
+  build confirmed toolbar reveal + the americana centre + 600-edge
+  snappiness. Not committed.
+
+## 2026-05-17 — ✅ Genre-graph visualizer (collapsible/resizable detail panel)
+
+Pulled in **`tqbf/fdg`** (`ForceGraph` SPM library product — one public
+`ForceGraphView`, no third-party deps, macOS 14; pinned `from: "1.0.0"`,
+identity `fdg`, resolved at v1.0.0 / `0a8a43e`) and rendered the v6 genre
+graph in the main pane. Full design: `plans/genre-graph.md` → "The
+visualizer".
+
+- **Placement:** `DetailPaneView` now composes the detail column as
+  `PlaylistDetailView` (takes the space) + a bottom-docked
+  `GenreGraphPanel` — the native debug-area idiom. Library-wide, so it's
+  independent of the selected playlist (stays put while the user changes
+  playlists above it). `MainShellView`'s `detail:` swapped to
+  `DetailPaneView()`.
+- **Collapsible:** header chevron toggles `collapsed`; the slim bar stays
+  when collapsed (always re-discoverable), value-animated.
+- **Resizable:** top-edge `GenreGraphResizeHandle` (drag, clamped 180–680,
+  macOS resize cursor, VoiceOver-adjustable). `collapsed` + height are
+  `@SceneStorage` (scene state in the view layer, never in an
+  `@Observable`); default **expanded** at 300 pt (visible on first run,
+  doesn't crowd the track list).
+- **`GenreGraphService` extended:** publishes `displayNodes`/`displayEdges`
+  /`isLoadingGraph`/`hasLoadedGraph`. `loadGraph()` (panel `.task`, no
+  rebuild) shows a prior/auto-built graph immediately; `analyze()`
+  refreshes it in the same call so the panel tracks both the ⌥⌘A action
+  and the auto-reanalyze with no extra trigger. Pure `nonisolated static
+  buildDisplayGraph(from:)`: canonical `a<b` half only, sorted node set,
+  weight `raw/maxRaw` floored 0.12 (single edge ⇒ 1).
+- **View files** (swiftui-pro "extract subviews", codebase granularity):
+  `DetailPaneView`, `GenreGraphPanel`, `GenreGraphResizeHandle`,
+  `GenreGraphPanelHeader`, `GenreGraphContent` (loading / Analyze
+  empty-state / `ForceGraphView`). Type reuses the existing semantic
+  scale (`.subheadline` semibold + `.caption` secondary — one tier below
+  `PlaylistHeaderView`); no new scale.
+- **Skills:** swiftui-pro (`views.md`/`data.md`) + macos-design
+  (`layout-and-composition.md`) consulted before; result conforms —
+  subviews extracted to own files, button actions in methods,
+  value-driven animation, scene state out of `@Observable`,
+  content-area-as-star secondary panel, progressive collapse.
+- **Verify:** `swift build` clean; **135 tests / 23 suites** green (new
+  `GenreGraphDisplayTests` ×4: canonical-half dedupe + sorted nodes,
+  max+0.12-floor normalisation, empty input, lone canonical half);
+  `swiftformat`/`swiftlint` 0. Not committed.
+- **Computer-use sanity check (signed `make` build, real ~8200-song
+  library):** panel renders correctly docked at the detail-pane bottom
+  (chevron + title + count + Analyze button + drag-handle + empty-state
+  CTA). Clicking **Analyze** built the graph end-to-end and
+  `ForceGraphView` rendered a clean colourful force layout — **114
+  genres · 5,719 links** with readable hierarchical-tag node labels
+  (Prog-Rock/Art Rock, Alt/Goth/Industrial, Hip-Hop/Rap, …). Found +
+  fixed one real bug: the header count printed the literal
+  `^[…](inflect: true)` markup because it went through a precomputed
+  `String`; switched to an inline `Text(LocalizedStringKey)` literal
+  (the `PlaylistHeaderView` idiom) — re-verified on a fresh build: now
+  reads "114 genres · 5,719 links" correctly inflected/grouped.
+  Collapse + resize could **not** be exercised: the macOS Accessibility
+  (`universalAccessAuthWarn`) prompt gated synthetic input after the
+  first event (environment, not an app defect — can't grant that
+  permission programmatically). Those paths are simple and were
+  code-reviewed instead; `ForceGraph`'s interaction layer was confirmed
+  to monitor only `.keyDown`/`.scrollWheel` and **never consume mouse
+  events**, so it can't be starving the chevron/handle. A signed manual
+  pass of collapse/resize is the one remaining unautomated check.
+
+## 2026-05-17 — ✅ v6: genre graph + the "Analyze" action
+
+Build a graph of genres by relating tracks of different genres that
+**share a playlist**. Full design: `plans/genre-graph.md`.
+
+- **Schema `v6.genreGraph`**: `genre_edge(genre_a, genre_b, weight,
+  PRIMARY KEY(genre_a, genre_b))` — a pure **adjacency-list** edge table.
+  No FK (genre is denormalized free text in `song.genre_names`, not an
+  entity — the favorites/recents no-FK rationale); no extra index (the
+  composite PK *is* the adjacency index). Purely additive — v1–v4 frozen,
+  non-destructive. **No `v5.*` migration** on purpose (the documented v5
+  album-genre import was data-only / reused the v4 column; the migration
+  id skips to v6 — it's just an ordered label).
+- **`LibraryStore.rebuildGenreGraph()`**: ONE `DELETE` + ONE CTE-driven
+  `INSERT … SELECT … UNION ALL` in a single transaction. CTEs keep the
+  graph SQL un-messy: `membership` (both libraries, source-prefixed
+  composite playlist key, `UNION ALL`) → `playlist_genre` (`json_each`
+  explode, `DISTINCT`, NULL/`json_valid`/blank guards) → `pair`
+  (self-join on `a.genre < b.genre` — drops self-pairs *and* the mirror)
+  → `edge` (`COUNT(DISTINCT playlist_key)` = weight). Both directed
+  half-edges materialized so a neighbour read is a trivial indexed
+  `genre_a` lookup. Wholesale ⇒ consistent by construction, idempotent,
+  one-way isolated (only `genre_edge`). Reads:
+  `relatedGenres(to:limit:)`, `genreGraphEdges()`; read-only `GenreEdge`.
+- **`GenreGraphService`** (`@MainActor @Observable`, mirrors
+  `GenreImportService`): `analyze()` / `isAnalyzing` (re-entrancy guard)
+  / `lastError` / `edgeCount`. **No MusicKit** — pure SQLite over data
+  already imported; offline-safe, no signing gate.
+- **On-demand:** Playback ▸ **Analyze Genre Graph** (⌥⌘A), beside
+  Reimport Everything. **Auto-reanalyze (default ON):** Playback ▸
+  **Reanalyze Automatically** — a native checkmark `Toggle` bound via
+  `Bindable` (modern Observation binding, not `Binding(get:set:)`),
+  persisted in `UserPreferencesStore.autoReanalyzeGenreGraph`
+  (UserDefaults; absent ⇒ true, no migration), mirrored on
+  `MusicController` (no `@AppStorage` in an `@Observable`).
+  `reanalyzeGenreGraphIfEnabled()` fires fire-and-forget after
+  import / app-playlist add·remove·setTracks·delete; deliberately NOT on
+  rename / sidebar-reorder / empty-create (those can't change a
+  genre↔playlist relationship — guaranteed wasted work). The
+  `isAnalyzing` guard + wholesale rebuild coalesce a burst into one
+  in-flight pass with nothing missed.
+- **Skills:** swiftui-pro (`data.md`) + macos-design consulted before and
+  the result conforms — `@MainActor @Observable`, `Bindable` binding, no
+  `@AppStorage`-in-`@Observable`, fire-and-forget consistent with the
+  existing `recordRecentlyPlayed`/`detectAndRecordAdvance` patterns;
+  menu placement/idiom/shortcut native (checkmark Toggle, ⌥⌘A,
+  setting-has-no-shortcut).
+- **Verify:** `swift build` clean; **131 tests / 22 suites** green (new
+  `GenreGraphTests` ×10: symmetric two-direction edges, distinct-playlist
+  weighting incl. duplicate-row collapse + Apple&app both feeding it,
+  multi-genre-song self-link, no-shared-playlist→no-edge,
+  NULL/blank/invalid genre ignored without abort, adjacency
+  ordering+limit, idempotence, one-way isolation; `MigrationTests` v6
+  ordering/idempotence + `genre_edge` table/PK + `expectedTables`);
+  `swiftformat`/`swiftlint` 0. Not committed.
+- A visual genre-graph view / sidebar "related genres" is the trivial
+  follow-on (the edge table + reads are in place) — out of scope.
+
 ## 2026-05-17 — ✅ v5: album genres imported onto song.genre_names
 
 Acted on the probe finding. Genre lives on the library `Album`; the user

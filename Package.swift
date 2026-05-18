@@ -38,6 +38,14 @@ let package = Package(
     // the graph transitively via swift-profile-recorder; declared directly
     // so the target can `import Logging`. Only referenced behind `#if DEBUG`.
     .package(url: "https://github.com/apple/swift-log.git", from: "1.6.1"),
+    // tqbf/fdg — ForceGraph: a reusable SwiftUI force-directed graph
+    // control. **Vendored** at `Vendor/ForceGraph` (the exact v1.0.0
+    // commit 0a8a43e we previously consumed remotely), not a remote SPM
+    // dependency, so two upstreamable fixes with no public API hook can be
+    // applied — the search-pulse redraw-pin (cursor flicker / tight loop)
+    // and pan-only (vs zoom-to-readable) search centring. See the
+    // "DJROOMBA PATCH" comments in Vendor/ForceGraph and plans/genre-graph.md.
+    .package(path: "Vendor/ForceGraph"),
   ],
   targets: [
     .executableTarget(
@@ -46,6 +54,7 @@ let package = Package(
         .product(name: "GRDB", package: "GRDB.swift"),
         .product(name: "ProfileRecorderServer", package: "swift-profile-recorder"),
         .product(name: "Logging", package: "swift-log"),
+        .product(name: "ForceGraph", package: "ForceGraph"),
       ],
       path: "DJRoomba",
       exclude: [

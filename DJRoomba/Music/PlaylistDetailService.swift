@@ -53,6 +53,21 @@ final class PlaylistDetailService {
     }
   }
 
+  /// Select a **synthetic genre collection** (the genre-graph navigation):
+  /// every song tagged with `genre`, shown in the top pane like a playlist
+  /// but with no backing Apple/app playlist. Mirrors `select(_:)`'s
+  /// task/cancel structure; genre details are NOT cached in the LRU (it's
+  /// keyed for real playlist ids — a `"genre:<name>"` sentinel could
+  /// collide), so this always re-reads.
+  func selectGenre(_ genre: String) {
+    loadTask?.cancel()
+    detail = nil
+    loadError = nil
+    loadTask = Task { [weak self] in
+      await self?.loadGenre(genre)
+    }
+  }
+
   /// Re-run the stats-joined read for `playlistID` and, if it's still the
   /// one on screen, splice the fresh `play_count` / `last_played_at` back
   /// into the existing rows (order/membership unchanged — only the stat
@@ -148,6 +163,9 @@ final class PlaylistDetailService {
         isEditable: current.isEditable,
         tracks: rows,
         revision: nextRevision(),
+        // A stats refresh never changes membership, so the genres can't
+        // change — carry the prior value over rather than recompute.
+        genres: current.genres,
       )
       cache.set(refreshed, forID: summary.id)
       if detail?.id == summary.id { detail = refreshed }
@@ -177,6 +195,7 @@ final class PlaylistDetailService {
       let rows = withStats.enumerated().map { index, entry in
         TrackRow(songWithStat: entry, position: index + 1)
       }
+      let genres = PlaylistDetail.genreTally(withStats.map(\.song))
       let result = PlaylistDetail(
         id: summary.id,
         name: summary.name,
@@ -186,8 +205,45 @@ final class PlaylistDetailService {
         isEditable: summary.source.isAppOwned ? true : summary.isEditable,
         tracks: rows,
         revision: nextRevision(),
+        genres: genres,
       )
       cache.set(result, forID: summary.id)
+      detail = result
+    } catch {
+      if Task.isCancelled { return }
+      loadError = error.localizedDescription
+    }
+  }
+
+  /// Load a synthetic genre collection. Mirrors `load(_:)` but reads by
+  /// genre, uses an app-owned source (`.appPlaylist`) so playback routes
+  /// through the per-song resolver — correct for an arbitrary song set —
+  /// and is NOT cached (the LRU is keyed for real playlist ids).
+  private func loadGenre(_ genre: String) async {
+    isLoading = true
+    loadError = nil
+    defer { isLoading = false }
+
+    do {
+      let withStats = try await store.songsWithStats(matchingGenre: genre)
+      if Task.isCancelled { return }
+
+      let rows = withStats.enumerated().map { index, entry in
+        TrackRow(songWithStat: entry, position: index + 1)
+      }
+      var result = PlaylistDetail(
+        id: "genre:\(genre)",
+        name: genre,
+        isAppleLibraryPlaylist: false,
+        source: .appPlaylist,
+        description: nil,
+        isEditable: false,
+        tracks: rows,
+        revision: nextRevision(),
+        // A genre detail doesn't show its own genre chips.
+        genres: [],
+      )
+      result.isGenre = true
       detail = result
     } catch {
       if Task.isCancelled { return }
