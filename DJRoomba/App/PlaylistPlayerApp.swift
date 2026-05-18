@@ -112,6 +112,26 @@ struct PlaylistPlayerApp: App {
           Task { await controller.reimportEverything() }
         }
         .keyboardShortcut("r", modifiers: [.command, .shift])
+
+        Divider()
+
+        // Sibling of "Reimport Everything": both rebuild derived state
+        // wholesale from the library. ⌥⌘A — ⌘A/⇧⌘A are reserved
+        // (Select All / Deselect); ⌥⌘A is free and mnemonic ("Analyze").
+        Button("Analyze Genre Graph") {
+          Task { await controller.analyzeGenreGraph() }
+        }
+        .keyboardShortcut("a", modifiers: [.command, .option])
+
+        // A `Toggle` in a menu is the native checkmark-menu-item idiom.
+        // Bound through `Bindable` (the modern Observation binding —
+        // avoids a `Binding(get:set:)`); `MusicController`'s `didSet`
+        // writes the change straight to `UserPreferencesStore`. A setting,
+        // not a primary action, so no keyboard shortcut.
+        Toggle(
+          "Reanalyze Automatically",
+          isOn: Bindable(controller).autoReanalyzeGenreGraph,
+        )
       }
 
       CommandGroup(after: .sidebar) {
@@ -131,6 +151,15 @@ struct PlaylistPlayerApp: App {
           Task { await controller.seedSyntheticHistory(count: 500) }
         }
       }
+    }
+
+    // The standard macOS Settings window (⌘, — SwiftUI wires the menu
+    // item + shortcut automatically for a `Settings` scene). Holds the
+    // Advanced genre-analysis thresholds. Self-contained: it binds
+    // `UserDefaults` via `@AppStorage`, the same keys the analysis reads,
+    // so it needs no access to `controller`.
+    Settings {
+      SettingsView()
     }
   }
 

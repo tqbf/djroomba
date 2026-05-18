@@ -32,7 +32,9 @@ final class MusicController {
     recentlyPlayed = RecentlyPlayedService(store: safeStore)
     importService = ImportService(store: safeStore)
     genreImportService = GenreImportService(store: safeStore)
+    genreGraphService = GenreGraphService(store: safeStore)
     resolver = PlaybackResolver()
+    autoReanalyzeGenreGraph = preferences.autoReanalyzeGenreGraph
     if openedStore == nil {
       storeError = "The local library database could not be opened."
     }
@@ -56,6 +58,11 @@ final class MusicController {
   /// (Reimport Everything ⇧⌘R) or the empty-DB first import — never on the
   /// fast incremental Refresh; see `runImport(force:firstImport:)`.
   let genreImportService: GenreImportService
+  /// The "Analyze" action: rebuilds the genre co-occurrence graph from all
+  /// playlists. Pure SQLite (no MusicKit), so it is also re-run
+  /// automatically after a playlist change when `autoReanalyzeGenreGraph`
+  /// is on.
+  let genreGraphService: GenreGraphService
   let resolver: PlaybackResolver
 
   /// Observable mirrors of the persisted app state. SQLite is authoritative;
@@ -66,6 +73,18 @@ final class MusicController {
   /// Bumped by the ⌘L / ⌘1 commands; the sidebar observes this to take
   /// keyboard focus (commands are app-scoped, so this bridges to the view).
   private(set) var focusSidebarRequest = 0
+
+  /// The neutral, dismissible self-diagnosis for the last *full / first*
+  /// album-genre pass that finished without an error yet tagged zero songs
+  /// (so playlist genre chips / the genre graph would be bare with the app
+  /// otherwise showing nothing). The pure, unit-tested `GenreImportSummary
+  /// .notice` decides the triad + most-likely cause; this is its observed
+  /// home. `nil` ⇒ no notice (success-with-tags clears it; an errored pass
+  /// leaves it `nil` because the orange `libraryProblem` already surfaces
+  /// `genreImportService.lastError`). Set only on a full/first import; a
+  /// later incremental Refresh leaves the prior value (it describes the last
+  /// full pass — acceptable). Dismissible via `dismissGenreImportNotice()`.
+  private(set) var genreImportNotice: String?
 
   /// Derived summary collections — **stored, input-driven state**, not
   /// per-`body` computed properties (Phase A spry fix; see
@@ -95,13 +114,58 @@ final class MusicController {
   /// they stop being O(n) scans over a freshly concatenated array.
   private(set) var summariesByID = [String: PlaylistSummary]()
 
+  /// The synthetic genre collection currently shown in the top pane (the
+  /// genre-graph navigation), or nil. Mutually exclusive with a playlist
+  /// selection: picking a playlist clears this, and `showGenre` clears
+  /// `selectedPlaylistID`. Observed; drives the detail pane + sidebar
+  /// highlight suppression. In-memory only — genres are per-session.
+  private(set) var selectedGenre: String?
+
+  /// The in-session top-pane Back stack (LIFO of PRE-change destinations).
+  /// Observed so `canGoBack` recomputes when it changes. The push/cap/pop
+  /// rules live in the pure, unit-tested `DetailNavStack`; this controller
+  /// only decides *what* destination to record/replay. Never persisted —
+  /// starts empty each launch.
+  private(set) var navBackStack = DetailNavStack()
+
+  /// Observable mirror of `UserPreferencesStore.autoReanalyzeGenreGraph`
+  /// (default on). Same pattern as `lastSelectedPlaylistID`: the
+  /// UserDefaults store is the durable truth (it can't live inside an
+  /// `@Observable` as `@AppStorage`), this is the observed mirror the menu
+  /// toggle binds to, and the `didSet` writes the change straight back.
+  /// Turning it on does NOT itself rebuild — "Analyze Genre Graph" is the
+  /// explicit on-demand action; this only governs the automatic reanalyze.
+  var autoReanalyzeGenreGraph: Bool {
+    didSet {
+      guard oldValue != autoReanalyzeGenreGraph else { return }
+      preferences.autoReanalyzeGenreGraph = autoReanalyzeGenreGraph
+    }
+  }
+
   /// Sidebar selection. App-local state — drives lazy detail load and is
   /// persisted so it survives relaunch (if the playlist still exists).
+  ///
+  /// STORED (least-risk): its `didSet` is the single integration point for
+  /// the in-session Back stack. On a *user* selection change it records the
+  /// PRE-change destination onto `navBackStack` and clears any genre view
+  /// (a sidebar/playlist pick exits a genre). During Back/restore replay
+  /// (`suppressNavRecording == true`) it does neither — the caller owns
+  /// genre/history state — so launch restore creates no phantom history and
+  /// `goBack` doesn't re-record what it's popping.
   var selectedPlaylistID: String? {
     didSet {
       guard oldValue != selectedPlaylistID else { return }
+      if !suppressNavRecording {
+        navBackStack.push(selectedGenre.map(DetailDestination.genre) ?? oldValue.map(DetailDestination.playlist))
+        selectedGenre = nil
+      }
       handleSelectionChange()
     }
+  }
+
+  /// Whether the Back control is enabled (there is a previous destination).
+  var canGoBack: Bool {
+    navBackStack.canGoBack
   }
 
   /// True while the library is being (re)populated — an Apple import is
@@ -109,7 +173,7 @@ final class MusicController {
   /// existing "Loading playlists…" state so first-launch import doesn't
   /// briefly flash "No Playlists" (same UI, just honest about the import).
   var isLibraryBusy: Bool {
-    importService.isImporting || library.isLoading
+    importService.isImporting || genreImportService.isImporting || library.isLoading
   }
 
   /// Coarse import progress for the sidebar's loading affordance (Phase 5):
@@ -124,11 +188,34 @@ final class MusicController {
     return "Loading playlists…"
   }
 
+  /// The always-on import status text for the toolbar's `.status` slot —
+  /// visible during any playlist import or genre pass *regardless of whether
+  /// the sidebar is already populated* (the defect: `libraryLoadingMessage`
+  /// only ever renders in the empty sidebar, so a Reimport Everything over a
+  /// populated library gave zero feedback for 90–120 s). `nil` when nothing
+  /// is running. The wording + precedence live in the pure, unit-tested
+  /// `ImportActivity.text`; this just feeds it the live service counts. The
+  /// playlist branch is kept word-identical to `libraryLoadingMessage` so the
+  /// two surfaces never disagree.
+  var importActivity: String? {
+    ImportActivity.text(
+      playlistsImporting: importService.isImporting,
+      playlistsDone: importService.importedPlaylistCount,
+      playlistsTotal: importService.totalPlaylistCount,
+      genresImporting: genreImportService.isImporting,
+      genresDone: genreImportService.importedAlbumCount,
+      genresTotal: genreImportService.totalAlbumCount,
+    )
+  }
+
   /// A user-facing problem string for the sidebar's error state: a store
-  /// open/migration failure, or an import failure. Library read error is
-  /// surfaced separately (it has its own retry).
+  /// open/migration failure, an import failure, or a swallowed genre-pass
+  /// failure. Import/genre come before the library read (which has its own
+  /// retry); `storeError` stays first. The genre term is load-bearing — a
+  /// `GenreImportService.lastError` on a populated library was previously in
+  /// *no* surface at all, so a failed album-genre pass was completely silent.
   var libraryProblem: String? {
-    storeError ?? importService.lastError ?? library.loadError
+    storeError ?? importService.lastError ?? genreImportService.lastError ?? library.loadError
   }
 
   /// The sidebar's state *with the cause inferred* (Phase 5 smarter empty
@@ -229,6 +316,12 @@ final class MusicController {
     focusSidebarRequest &+= 1
   }
 
+  /// Dismiss the neutral genre-import self-diagnosis (the toolbar info chip's
+  /// "Dismiss"). One-way: clears it until the next full/first pass re-derives.
+  func dismissGenreImportNotice() {
+    genreImportNotice = nil
+  }
+
   func bootstrap() async {
     authorization.refresh()
     if authorization.status == .authorized {
@@ -258,6 +351,16 @@ final class MusicController {
   func reimportEverything() async {
     await runImport(force: true)
     reconcileSelectionAfterImport()
+  }
+
+  /// The **"Analyze"** action (menu / ⌥⌘A): rebuild the genre
+  /// co-occurrence graph from every playlist, on demand. Always runs
+  /// regardless of the `autoReanalyzeGenreGraph` toggle (that toggle only
+  /// governs the *automatic* reanalyze after a change). Pure SQLite — no
+  /// MusicKit, no import — so it is cheap and works offline; failures are
+  /// surfaced via the service's `lastError`, never thrown.
+  func analyzeGenreGraph() async {
+    await runGenreAnalysis()
   }
 
   /// Debug menu action: seed `count` synthetic plays drawn at random from
@@ -365,18 +468,23 @@ final class MusicController {
       // Selected playlist was deleted — clear selection silently.
       selectedPlaylistID = nil
     }
+    // Removing a playlist drops its membership → the set of genres that
+    // shared it can change. Reanalyze (if enabled).
+    reanalyzeGenreGraphIfEnabled()
   }
 
   func addSongs(_ songIDs: [String], toAppPlaylist playlistID: String) async {
     await mutateAppPlaylist(playlistID) {
       await appPlaylistService.addSongs(songIDs, to: playlistID)
     }
+    reanalyzeGenreGraphIfEnabled()
   }
 
   func removeTracks(at oneBasedPositions: [Int], fromAppPlaylist playlistID: String) async {
     await mutateAppPlaylist(playlistID) {
       await appPlaylistService.removeTracks(at: oneBasedPositions, from: playlistID)
     }
+    reanalyzeGenreGraphIfEnabled()
   }
 
   /// Persist a reordered membership for an app playlist (the full ordered
@@ -385,6 +493,11 @@ final class MusicController {
     await mutateAppPlaylist(playlistID) {
       await appPlaylistService.setTracks(songIDs, for: playlistID)
     }
+    // `setTracks` is both reorder-in-place and full-membership replace; the
+    // latter changes which songs (genres) are in the playlist, so reanalyze
+    // (a pure reorder is a cheap no-op for the graph — acceptable, and not
+    // worth distinguishing here).
+    reanalyzeGenreGraphIfEnabled()
   }
 
   /// Persist a new sidebar order for the user playlists.
@@ -456,6 +569,64 @@ final class MusicController {
     }
   }
 
+  /// Show a synthetic genre collection in the top pane (genre-graph
+  /// navigation). Records the pre-change destination, clears the sidebar
+  /// selection (so no playlist row stays highlighted) WITHOUT recording a
+  /// second history entry or re-running the genre-clear path, then loads
+  /// the genre detail. No-op if the genre is already shown.
+  func showGenre(_ genre: String) {
+    guard genre != selectedGenre else { return }
+    navBackStack.push(currentDestination)
+    suppressNavRecording = true
+    selectedPlaylistID = nil
+    suppressNavRecording = false
+    selectedGenre = genre
+    preferences.lastSelectedPlaylistID = nil
+    detailService.selectGenre(genre)
+  }
+
+  /// Navigate the top pane to a playlist from the genre graph's
+  /// associated-playlists card. Ordinary playlist navigation: assigning
+  /// `selectedPlaylistID` lets the existing `didSet` record history, clear
+  /// the genre view, and drive the detail load. If that id is already the
+  /// selection while a genre is showing, the `didSet` won't fire (value
+  /// unchanged) — handle that case by clearing the genre + reselecting
+  /// explicitly. No-op if the playlist isn't known.
+  func openAssociatedPlaylist(id: String) {
+    guard summariesByID[id] != nil else { return }
+    if selectedPlaylistID == id {
+      navBackStack.push(currentDestination)
+      selectedGenre = nil
+      handleSelectionChange()
+    } else {
+      selectedPlaylistID = id
+    }
+  }
+
+  /// Pop the in-session Back stack and apply that destination WITHOUT
+  /// recording it (the pop is the navigation, not a new forward step).
+  /// LIFO. Underflow (empty stack — e.g. already at the landing) no-ops.
+  func goBack() {
+    guard let dest = navBackStack.pop() else { return }
+    suppressNavRecording = true
+    switch dest {
+    case .playlist(let pid):
+      selectedGenre = nil
+      if selectedPlaylistID == pid {
+        handleSelectionChange()
+      } else {
+        selectedPlaylistID = pid
+      }
+
+    case .genre(let g):
+      selectedPlaylistID = nil
+      selectedGenre = g
+      preferences.lastSelectedPlaylistID = nil
+      detailService.selectGenre(g)
+    }
+    suppressNavRecording = false
+  }
+
   // MARK: Private
 
   /// The canonical play context for the active queue, captured atomically
@@ -490,6 +661,12 @@ final class MusicController {
   @ObservationIgnored private let preferences = UserPreferencesStore()
   @ObservationIgnored private let legacyMigration = LegacyPreferencesMigration()
 
+  /// While true, `selectedPlaylistID.didSet` does NOT record history and
+  /// does NOT clear `selectedGenre` — the active replay (Back / launch
+  /// restore) owns that state itself. `@ObservationIgnored`: it's pure
+  /// control flow, never observed.
+  @ObservationIgnored private var suppressNavRecording = false
+
   /// `@ObservationIgnored` is load-bearing: the 0.5 s monitor advances
   /// `snapshot.queueIndex` continuously and `currentStoredSongID` reads it
   /// — Observation-tracking this would invalidate `body` on every
@@ -497,6 +674,15 @@ final class MusicController {
   /// `plans/memory-and-laziness.md` / swiftui-pro warn against). Nothing
   /// reads it from a view body, and it must stay that way.
   @ObservationIgnored private var activePlayContext = ActivePlayContext()
+
+  /// The destination currently shown in the top pane: a genre takes
+  /// precedence (it's mutually exclusive with a playlist), else the
+  /// selected playlist, else nil (the Recently-Played landing — never
+  /// pushed).
+  private var currentDestination: DetailDestination? {
+    selectedGenre.map(DetailDestination.genre)
+      ?? selectedPlaylistID.map(DetailDestination.playlist)
+  }
 
   /// Last-resort in-memory store so `store == nil` never crashes the app.
   /// An in-memory `DatabaseQueue` failing to open means the process is
@@ -599,9 +785,64 @@ final class MusicController {
       // per-album failures are collected into `genreImportService
       // .lastError` and never abort startup/refresh.
       await genreImportService.importAlbumGenres()
+      // Self-diagnose this full/first pass immediately: a pass that tagged
+      // ≥1 song clears the notice to nil; an errored pass → nil here (the
+      // orange `libraryProblem` already surfaces `genreImportService
+      // .lastError`); a clean 0-tagged pass → the diagnostic triad. The
+      // pure classifier owns the wording/precedence.
+      genreImportNotice = GenreImportSummary.notice(
+        ran: true,
+        failed: genreImportService.lastError != nil,
+        totalAlbums: genreImportService.totalAlbumCount,
+        albumsWithGenre: genreImportService.albumsWithGenreCount,
+        taggedSongs: genreImportService.taggedSongCount,
+      )
     }
     await library.load()
     rebuildDerivedSummaries()
+    // An import changes Apple-playlist membership and, on a full/first
+    // import, refreshes `song.genre_names` — both alter the genre graph,
+    // and a full/first import is exactly the "new playlists added" case.
+    // Reanalyze (if enabled). Runs after the genre pass so it derives from
+    // the genres just (re)written, never a stale read.
+    reanalyzeGenreGraphIfEnabled()
+  }
+
+  /// Rebuild the genre graph in the background **iff** the user left
+  /// auto-reanalyze on (the default). Called after a change that can alter
+  /// which genres share a playlist: an import (new/changed playlists +
+  /// refreshed `genre_names`) or an app-playlist membership edit
+  /// (add / remove / set / delete). Deliberately NOT called for rename /
+  /// reorder-sidebar / empty-playlist *create* — none of those change any
+  /// genre↔playlist relationship, so a rebuild there is guaranteed wasted
+  /// work (a freshly created playlist has no songs, hence no genres, hence
+  /// no edges; the import path covers genuinely-new *populated* playlists).
+  ///
+  /// Fire-and-forget on the MainActor, mirroring `recordRecentlyPlayed` /
+  /// `detectAndRecordAdvance`: the graph backs no on-screen view yet, so a
+  /// moment of staleness is invisible and the rebuild must never block the
+  /// sidebar/detail refresh the caller just performed.
+  /// `GenreGraphService.analyze`'s `isAnalyzing` guard coalesces a burst of
+  /// edits into a single in-flight rebuild; because the rebuild is wholesale
+  /// (re-derived from the live data, not incremental), the next trigger
+  /// after it finishes already reflects everything that changed in between —
+  /// nothing is missed. The "Analyze Genre Graph" menu action is the
+  /// unconditional on-demand path (ignores this toggle).
+  private func reanalyzeGenreGraphIfEnabled() {
+    guard autoReanalyzeGenreGraph else { return }
+    Task { await runGenreAnalysis() }
+  }
+
+  /// The single funnel into `GenreGraphService.analyze`, shared by the
+  /// on-demand `analyzeGenreGraph()` and the auto-reanalyze hook. Reads the
+  /// current analysis thresholds from `UserPreferencesStore` (the Advanced
+  /// pane writes the same keys) here, so both paths always use the live
+  /// settings and the preference read lives in exactly one place.
+  private func runGenreAnalysis() async {
+    await genreGraphService.analyze(
+      maxPlaylistTracks: preferences.genreAnalysisMaxPlaylistTracks,
+      maxPairsPerPlaylist: preferences.genreAnalysisMaxPairsPerPlaylist,
+    )
   }
 
   /// Recompute the derived summary collections + the O(1) id index from the
@@ -656,7 +897,12 @@ final class MusicController {
   private func restoreSelection() {
     guard let raw = preferences.lastSelectedPlaylistID else { return }
     if allSummaries.contains(where: { $0.id == raw }) {
+      // Launch restore must not create phantom Back history and must not
+      // touch `selectedGenre` — `navBackStack` is in-memory only and
+      // starts empty each session.
+      suppressNavRecording = true
       selectedPlaylistID = raw
+      suppressNavRecording = false
     } else {
       preferences.lastSelectedPlaylistID = nil
     }
@@ -864,7 +1110,13 @@ final class MusicController {
       resolution,
       contextID: detail.id,
       beforePlay: { [self] in
-        recordRecentlyPlayed(detail.id, source: detail.isAppOwned ? .app : .apple)
+        // A synthetic genre collection has a `"genre:<name>"` sentinel id
+        // that must NEVER enter `recent_playlist`. Skip the recents bump
+        // for it; `recordPlayStart` (song stats) still runs below —
+        // playing genre songs SHOULD count.
+        if !detail.isGenre {
+          recordRecentlyPlayed(detail.id, source: detail.isAppOwned ? .app : .apple)
+        }
       },
     )
 

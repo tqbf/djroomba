@@ -8,9 +8,12 @@ struct PlaylistDetailView: View {
 
   var body: some View {
     Group {
-      if controller.selectedPlaylistID == nil {
-        // No playlist selected → the app's landing surface is the
-        // user's Recently Played, not a dead "select something" prompt.
+      if controller.selectedPlaylistID == nil, controller.selectedGenre == nil {
+        // Neither a playlist nor a genre selected → the app's landing
+        // surface is the user's Recently Played, not a dead "select
+        // something" prompt. A selected genre falls through to the
+        // loading/error/`detail` rendering below (the detail service
+        // holds the synthetic genre detail).
         RecentlyPlayedView()
       } else if
         controller.detailService.isLoading,
@@ -57,6 +60,10 @@ struct PlaylistDetailView: View {
   @Environment(MusicController.self) private var controller
 
   private func reloadSelectedPlaylist() {
+    if let genre = controller.selectedGenre {
+      controller.detailService.selectGenre(genre)
+      return
+    }
     guard let summary = controller.selectedSummary else { return }
     controller.detailService.select(summary)
   }

@@ -305,6 +305,279 @@ struct LibraryStore: Sendable {
     }
   }
 
+  /// Rebuild the **genre co-occurrence graph** from scratch over the
+  /// playlists (Apple imported snapshots + user-owned app playlists) — the
+  /// "Analyze" action. Two genres are related when a track of one and a
+  /// track of the other appear in the same (eligible) playlist; the edge
+  /// weight is the number of **distinct** such playlists.
+  ///
+  /// **Two analysis thresholds** shape the graph at its source (the
+  /// principled place — they affect the persisted graph and every consumer,
+  /// and are user-tunable in the Advanced settings pane):
+  ///
+  /// - `maxPlaylistTracks` — a playlist with more tracks than this is
+  ///   excluded entirely. A playlist clique-connects all its genres
+  ///   (quadratic), so a few enormous lists ("every track WLIR played for 8
+  ///   years") alone push the graph to near-complete. Dropping the giants
+  ///   removes the dominant noise source. **NB:** this is documented
+  ///   defense-in-depth, NOT the playlist-folder fix — that is
+  ///   `PlaylistFolderClassifier` + `LibraryStore.deleteApplePlaylists`
+  ///   (folders never become rows / are actively converged). A *small*
+  ///   folder still needs the classifier, and a *large real* playlist must
+  ///   not be excluded; this threshold is orthogonal to folder correctness.
+  /// - `maxPairsPerPlaylist` — each eligible playlist contributes only its
+  ///   **top-N genre pairs by intra-playlist co-strength**, where strength =
+  ///   `min(distinct tracks of genre A, distinct tracks of genre B)` in that
+  ///   playlist. `min` is high only when *both* genres are substantially
+  ///   present, so one stray track can't mint a strong pair and one
+  ///   dominant genre can't either. This caps the `G·(G−1)/2` quadratic
+  ///   per-playlist blow-up to its strongest, most meaningful links.
+  ///
+  /// One `DELETE` + one CTE-driven `INSERT … SELECT … UNION ALL`, in a
+  /// SINGLE write transaction. Wholesale (never row-by-row) so the table is
+  /// consistent by construction — including the two mirrored directions of
+  /// every undirected edge (see `genre_edge` / `LibraryMigrator` `v6`).
+  /// Idempotent for fixed inputs + thresholds.
+  ///
+  /// All the graph mess stays in CTEs:
+  /// - `membership` — every `(playlist, song)` across BOTH libraries, under
+  ///   a source-prefixed composite playlist key so an Apple and an app
+  ///   playlist can't collide.
+  /// - `eligible` — playlists whose `COUNT(*)` membership is
+  ///   `<= maxPlaylistTracks` (threshold a). Everything downstream joins
+  ///   through this, so oversized playlists never enter the graph.
+  /// - `playlist_genre` — explode `genre_names` with `json_each` and, per
+  ///   `(eligible playlist, genre)`, count the distinct tracks of that
+  ///   genre (the strength input). NULL / invalid / blank genre JSON is
+  ///   filtered (`json_valid` so a malformed value can't abort the rebuild).
+  /// - `pair` — self-join on `a.genre < b.genre` (drops self-pairs *and* the
+  ///   mirror), carrying `strength = min(track_ct_a, track_ct_b)`.
+  /// - `ranked` — `ROW_NUMBER()` per playlist by strength desc (deterministic
+  ///   name tiebreak); `kept` keeps `rn <= maxPairsPerPlaylist` (threshold b).
+  /// - `edge` — `COUNT(DISTINCT playlist_key)` over the kept per-playlist
+  ///   pairs = the weight.
+  ///
+  /// The final `SELECT … UNION ALL SELECT (swapped)` materializes BOTH
+  /// directed half-edges; the two halves can't collide on the
+  /// `(genre_a, genre_b)` PK (one is `a<b`, the other `a>b`), and an empty
+  /// library inserts nothing. The two `?` binds are, in textual order,
+  /// `maxPlaylistTracks` then `maxPairsPerPlaylist`.
+  ///
+  /// Touches ONLY `genre_edge` — derived, read-only state; `song`,
+  /// `apple_playlist*`, `app_playlist*`, `song_stat`, `play_history`,
+  /// favorites and recents are never read-for-write nor mutated (one-way,
+  /// test-verified). Returns the rebuilt edge-row count (both directions).
+  @discardableResult
+  func rebuildGenreGraph(
+    maxPlaylistTracks: Int,
+    maxPairsPerPlaylist: Int,
+  ) async throws -> Int {
+    try await database.dbQueue.write { db in
+      try db.execute(sql: "DELETE FROM genre_edge")
+      try db.execute(
+        sql: """
+          INSERT INTO genre_edge (genre_a, genre_b, weight)
+          WITH
+            membership(playlist_key, song_id) AS (
+              SELECT 'apple:' || apple_playlist_id, song_id
+                FROM apple_playlist_track
+              UNION ALL
+              SELECT 'app:' || app_playlist_id, song_id
+                FROM app_playlist_track
+            ),
+            eligible(playlist_key) AS (
+              SELECT playlist_key
+                FROM membership
+               GROUP BY playlist_key
+              HAVING COUNT(*) <= ?
+            ),
+            playlist_genre(playlist_key, genre, track_ct) AS (
+              SELECT m.playlist_key, TRIM(je.value),
+                     COUNT(DISTINCT m.song_id)
+                FROM membership m
+                JOIN eligible e ON e.playlist_key = m.playlist_key
+                JOIN song s ON s.id = m.song_id
+                JOIN json_each(s.genre_names) je
+               WHERE s.genre_names IS NOT NULL
+                 AND json_valid(s.genre_names)
+                 AND je.value IS NOT NULL
+                 AND TRIM(je.value) <> ''
+               GROUP BY m.playlist_key, TRIM(je.value)
+            ),
+            pair(playlist_key, genre_a, genre_b, strength) AS (
+              SELECT a.playlist_key, a.genre, b.genre,
+                     MIN(a.track_ct, b.track_ct)
+                FROM playlist_genre a
+                JOIN playlist_genre b
+                  ON a.playlist_key = b.playlist_key
+                 AND a.genre < b.genre
+            ),
+            ranked(playlist_key, genre_a, genre_b, rn) AS (
+              SELECT playlist_key, genre_a, genre_b,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY playlist_key
+                       ORDER BY strength DESC, genre_a, genre_b
+                     )
+                FROM pair
+            ),
+            kept(playlist_key, genre_a, genre_b) AS (
+              SELECT playlist_key, genre_a, genre_b
+                FROM ranked
+               WHERE rn <= ?
+            ),
+            edge(genre_a, genre_b, weight) AS (
+              SELECT genre_a, genre_b, COUNT(DISTINCT playlist_key)
+                FROM kept
+               GROUP BY genre_a, genre_b
+            )
+          SELECT genre_a, genre_b, weight FROM edge
+          UNION ALL
+          SELECT genre_b, genre_a, weight FROM edge
+          """,
+        arguments: [maxPlaylistTracks, maxPairsPerPlaylist],
+      )
+      return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM genre_edge") ?? 0
+    }
+  }
+
+  /// The genres related to `genre`, strongest first — a direct adjacency
+  /// lookup (`WHERE genre_a = ?`, covered by the `genre_edge` PK's leftmost
+  /// prefix). `genreB` is the neighbour, `weight` how many playlists they
+  /// share. Capped (a node can have a long tail of weak edges).
+  func relatedGenres(to genre: String, limit: Int = 50) async throws -> [GenreEdge] {
+    try await database.dbQueue.read { db in
+      try GenreEdge
+        .filter(GenreEdge.Columns.genreA == genre)
+        .order(GenreEdge.Columns.weight.desc, GenreEdge.Columns.genreB)
+        .limit(limit)
+        .fetchAll(db)
+    }
+  }
+
+  /// The whole genre graph as its directed half-edges (both directions),
+  /// strongest first then alphabetical. For export / a future graph view /
+  /// tests — not a per-view hot path (the graph is small relative to the
+  /// song table; it is one row per related genre pair, twice).
+  func genreGraphEdges() async throws -> [GenreEdge] {
+    try await database.dbQueue.read { db in
+      try GenreEdge
+        .order(
+          GenreEdge.Columns.weight.desc,
+          GenreEdge.Columns.genreA,
+          GenreEdge.Columns.genreB,
+        )
+        .fetchAll(db)
+    }
+  }
+
+  /// The playlists associated with a focused `genre` — or, when
+  /// `neighbor` is given, only the playlists pertinent to the `genre ↔
+  /// neighbor` **edge** (where *both* genres co-occur). Sorted by strength
+  /// of association descending, then name; capped at `limit` so the corner
+  /// card stays sane.
+  ///
+  /// Strength: for one genre = distinct tracks of that genre in the
+  /// playlist; for an edge = `min(tracks of genre, tracks of neighbor)` —
+  /// the same pair co-strength `rebuildGenreGraph` ranks by, so the listed
+  /// edge playlists line up with what formed the link. A read derived live
+  /// from `song.genre_names` + membership (the association isn't persisted;
+  /// only `genre_edge` is). The size-eligibility / per-playlist top-N
+  /// thresholds are deliberately NOT applied here: this lists *all*
+  /// playlists a genre genuinely appears in (the honest "associated"
+  /// answer), not the curated edge-contribution subset. Read-only; one
+  /// `read`. The two CTE shapes are kept separate (graph SQL is a mess —
+  /// readability over cleverness).
+  func associatedPlaylists(
+    genre: String,
+    neighbor: String?,
+    limit: Int,
+  ) async throws -> [PlaylistAssociation] {
+    try await database.dbQueue.read { db in
+      let membershipCTE = """
+        membership(pkey, source, pid, song_id) AS (
+          SELECT 'apple:' || apple_playlist_id, 'apple',
+                 apple_playlist_id, song_id
+            FROM apple_playlist_track
+          UNION ALL
+          SELECT 'app:' || app_playlist_id, 'app',
+                 app_playlist_id, song_id
+            FROM app_playlist_track
+        )
+        """
+      // Name resolution is identical for both shapes: the result CTE
+      // yields (pid, source, strength); join to the right name table.
+      // `name` is ambiguous (both joined tables have one) and SQLite
+      // can't use a SELECT alias in WHERE — so the COALESCE is repeated in
+      // WHERE/ORDER and the output column is `pl_name`.
+      let project = """
+        SELECT r.pid AS pid, r.source AS source, r.strength AS strength,
+               COALESCE(ap.name, ua.name) AS pl_name
+          FROM result r
+          LEFT JOIN apple_playlist ap ON r.source = 'apple' AND ap.id = r.pid
+          LEFT JOIN app_playlist  ua ON r.source = 'app'   AND ua.id = r.pid
+         WHERE COALESCE(ap.name, ua.name) IS NOT NULL
+         ORDER BY r.strength DESC, COALESCE(ap.name, ua.name)
+         LIMIT ?
+        """
+      let sql: String
+      let arguments: StatementArguments
+      if let neighbor {
+        // Edge: per-playlist count of each of the two genres, then the
+        // pair co-strength = MIN over playlists having BOTH.
+        sql = """
+          WITH
+            \(membershipCTE),
+            genre_count(pkey, source, pid, genre, n) AS (
+              SELECT m.pkey, m.source, m.pid, TRIM(je.value),
+                     COUNT(DISTINCT m.song_id)
+                FROM membership m
+                JOIN song s ON s.id = m.song_id
+                JOIN json_each(s.genre_names) je
+               WHERE s.genre_names IS NOT NULL
+                 AND json_valid(s.genre_names)
+                 AND TRIM(je.value) IN (?, ?)
+               GROUP BY m.pkey, TRIM(je.value)
+            ),
+            result(pid, source, strength) AS (
+              SELECT a.pid, a.source, MIN(a.n, b.n)
+                FROM genre_count a
+                JOIN genre_count b
+                  ON a.pkey = b.pkey AND a.genre = ? AND b.genre = ?
+            )
+          \(project)
+          """
+        arguments = [genre, neighbor, genre, neighbor, limit]
+      } else {
+        // Single genre: distinct tracks of that genre per playlist.
+        sql = """
+          WITH
+            \(membershipCTE),
+            result(pid, source, strength) AS (
+              SELECT m.pid, m.source, COUNT(DISTINCT m.song_id)
+                FROM membership m
+                JOIN song s ON s.id = m.song_id
+                JOIN json_each(s.genre_names) je
+               WHERE s.genre_names IS NOT NULL
+                 AND json_valid(s.genre_names)
+                 AND TRIM(je.value) = ?
+               GROUP BY m.pkey
+            )
+          \(project)
+          """
+        arguments = [genre, limit]
+      }
+      let rows = try Row.fetchAll(db, sql: sql, arguments: arguments)
+      return rows.map { row in
+        PlaylistAssociation(
+          playlistID: row["pid"],
+          name: row["pl_name"],
+          strength: row["strength"] ?? 0,
+          isAppOwned: (row["source"] as String) == "app",
+        )
+      }
+    }
+  }
+
   func song(id: String) async throws -> Song? {
     try await database.dbQueue.read { db in
       try Song.fetchOne(db, key: id)
@@ -443,6 +716,34 @@ struct LibraryStore: Sendable {
       let stale = Array(storedIDs.subtracting(liveIDs))
       guard !stale.isEmpty else { return }
       for chunk in stale.chunked(into: Self.sqliteVariableLimit) {
+        let placeholders = Array(repeating: "?", count: chunk.count)
+          .joined(separator: ", ")
+        try db.execute(
+          sql: "DELETE FROM apple_playlist WHERE id IN (\(placeholders))",
+          arguments: StatementArguments(chunk),
+        )
+      }
+    }
+  }
+
+  /// Actively delete the `apple_playlist` snapshots whose `id` is now
+  /// classified as a Music.app *folder* (Phase 3 — playlist-folders.md). A
+  /// folder's id is still **live** in the MusicKit playlist list, so the
+  /// end-of-import `pruneApplePlaylists(keeping:)` can't drop a previously
+  /// imported stale folder snapshot (its id is in `liveIDs`); this is the
+  /// active convergence that removes it. FK cascade
+  /// (`apple_playlist_track.apple_playlist_id REFERENCES apple_playlist ON
+  /// DELETE CASCADE`) drops only that folder's membership rows; by schema
+  /// this can never touch `app_playlist*`, `song` (delete-RESTRICTed),
+  /// `song_stat`, `play_history`, favorites or recents — the one-way
+  /// isolation invariant holds (test-verified). A no-op when the set is
+  /// empty (the iTunesLibrary graceful-degradation case — no exclusion,
+  /// today's behavior). Single `write` transaction; chunked under the
+  /// SQLite bound-parameter cap exactly like `pruneApplePlaylists`.
+  func deleteApplePlaylists(ids folderIDs: Set<String>) async throws {
+    guard !folderIDs.isEmpty else { return }
+    try await database.dbQueue.write { db in
+      for chunk in Array(folderIDs).chunked(into: Self.sqliteVariableLimit) {
         let placeholders = Array(repeating: "?", count: chunk.count)
           .joined(separator: ", ")
         try db.execute(
@@ -732,6 +1033,41 @@ struct LibraryStore: Sendable {
 
   func songsWithStats(inAppPlaylist playlistID: String) async throws -> [SongWithStat] {
     try await songsWithStats(joining: "app_playlist_track", playlistColumn: "app_playlist_id", playlistID)
+  }
+
+  /// Every song tagged with `genre` (one of its `song.genre_names` JSON
+  /// array entries, whitespace-trimmed — same `json_each` + `TRIM(je.value)`
+  /// idiom as `associatedPlaylists`), joined to its `song_stat` rollup. No
+  /// playlist join → each song appears exactly once, ordered title then
+  /// artist (case-insensitive). Backs the synthetic "genre detail" the
+  /// genre-graph navigation shows in the top pane. One `dbQueue.read`.
+  func songsWithStats(matchingGenre genre: String) async throws -> [SongWithStat] {
+    try await database.dbQueue.read { db in
+      let sql = """
+        SELECT
+          song.*,
+          COALESCE(song_stat.play_count, 0)  AS stat_play_count,
+          song_stat.last_played_at           AS stat_last_played_at
+        FROM song
+        LEFT JOIN song_stat
+          ON song_stat.song_id = song.id
+        WHERE song.genre_names IS NOT NULL
+          AND json_valid(song.genre_names)
+          AND EXISTS (
+            SELECT 1 FROM json_each(song.genre_names) je
+             WHERE TRIM(je.value) = ?
+          )
+        ORDER BY song.title COLLATE NOCASE, song.artist_name COLLATE NOCASE
+        """
+      let rows = try Row.fetchAll(db, sql: sql, arguments: [genre])
+      return try rows.map { row in
+        SongWithStat(
+          song: try Song(row: row),
+          playCount: row["stat_play_count"] ?? 0,
+          lastPlayedAt: row["stat_last_played_at"],
+        )
+      }
+    }
   }
 
   /// Record that `songID` started playing at `playedAt`. ONE transaction:

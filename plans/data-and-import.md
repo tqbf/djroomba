@@ -228,6 +228,20 @@ request/response types are main-actor-friendly and volumes are modest). It
   ids and broke the round trip (caught by the signed gate). Library vs
   catalog id spaces are still NOT interchangeable — provenance, not
   string-sniffing, decides which.
+- **Playlist-folder exclusion (`plans/playlist-folders.md`, Option A —
+  iTunesLibrary, exclude-only).** MusicKit surfaces Music.app *folders*
+  (hierarchical containers, e.g. "AAA ME") as ordinary `Playlist`s with no
+  discriminator, so the import (a) builds a folder-id `Set<String>` once via
+  iTunesLibrary (`ITLibPlaylist.kind == .folder`, joined by the
+  `String(Int64(bitPattern: persistentID))` decimal id mapping;
+  off-main, graceful-degrades to `[]` if unavailable) and **skips folder
+  ids before the per-playlist `fetchTracks`** (a folder's deep fetch hangs
+  the MainActor — so never persists a folder), and (b) **actively deletes
+  already-stored folder snapshots** via `LibraryStore.deleteApplePlaylists`
+  (FK cascade removes only that folder's `apple_playlist_track`; song /
+  app / stat / history untouched — the one-way-isolation invariant).
+  Needs the `com.apple.security.assets.music.read-only` entitlement; **no
+  schema change** (folders simply never become rows / are converged away).
 - Wired to the Refresh affordance (⌘R / toolbar) via
   `MusicController.refreshLibrary()`, and run on first authorized launch
   when `store.songCount() == 0`. Full re-import is the v1 cost
@@ -274,6 +288,36 @@ not a hotspot fix.
   as often-nil. Verifiable only on a signed run; when nil, it simply
   degrades to today's full import (no regression). Measured payoff TBD on
   a signed Refresh; the worst case is unchanged from before.
+
+## Genre graph (`v6` — the "Analyze" action)
+
+Full design: **[genre-graph.md](genre-graph.md)**. Schema/store delta only
+here (this is the schema doc):
+
+- Migration **`v6.genreGraph`** adds `genre_edge(genre_a, genre_b, weight,
+  PRIMARY KEY(genre_a, genre_b))` — a pure adjacency-list edge table, **no
+  FK** (genre is denormalized free text in `song.genre_names`, not an
+  entity — the `favorite_playlist`/`recent_playlist` no-FK rationale), **no
+  extra index** (the composite PK is the adjacency index). Purely additive;
+  v1–v4 frozen; non-destructive. There is **no `v5.*` migration** — the
+  documented v5 (album genre import) was data-only and reused the v4
+  column; the migration id skips to `v6` on purpose (the label is just an
+  ordered string).
+- `LibraryStore.rebuildGenreGraph()` — one `DELETE` + one CTE-driven
+  `INSERT … SELECT … UNION ALL` in a single transaction. Relates genres
+  whose tracks **share a playlist** (Apple snapshot *or* app playlist);
+  weight = distinct co-occurrence playlists; both directed half-edges
+  materialized so neighbour reads are a trivial indexed `genre_a` lookup.
+  Wholesale (never incremental) ⇒ consistent by construction, idempotent.
+  One-way isolated (touches only `genre_edge`; test-verified). Reads:
+  `relatedGenres(to:limit:)`, `genreGraphEdges()`; `GenreEdge` is a
+  read-only record.
+- Run on demand (`GenreGraphService.analyze()`, menu ⌥⌘A) and, by default,
+  automatically after any change that alters which genres share a playlist
+  (import / app-playlist membership edit / delete) —
+  `MusicController.reanalyzeGenreGraphIfEnabled()`, gated by the
+  `UserPreferencesStore.autoReanalyzeGenreGraph` toggle (default on). Pure
+  SQLite — no MusicKit, offline-safe.
 
 ## PlaybackResolver (SQLite id → playable MusicKit item) — as built
 

@@ -222,6 +222,33 @@ final class ImportService {
       // scan). The basis for skipping the expensive per-playlist fetch.
       let existing = try await store.applePlaylistChangeTokens()
 
+      // Playlist *folders* (Music.app's hierarchical containers) are
+      // returned by MusicKit as ordinary `Playlist` values with no
+      // discriminator (Phase-0). Build the folder-id set ONCE from
+      // `iTunesLibrary` before the loop; it's an O(1) lookup keyed on the
+      // same id we already fetch. The read is off-main and
+      // graceful-degrades to an empty set (no exclusion, today's behavior)
+      // if iTunesLibrary is unavailable.
+      let folderIDs = await PlaylistFolderSource.libraryFolderIDs()
+
+      // Phase 3 (playlist-folders.md) — actively converge the existing DB.
+      // A folder's id is still *live* in the MusicKit playlist list, so the
+      // end-of-import `pruneApplePlaylists(keeping: liveIDs)` can't drop a
+      // previously imported stale folder snapshot (e.g. "AAA ME") — its id
+      // is in `liveIDs`. Phase 2 only stops NEW folder rows; this is the
+      // active deletion of any already-stored row now classified as a
+      // folder. FK cascade removes only that folder's `apple_playlist_track`
+      // membership; `song`/app/stat/history/favorites/recents are untouched
+      // (the one-way isolation invariant). `try?` like the sibling
+      // `touchApplePlaylistImportDate`/`pruneApplePlaylists` calls below: a
+      // converge failure must never abort an import. A previously *shown*
+      // folder's cached detail is now stale, so the ids that actually had a
+      // stored snapshot are unioned into `changedPlaylistIDs` for the same
+      // cache invalidation the vanished-playlist path does (no extra store
+      // round-trip — `existing.keys` is the already-fetched snapshot set).
+      changedPlaylistIDs.formUnion(folderIDs.intersection(existing.keys))
+      try? await store.deleteApplePlaylists(ids: folderIDs)
+
       var failures = [String]()
 
       // Serial, one playlist in flight at a time. For each: decide skip
@@ -230,6 +257,20 @@ final class ImportService {
       // plans/profiling.md).
       for playlist in playlists {
         let id = playlist.id.rawValue
+
+        // A folder is never a real playlist — skip it BEFORE any MusicKit
+        // track work. Corollary 2 (Phase-0): a folder's `.with([.tracks])`
+        // hangs the MainActor, so it must be excluded ahead of
+        // `fetchTracks`, never filtered after. It simply never becomes a
+        // row (no schema change). Counted as processed so the
+        // "Importing N of M" progress stays coherent; `liveIDs` /
+        // `pruneApplePlaylists` are deliberately untouched — actively
+        // deleting an already-stored folder row is Phase 3.
+        if PlaylistFolderClassifier.isFolder(id, in: folderIDs) {
+          importedPlaylistCount += 1
+          continue
+        }
+
         let decision = Self.importDecision(
           currentToken: Self.changeToken(for: playlist),
           storedToken: existing[id] ?? nil,

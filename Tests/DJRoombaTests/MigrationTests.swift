@@ -26,6 +26,9 @@ struct MigrationTests {
       "v2.applePlaylistChangeToken",
       "v3.playStatistics",
       "v4.songMetadata",
+      // No "v5.*" — the v5 genre import was data-only (reused the v4
+      // column, no schema). The next schema change is v6.
+      "v6.genreGraph",
     ])
   }
 
@@ -125,9 +128,24 @@ struct MigrationTests {
       "v2.applePlaylistChangeToken",
       "v3.playStatistics",
       "v4.songMetadata",
+      "v6.genreGraph",
     ])
     #expect(appliedAfterSecond == appliedAfterFirst)
     #expect(songExists)
+  }
+
+  @Test
+  func `V 6 adds the genre edge adjacency table with the composite key`() throws {
+    let db = try AppDatabase()
+    try db.dbQueue.read { db in
+      #expect(try db.tableExists("genre_edge"))
+      // The composite PK (genre_a, genre_b) IS the adjacency index — its
+      // leftmost prefix covers the `WHERE genre_a = ?` neighbour lookup.
+      let hasCompositePK = try db.indexes(on: "genre_edge").contains { index in
+        index.isUnique && index.columns == ["genre_a", "genre_b"]
+      }
+      #expect(hasCompositePK, "genre_edge must be PK'd on (genre_a, genre_b)")
+    }
   }
 
   @Test
@@ -168,6 +186,7 @@ struct MigrationTests {
     "song_stat",
     "favorite_playlist",
     "recent_playlist",
+    "genre_edge",
   ]
 
   /// The nine nullable "free" Apple-library metadata columns v4 adds to

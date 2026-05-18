@@ -30,6 +30,40 @@ Target: macOS 14.0+. MusicKit's `ApplicationMusicPlayer`, `MusicAuthorization`,
 - Keep stable `playlist.id` (`MusicItemID`) as the app-local key for selection,
   favorites, recents.
 
+### Playlist *folders* — no discriminator (signed probe, 2026-05-17)
+
+`MusicLibraryRequest<Playlist>` returns Music.app **playlist folders**
+(hierarchical containers, e.g. "AAA ME") as ordinary `Playlist` values,
+**indistinguishable from real playlists**. Throwaway signed
+`PlaylistFolderProbe` over the real 270-playlist library (reverted; only
+this finding kept — the `GenreProbe` precedent):
+
+- For **all 270**: `kind` nil, `curatorName` nil, `lastModifiedDate` nil,
+  `hasArtwork` true. `Mirror` children are only `id` +
+  `propertyProvider` (opaque `LegacySectionedCollectionBackedProperty‑
+  Provider`). `String(reflecting:)` yields only
+  `Playlist(id, name, isChart: false)`. The folder "AAA ME" is
+  **byte-for-byte identical** to the neighbouring real playlist.
+- ⇒ There is **no MusicKit-public folder/parent/`isFolder`/kind signal**
+  — not in the API, the `Mirror`, or the debug description. Folder
+  detection cannot be done from MusicKit; it needs an external source
+  (iTunesLibrary.framework `ITLibPlaylist.kind == .folder` / `parentID`,
+  or ScriptingBridge) or a content heuristic.
+- A folder's `playlist.with([.entries])` (and likely deep `.tracks`)
+  **hangs the MainActor** in the probe — so folders must be excluded
+  *before* the per-playlist fetch, not filtered after.
+- Side finding: `lastModifiedDate` is nil for **all 270** → the
+  incremental-import change token is always nil on this macOS library;
+  incremental import silently degrades to full re-import here (the
+  caveat in `data-and-import.md` "Incremental import" — now empirically
+  confirmed, not a regression).
+- **Resolution (Option A, `plans/playlist-folders.md`):** detect folders
+  out-of-band via iTunesLibrary.framework `ITLibPlaylist.kind == .folder`,
+  joined to the MusicKit `Playlist.id` by the `String(Int64(bitPattern:
+  persistentID))` decimal id mapping, gated by the
+  `com.apple.security.assets.music.read-only` entitlement; folders are
+  skipped before the per-playlist fetch and existing snapshots converged.
+
 ## Loading playlist tracks (lazy, on selection)
 
 - `try await playlist.with([.tracks])` (or `.entries`) returns a detailed

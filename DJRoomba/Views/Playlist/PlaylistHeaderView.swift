@@ -8,11 +8,15 @@ struct PlaylistHeaderView: View {
 
   var body: some View {
     HStack(alignment: .bottom, spacing: 16) {
+      // A synthetic genre collection has no backing playlist artwork
+      // (`artworkRef` is nil), so the slot always renders the native
+      // `.quaternary` placeholder — a genre-appropriate `music.note`
+      // glyph reads better there than the playlist `music.note.list`.
       ArtworkThumbnail(
         ref: detail.artworkRef,
         size: 104,
         cornerRadius: 8,
-        placeholderSymbol: "music.note.list",
+        placeholderSymbol: detail.isGenre ? "music.note" : "music.note.list",
       )
       VStack(alignment: .leading, spacing: 6) {
         Text(detail.name)
@@ -22,6 +26,10 @@ struct PlaylistHeaderView: View {
         Text("^[\(detail.tracks.count) track](inflect: true)")
           .font(.subheadline)
           .foregroundStyle(.secondary)
+
+        if !detail.genres.isEmpty {
+          genreStrip
+        }
 
         HStack(spacing: 10) {
           Button {
@@ -73,5 +81,48 @@ struct PlaylistHeaderView: View {
   // MARK: Private
 
   @Environment(MusicController.self) private var controller
+
+  /// The playlist's distinct genres as a single quiet, horizontally
+  /// scrollable row of capsule tags — secondary metadata, not a
+  /// call-to-action. One scrollable line shows *all* of them without
+  /// growing the header vertically or shoving the track table down. Only
+  /// rendered when there's at least one genre (inherently hidden for a
+  /// genre detail / a playlist whose tracks carry no genre).
+  private var genreStrip: some View {
+    ScrollView(.horizontal) {
+      HStack(spacing: 6) {
+        ForEach(detail.genres, id: \.self) { genre in
+          chip(genre)
+        }
+      }
+      // A little vertical breathing room so the capsules aren't clipped
+      // by the scroll viewport.
+      .padding(.vertical, 2)
+    }
+    .scrollIndicators(.hidden)
+  }
+
+  /// A single tappable genre tag. Styled to match `GenreAssociationsCard`'s
+  /// quiet material/hairline aesthetic — `.caption` secondary text on a
+  /// `.quaternary` capsule — so it reads as a subtle tag in both light and
+  /// dark. Tapping reuses the existing genre navigation (`showGenre`
+  /// integrates with the Back stack).
+  private func chip(_ genre: String) -> some View {
+    Button {
+      controller.showGenre(genre)
+    } label: {
+      Text(genre)
+        .font(.caption)
+        .lineLimit(1)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(.quaternary, in: Capsule())
+        .contentShape(.capsule)
+    }
+    .buttonStyle(.plain)
+    .help(genre)
+    .accessibilityLabel("Genre: \(genre)")
+  }
 
 }

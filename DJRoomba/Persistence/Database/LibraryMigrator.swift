@@ -306,6 +306,46 @@ enum LibraryMigrator {
       }
     }
 
+    // NOTE: there is no `v5.*` migration on purpose. The documented "v5"
+    // (album→track genre import, 2026-05-17) was a *data* feature that
+    // reused the v4 `song.genre_names` column and added NO schema, so it
+    // never registered a migration. The next schema change is therefore
+    // `v6` — the migration label is just an ordered string, and skipping
+    // v5 keeps it aligned with the schema-version story in the docs
+    // (v4 = the columns, v5 = the genre data, v6 = the genre graph).
+
+    // v6: the genre co-occurrence graph — the "Analyze" action's output.
+    // A pure **adjacency-list edge table**: each row is one directed
+    // half-edge `genre_a → genre_b` with `weight` = the number of distinct
+    // playlists (Apple or app) in which a track of `genre_a` and a track of
+    // `genre_b` co-occur. The graph is undirected, but BOTH half-edges
+    // (a→b and b→a) are materialized so "the genres related to X" is a
+    // single PK-indexed `WHERE genre_a = ?` lookup either way — that *is*
+    // an adjacency list, and it keeps the read SQL trivial. Consistency is
+    // structural, not enforced: the graph is only ever rebuilt **wholesale**
+    // (`LibraryStore.rebuildGenreGraph` = one `DELETE` + one CTE
+    // `INSERT … SELECT … UNION ALL` in a single transaction), never edited
+    // row-by-row, so the two directions can never drift. The composite PK
+    // `(genre_a, genre_b)` is itself the adjacency index (its leftmost
+    // prefix covers the `genre_a` lookup) — no extra index is added (whether
+    // to index `weight` for ranking is a separate future decision, not
+    // implied by adding the table; a node's neighbour set is small enough to
+    // sort in memory). No FK: a genre is denormalized free text inside the
+    // `song.genre_names` JSON array, not an entity row — exactly the
+    // no-FK rationale `favorite_playlist` / `recent_playlist` already use;
+    // a rebuild simply re-derives the whole table from the live data. This
+    // is purely additive (a new table) — v1–v4 stay frozen and an existing
+    // DB migrates non-destructively (the table starts empty until the first
+    // Analyze / import-triggered reanalyze populates it).
+    migrator.registerMigration("v6.genreGraph") { db in
+      try db.create(table: "genre_edge") { t in
+        t.column("genre_a", .text).notNull()
+        t.column("genre_b", .text).notNull()
+        t.column("weight", .integer).notNull()
+        t.primaryKey(["genre_a", "genre_b"])
+      }
+    }
+
     return migrator
   }
 }

@@ -14,7 +14,7 @@ struct MainShellView: View {
       PlaylistSidebar()
         .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
     } detail: {
-      PlaylistDetailView()
+      DetailPaneView()
         .navigationSplitViewColumnWidth(min: 480, ideal: 660)
     }
     .onAppear {
@@ -38,6 +38,95 @@ struct MainShellView: View {
         .inspectorColumnWidth(min: 300, ideal: 320, max: 420)
     }
     .toolbar {
+      // Leading navigation Back control for the top pane's in-session
+      // history (playlist / genre / the Recently-Played landing). Native
+      // macOS idiom: a `chevron.backward` glyph at the toolbar's leading
+      // edge, disabled when there's nothing to return to, with ⌘[ — the
+      // standard "navigate back" shortcut.
+      ToolbarItem(placement: .navigation) {
+        Button {
+          controller.goBack()
+        } label: {
+          Label("Back", systemImage: "chevron.backward")
+        }
+        .help("Back (⌘[)")
+        .disabled(!controller.canGoBack)
+        .keyboardShortcut("[", modifiers: .command)
+        .accessibilityLabel("Back")
+      }
+      // The always-on import surface (the defect fix). `.status` is the
+      // native macOS centered activity slot Mail/Music use for sync state —
+      // a quiet indicator, not a primary action. It carries exactly one of:
+      // an in-flight import/genre spinner+text, a tappable failure affordance
+      // (so a populated-library import/genre error is finally visible +
+      // readable instead of silent), or nothing when idle.
+      ToolbarItem(placement: .status) {
+        if let activity = controller.importActivity {
+          HStack(spacing: 6) {
+            ProgressView()
+              .controlSize(.small)
+            Text(activity)
+              .font(.callout)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+          }
+          .accessibilityElement(children: .combine)
+          .accessibilityLabel(activity)
+        } else if let problem = controller.libraryProblem {
+          Button {
+            showingProblem = true
+          } label: {
+            Label(problem, systemImage: "exclamationmark.triangle.fill")
+              .foregroundStyle(.orange)
+              .font(.callout)
+              .lineLimit(1)
+          }
+          .help(problem)
+          .popover(isPresented: $showingProblem, arrowEdge: .bottom) {
+            Text(problem)
+              .font(.callout)
+              .textSelection(.enabled)
+              .multilineTextAlignment(.leading)
+              .frame(width: 320, alignment: .leading)
+              .padding()
+          }
+          .accessibilityLabel("Library problem")
+        } else if let notice = controller.genreImportNotice {
+          // A completed, non-errored full/first genre pass that tagged zero
+          // songs. Quiet secondary info (NOT a warning — the orange branch
+          // above owns errors): a tappable `info.circle` chip whose popover
+          // shows the full self-diagnosis + a Dismiss. macos-design: a
+          // calm, dismissible status note, not an alert.
+          Button {
+            showingGenreNotice = true
+          } label: {
+            Label(notice, systemImage: "info.circle")
+              .font(.callout)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+          }
+          .help(notice)
+          .popover(isPresented: $showingGenreNotice, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+              Text(notice)
+                .font(.callout)
+                .textSelection(.enabled)
+                .multilineTextAlignment(.leading)
+              Button("Dismiss") {
+                showingGenreNotice = false
+                controller.dismissGenreImportNotice()
+              }
+            }
+            .frame(width: 320, alignment: .leading)
+            .padding()
+          }
+          .accessibilityLabel("Genre import notice")
+        }
+        // No `else`: when idle the ToolbarItem renders nothing, so the
+        // toolbar stays clean (the spec's EmptyView intent — an empty
+        // ViewBuilder branch already produces no content; an explicit
+        // `else { EmptyView() }` is redundant per swiftformat).
+      }
       ToolbarItem(placement: .primaryAction) {
         Button {
           Task { await controller.refreshLibrary() }
@@ -46,6 +135,21 @@ struct MainShellView: View {
         }
         .help("Refresh playlists (⌘R)")
         .disabled(controller.isLibraryBusy)
+      }
+      // The discoverable reveal affordance for the genre-graph panel. The
+      // panel's own header chevron collapses it, but once collapsed a
+      // faint chevron in a slim bottom bar is easy to miss — a toolbar
+      // toggle is the discoverable, always-present control (mirroring the
+      // inspector toggle below, the native Xcode/Numbers idiom). Bound to
+      // the SAME `@SceneStorage` key as `GenreGraphPanel.collapsed`, so the
+      // two controls stay in sync automatically within the scene.
+      ToolbarItem(placement: .automatic) {
+        Button {
+          genreGraphCollapsed.toggle()
+        } label: {
+          Label("Genre Graph", systemImage: "point.3.connected.trianglepath.dotted")
+        }
+        .help(genreGraphCollapsed ? "Show the genre graph" : "Hide the genre graph")
       }
       // Standard macOS inspector toggle placement (trailing edge of the
       // toolbar, the side the panel slides from) — the native idiom
@@ -76,7 +180,23 @@ struct MainShellView: View {
   /// readiness surface, not a primary feature). Per-scene persisted so a
   /// user who opens it keeps it open across relaunch.
   @SceneStorage("inspectorPresented") private var inspectorPresented = false
+  /// Mirror of `GenreGraphPanel`'s collapse state — SAME `@SceneStorage`
+  /// key, so the toolbar toggle and the panel's header chevron drive one
+  /// shared value (SwiftUI keeps same-key scene storage in sync within the
+  /// scene). Default `false` (expanded) must match the panel's default.
+  @SceneStorage("genreGraphPanelCollapsed") private var genreGraphCollapsed = false
 
   @State private var columnVisibility = NavigationSplitViewVisibility.automatic
+
+  /// Drives the `.status` failure affordance's popover (the full, selectable
+  /// problem text). Non-modal, dismissible — a quiet readability surface, not
+  /// a blocking alert.
+  @State private var showingProblem = false
+
+  /// Drives the neutral genre-import notice's popover (the full, selectable
+  /// self-diagnosis + a Dismiss). Independent of `showingProblem` — the two
+  /// affordances are mutually exclusive in the `.status` slot but each owns
+  /// its own presentation state.
+  @State private var showingGenreNotice = false
 
 }
