@@ -102,6 +102,18 @@ final class MusicController {
   /// with `isFavorite` overlaid (the service leaves it false).
   private(set) var appPlaylists = [PlaylistSummary]()
 
+  /// Every distinct genre tag in the library, alphabetical (the
+  /// `appPlaylists`-style observable mirror — reloaded on session start
+  /// and after any genre edit / import). Backs the "Add to Genre ▸"
+  /// context submenu. `plans/genre-editing.md`.
+  private(set) var allGenres = [String]()
+
+  /// Drives the single modal genre-name `.sheet(item:)` (rename a browsed
+  /// genre, or assign a genre to selected tracks). Mutable so the view
+  /// binds it via `@Bindable` (swiftui-pro: `sheet(item:)` over
+  /// `isPresented`, no `Binding(get:set:)`); set to `nil` to dismiss.
+  var genreNameRequest: GenreNameRequest?
+
   /// Favorites span both libraries (a user playlist can be a favorite too).
   private(set) var favoritePlaylists = [PlaylistSummary]()
 
@@ -361,6 +373,62 @@ final class MusicController {
   /// surfaced via the service's `lastError`, never thrown.
   func analyzeGenreGraph() async {
     await runGenreAnalysis()
+  }
+
+  /// Header "Rename" affordance (only shown for a browsed genre). Opens
+  /// the modal sheet seeded with the current genre name, fully selected.
+  func beginRenameBrowsedGenre() {
+    guard let genre = selectedGenre else { return }
+    genreNameRequest = GenreNameRequest(
+      title: "Rename Genre",
+      prompt: "Genre Name",
+      initialText: genre,
+      action: .renameBrowsedGenre,
+    )
+  }
+
+  /// "Add to Genre ▸ New Genre…" — open the sheet to type a new genre for
+  /// the selected tracks.
+  func beginAssignNewGenre(toSongs songIDs: [String]) {
+    guard !songIDs.isEmpty else { return }
+    genreNameRequest = GenreNameRequest(
+      title: "Assign Genre",
+      prompt: "Genre Name",
+      initialText: "",
+      action: .assignToSongs(songIDs),
+    )
+  }
+
+  func cancelGenreNameSheet() {
+    genreNameRequest = nil
+  }
+
+  /// Commit the modal sheet. `name` is already trimmed/non-empty (the
+  /// sheet's default button is disabled otherwise). Renaming to the same
+  /// name (or an empty selection) is a safe no-op.
+  func commitGenreNameSheet(_ request: GenreNameRequest, name: String) async {
+    genreNameRequest = nil
+    switch request.action {
+    case .renameBrowsedGenre:
+      await renameBrowsedGenre(to: name)
+
+    case .assignToSongs(let songIDs):
+      await addGenre(name, toSongs: songIDs)
+    }
+  }
+
+  /// Right-click "Add to Genre ▸ <existing>" — assign an existing genre to
+  /// the selected tracks (idempotent; merges naturally).
+  func addGenre(_ genre: String, toSongs songIDs: [String]) async {
+    guard let store, !songIDs.isEmpty else { return }
+    let trimmed = genre.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    do {
+      _ = try await store.addGenre(trimmed, toSongIDs: songIDs)
+      await reloadAfterGenreEdit()
+    } catch {
+      storeError = error.localizedDescription
+    }
   }
 
   /// Debug menu action: seed `count` synthetic plays drawn at random from
@@ -743,6 +811,7 @@ final class MusicController {
     // before `restoreSelection()` (it reads `allSummaries`/`summariesByID`).
     rebuildDerivedSummaries()
     restoreSelection()
+    await loadAllGenres()
   }
 
   /// After any import, keep the selection coherent: drop it if the
@@ -806,6 +875,7 @@ final class MusicController {
     // Reanalyze (if enabled). Runs after the genre pass so it derives from
     // the genres just (re)written, never a stale read.
     reanalyzeGenreGraphIfEnabled()
+    await loadAllGenres()
   }
 
   /// Rebuild the genre graph in the background **iff** the user left
@@ -843,6 +913,60 @@ final class MusicController {
       maxPlaylistTracks: preferences.genreAnalysisMaxPlaylistTracks,
       maxPairsPerPlaylist: preferences.genreAnalysisMaxPairsPerPlaylist,
     )
+  }
+
+  /// Rename the **currently browsed** genre in place. This is an edit, not
+  /// a navigation: the Back stack's `.genre(old)` entries are rewritten to
+  /// `.genre(new)` (so Back never lands on a now-empty genre) and the
+  /// genre view is re-pointed to `new` WITHOUT pushing history. No-op if
+  /// the trimmed name is unchanged. Merge is implicit in the store
+  /// (literal-tag rewrite + dedupe).
+  private func renameBrowsedGenre(to newName: String) async {
+    guard let store, let old = selectedGenre else { return }
+    let new = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !new.isEmpty, new != old else { return }
+    do {
+      _ = try await store.renameGenre(from: old, to: new)
+      navBackStack.replacingGenre(old, with: new)
+      selectedGenre = new
+      await reloadAfterGenreEdit()
+    } catch {
+      storeError = error.localizedDescription
+    }
+  }
+
+  /// A genre edit rewrites `song.genre_names` in place (never playlist/app
+  /// /history structure). Playlist header genre chips can change, every
+  /// cached `PlaylistDetail` embeds song fields, the genre node set
+  /// changed, and the distinct-genre list moved — so reload library +
+  /// invalidate/re-select the on-screen detail (a genre view re-points to
+  /// the possibly-renamed `selectedGenre`), rebuild sidebar derivations,
+  /// refresh `allGenres`, and reanalyze the graph (its wholesale rebuild
+  /// collapses a merge automatically). Mirrors the post-`runImport`
+  /// reload, scoped to a metadata-only change.
+  private func reloadAfterGenreEdit() async {
+    await library.load()
+    detailService.invalidateAll()
+    if let genre = selectedGenre {
+      detailService.selectGenre(genre)
+    } else if let summary = selectedSummary {
+      detailService.select(summary)
+    }
+    rebuildDerivedSummaries()
+    reanalyzeGenreGraphIfEnabled()
+    await loadAllGenres()
+  }
+
+  /// Refresh the observable `allGenres` mirror from SQLite (the
+  /// `appPlaylists`-style pattern). A read failure surfaces via
+  /// `storeError`, matching the codebase, and leaves the prior list.
+  private func loadAllGenres() async {
+    guard let store else { return }
+    do {
+      allGenres = try await store.distinctGenres()
+    } catch {
+      storeError = error.localizedDescription
+    }
   }
 
   /// Recompute the derived summary collections + the O(1) id index from the

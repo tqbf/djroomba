@@ -5,6 +5,55 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-19 — 🟡 Genre rename/merge + assign-to-selected-tracks (code-complete)
+
+Branch `feature/genre-rename-merge-assign` (independent of the unmerged
+`.djroomba` snapshot PR). Two edits over the v4 `song.genre_names` JSON
+column — no schema change, batched, song-only one-way isolated.
+
+- **Rename the browsed genre** — `PlaylistHeaderView` gains a "Rename"
+  button when `detail.isGenre`; opens `GenreNameSheet` (the proven
+  `RenamePlaylistSheet` focused/select-all shape). **Merge is implicit**:
+  genres are literal tag matches, so `renameGenre(A→B)` rewrites each
+  song's array (A→B, then dedupe preserving order); a song with both ends
+  with one B and the `B` query returns the union. Renaming to a new name
+  is the no-collision case of the same op.
+- **Multi-select + assign** — the track `Table` selection is now
+  `Set<TrackRow.ID>` (was single), so native shift-range / ⌘-point
+  multi-select works; new "Add to Genre ▸" context submenu (sibling of
+  "Add to Playlist ▸"): "New Genre…" (→ same sheet) + the existing genres
+  from `distinctGenres()`. Assign appends the genre iff absent (idempotent).
+- **Pure core** `GenreEdit.renaming/.adding` (nil when unchanged so only
+  changed rows write); `DetailNavStack.replacingGenre` keeps Back coherent
+  after a rename. **Store**: `distinctGenres`, `renameGenre`,
+  `addGenre(_:toSongIDs:)` — both writes funnel through one chunked
+  column-named-CTE `UPDATE song SET genre_names …` (≤2 binds/row), one txn,
+  only `song`. Controller `allGenres` mirror + `reloadAfterGenreEdit`
+  (reloads library/detail/summaries/genres + reanalyzes the graph — the
+  wholesale rebuild collapses merged nodes automatically).
+- **Verify.** `swift build` clean (Swift 6 strict concurrency);
+  **208 tests / 33 suites** green (+`GenreEditTests` 9, `GenreEditStoreTests`
+  4 incl. merge + one-way-isolation + chunk-boundary, +`DetailNavStack`
+  `replacingGenre`); `swiftformat --lint` 0 (auto-organized) + `swiftlint`
+  0 on all touched files. swiftui-pro + macos-design consulted before &
+  after (CLAUDE.md). **Computer-use, real 8229-song library** (signed
+  installed build): browsed a genre → header **Rename** button → modal
+  pre-filled/select-all sheet → renamed **"Electronica" (4) → "Electronic"
+  (212)** ⇒ **"Electronic" 216 tracks** (exact union — merge), view
+  re-pointed in place, Genre Graph auto-reanalyzed **88→87 genres /
+  731→727 links** (merged node gone). Then native `Table` multi-select
+  (click + shift-range + ⌘-point = 5 rows) → right-click → **"Add to
+  Genre ▸ New Genre…"** → typed "2 Tone" ⇒ assigned to exactly those 5;
+  header chip strip + Genre Graph updated (**87→88 / 727→733**). Found +
+  noted (not a regression from this change): clicking the **Title** cell
+  doesn't select a row because its pre-existing `.draggable` swallows the
+  click — selection works via any other column. Not committed/merged.
+  **Real-library edits made during the live test (sensible, kept):**
+  merged "Electronica"→"Electronic"; added "2 Tone" to 5 Specials/Selecter
+  tracks ('08 monkey man', A Message to You Rudy, Do the Dog, Ghost Town
+  (Extended Version), Too Much Pressure (B-Side Version)). Both reversible
+  via the same Rename feature if unwanted.
+
 ## 2026-05-17 — ✅ Always-visible import progress + error surfacing
 
 Field report (a 2nd machine, same library): "Reimport Everything" gave

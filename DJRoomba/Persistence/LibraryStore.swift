@@ -1070,6 +1070,76 @@ struct LibraryStore: Sendable {
     }
   }
 
+  /// Every distinct genre tag across the library, trimmed, non-empty,
+  /// case-insensitively ordered. One read using the same
+  /// `json_each` + `json_valid` + `TRIM(value)` idiom as
+  /// `songsWithStats(matchingGenre:)` / `associatedPlaylists`, so the list
+  /// and the genre-match queries agree exactly. Backs the "Add to Genre ▸"
+  /// context submenu.
+  func distinctGenres() async throws -> [String] {
+    try await database.dbQueue.read { db in
+      try String.fetchAll(db, sql: """
+        SELECT DISTINCT TRIM(je.value) AS g
+          FROM song
+          JOIN json_each(song.genre_names) je
+         WHERE song.genre_names IS NOT NULL
+           AND json_valid(song.genre_names)
+           AND TRIM(je.value) <> ''
+         ORDER BY g COLLATE NOCASE
+        """)
+    }
+  }
+
+  /// Rename genre `from` → `to` across the whole library. Genres are
+  /// literal tags (no entity), so this also **merges**: a song carrying
+  /// both ends with a single `to` (the pure `GenreEdit.renaming` rewrites
+  /// + de-dupes; only rows that actually change are written). Reads the
+  /// songs whose `genre_names` contains `from` (the `EXISTS(json_each …)`
+  /// idiom), then one batched write. Touches **only** `song` (one-way
+  /// isolation — asserted by test). Returns rows changed.
+  @discardableResult
+  func renameGenre(from: String, to: String) async throws -> Int {
+    try await database.dbQueue.write { db in
+      let affected = try Song.fetchAll(db, sql: """
+        SELECT * FROM song
+         WHERE genre_names IS NOT NULL
+           AND json_valid(genre_names)
+           AND EXISTS (
+             SELECT 1 FROM json_each(song.genre_names) je
+              WHERE TRIM(je.value) = ?
+           )
+        """, arguments: [from])
+      let updates = affected.compactMap { song -> (String, [String])? in
+        guard
+          let rewritten = GenreEdit.renaming(song.genreNames, from: from, to: to)
+        else { return nil }
+        return (song.id, rewritten)
+      }
+      return try Self.writeGenreNames(db, updates)
+    }
+  }
+
+  /// Append `genre` to each of `songIDs` that doesn't already carry it
+  /// (idempotent — `GenreEdit.adding` returns nil for a song that already
+  /// has it, so it isn't rewritten). Reads those songs by primary key
+  /// (chunked `IN`), one batched write. Touches **only** `song`. Returns
+  /// rows changed.
+  @discardableResult
+  func addGenre(_ genre: String, toSongIDs songIDs: [String]) async throws -> Int {
+    guard !songIDs.isEmpty else { return 0 }
+    return try await database.dbQueue.write { db in
+      var updates = [(String, [String])]()
+      for chunk in songIDs.chunked(into: Self.sqliteVariableLimit) {
+        let songs = try Song.fetchAll(db, keys: chunk)
+        for song in songs {
+          guard let added = GenreEdit.adding(song.genreNames, genre) else { continue }
+          updates.append((song.id, added))
+        }
+      }
+      return try Self.writeGenreNames(db, updates)
+    }
+  }
+
   /// Record that `songID` started playing at `playedAt`. ONE transaction:
   /// resolve the song's canonical `local_id`, roll `song_stat` forward,
   /// append a `play_history` row, then prune history beyond
@@ -1377,6 +1447,46 @@ struct LibraryStore: Sendable {
   private static let sqliteVariableLimit = 999
 
   private let database: AppDatabase
+
+  /// The single batched genre-only write both edits funnel through: one
+  /// chunked `WITH v(id, genre_names) AS (VALUES …) UPDATE song SET
+  /// genre_names = v.genre_names FROM v WHERE song.id = v.id` per ≤999-var
+  /// chunk (a **column-named CTE** — SQLite rejects the `AS alias(cols)`
+  /// column list on a `(VALUES …)` subquery; `UPDATE … FROM` needs ≥3.33,
+  /// fine on macOS 14's system SQLite). `genre_names` goes through
+  /// `Song.encodeGenreNames` so it round-trips identically to the
+  /// `upsertSongs` path (empty list ⇒ NULL — never produced here:
+  /// rename's `to` and add's `genre` are non-empty). 2 binds/row ⇒
+  /// 999/2 = 499 rows/chunk. Runs in the caller's write transaction;
+  /// never touches any table but `song`. Returns rows changed.
+  private static func writeGenreNames(
+    _ db: Database,
+    _ updates: [(id: String, names: [String])],
+  ) throws -> Int {
+    guard !updates.isEmpty else { return 0 }
+    let maxRowsPerChunk = sqliteVariableLimit / 2
+    var changed = 0
+    for chunk in updates.chunked(into: maxRowsPerChunk) {
+      let valuesClause = Array(repeating: "(?, ?)", count: chunk.count)
+        .joined(separator: ", ")
+      var arguments = [(any DatabaseValueConvertible)?]()
+      arguments.reserveCapacity(chunk.count * 2)
+      for (id, names) in chunk {
+        arguments.append(id)
+        arguments.append(Song.encodeGenreNames(names))
+      }
+      try db.execute(
+        sql: """
+          WITH v(id, genre_names) AS (VALUES \(valuesClause))
+          UPDATE song SET genre_names = v.genre_names
+          FROM v WHERE song.id = v.id
+          """,
+        arguments: StatementArguments(arguments),
+      )
+      changed += db.changesCount
+    }
+    return changed
+  }
 
   /// Upsert-or-insert `song_stat` for `songID`, incrementing the single
   /// `Int` column at `counter` by one (a new row starts that counter at 1,

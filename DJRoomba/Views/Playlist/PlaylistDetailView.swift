@@ -7,7 +7,12 @@ struct PlaylistDetailView: View {
   // MARK: Internal
 
   var body: some View {
-    Group {
+    // `@Bindable` over the `@Environment` controller so the genre-name
+    // sheet binds to its request directly (swiftui-pro: `sheet(item:)`,
+    // never `Binding(get:set:)`). Same instance, just made bindable.
+    @Bindable var controller = controller
+
+    return Group {
       if controller.selectedPlaylistID == nil, controller.selectedGenre == nil {
         // Neither a playlist nor a genre selected → the app's landing
         // surface is the user's Recently Played, not a dead "select
@@ -52,6 +57,19 @@ struct PlaylistDetailView: View {
         // surface rather than a different dead-end prompt.
         RecentlyPlayedView()
       }
+    }
+    // One modal genre-name sheet for both edits (rename a browsed genre /
+    // assign a genre to selected tracks). Hosted here because the detail
+    // pane is always present for any playlist *or* genre, and assignment
+    // is triggered from its track table.
+    .sheet(item: $controller.genreNameRequest) { request in
+      GenreNameSheet(
+        request: request,
+        onCommit: { name in
+          Task { await controller.commitGenreNameSheet(request, name: name) }
+        },
+        onCancel: { controller.cancelGenreNameSheet() },
+      )
     }
   }
 
