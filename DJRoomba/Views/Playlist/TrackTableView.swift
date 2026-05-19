@@ -127,7 +127,10 @@ struct TrackTableView: View {
   // MARK: Private
 
   @Environment(MusicController.self) private var controller
-  @State private var selection: TrackRow.ID?
+  /// A `Set` (not a single optional) so the native `Table` gives
+  /// shift-click range + ⌘-click point multi-select for free — what the
+  /// "Add to Genre ▸" / "Add to Playlist ▸" context actions operate on.
+  @State private var selection = Set<TrackRow.ID>()
   @State private var trackFilter = ""
   /// Native column-header sorting. Defaults to playlist order (`position`),
   /// so an unsorted table looks exactly as before; clicking "Plays" /

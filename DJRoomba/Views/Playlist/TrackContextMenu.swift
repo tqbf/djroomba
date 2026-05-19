@@ -27,6 +27,9 @@ struct TrackContextMenu: View {
       Menu("Add to Playlist") {
         addToPlaylistContent
       }
+      Menu("Add to Genre") {
+        addToGenreContent
+      }
       if detail.isAppOwned {
         Divider()
         Button(
@@ -53,6 +56,27 @@ struct TrackContextMenu: View {
       ForEach(appPlaylists) { playlist in
         Button(playlist.name) {
           addSelected(to: playlist.id)
+        }
+      }
+    }
+  }
+
+  /// Assign a genre to the selected songs. "New Genre…" opens the modal
+  /// sheet (free text); the existing genres (from the library, alphabetical)
+  /// assign on tap and **merge** naturally — same unbounded-but-fine shape
+  /// as the "Add to Playlist" list (macOS menus scroll).
+  @ViewBuilder
+  private var addToGenreContent: some View {
+    Button("New Genre…") {
+      controller.beginAssignNewGenre(toSongs: rows.map(\.songID))
+    }
+    let genres = controller.allGenres
+    if !genres.isEmpty {
+      Divider()
+      ForEach(genres, id: \.self) { genre in
+        Button(genre) {
+          let ids = rows.map(\.songID)
+          Task { await controller.addGenre(genre, toSongs: ids) }
         }
       }
     }

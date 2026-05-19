@@ -81,4 +81,29 @@ struct DetailNavStackTests {
     // Popping still returns the most recent first.
     #expect(stack.pop() == .playlist("p\(total - 1)"))
   }
+
+  /// After a genre rename/merge, every `.genre(old)` history entry becomes
+  /// `.genre(new)` (so Back never lands on a now-empty genre); `.playlist`
+  /// entries and order/length are untouched; `old == new` is a no-op.
+  @Test
+  func `replacingGenre rewrites only matching genre entries`() {
+    var stack = DetailNavStack()
+    stack.push(.genre("Rok"))
+    stack.push(.playlist("P"))
+    stack.push(.genre("Rok"))
+    stack.push(.genre("Jazz"))
+
+    stack.replacingGenre("Rok", with: "Rock")
+    #expect(stack.entries == [
+      .genre("Rock"),
+      .playlist("P"),
+      .genre("Rock"),
+      .genre("Jazz"),
+    ])
+
+    let before = stack.entries
+    stack.replacingGenre("Pop", with: "Pop") // no-op (old == new)
+    stack.replacingGenre("Nope", with: "X") // no matching entry
+    #expect(stack.entries == before)
+  }
 }
