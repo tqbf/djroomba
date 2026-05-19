@@ -27,6 +27,12 @@ playlist-forward and intentionally simple.
   streams, ever). Requires active Apple Music subscription.
 - **No Apple library mutation.** App playlists / play counts / ratings are
   SQLite-only; never written to Apple. (Big simplification.)
+- **Single-user, subscriber.** This is a personal app for its owner, who
+  **is an Apple Music subscriber** — the app may assume an active Apple
+  Music subscription. No preview-only / unsubscribed / upsell UX is built;
+  the existing subscription gating stays only as a cheap already-built
+  safety net (a lapsed/changed account degrades gracefully), not a design
+  driver. See `plans/catalog-playlists.md`.
 
 ## Documentation index
 
@@ -40,6 +46,7 @@ playlist-forward and intentionally simple.
 | [plans/risks-and-challenges.md](plans/risks-and-challenges.md) | **Live risk register** — every problem we're up against, with status |
 | [plans/architecture.md](plans/architecture.md) | Local-first pivot layering + original M1/M2 layers, data flow, concurrency |
 | [plans/data-and-import.md](plans/data-and-import.md) | GRDB/SQLite schema, import pipeline, playback resolution; **`v4`** adds 9 "free" nullable track-metadata columns (track/disc #, genres, release date, composer, ISRC, lyrics flag, work/movement) pulled from the existing import fetch — no extra Apple calls |
+| [plans/catalog-playlists.md](plans/catalog-playlists.md) | **Planned** — add Apple Music *catalog* tracks to app playlists. Native MusicKit only (**no web service / developer token / REST**); needs the MusicKit App Service enabled on the App ID (portal step spelled out). Schema is already namespace-aware + resolver branch dormant-wired ⇒ clean addition. Phased, signed-gated. Assumes an Apple Music subscription |
 | [plans/genre-graph.md](plans/genre-graph.md) | **The "Analyze" action + visualizer** — `v6` `genre_edge` adjacency-list table; relates genres whose tracks share a playlist; one wholesale CTE rebuild (`LibraryStore.rebuildGenreGraph`); `GenreGraphService`; menu action ⌥⌘A + default-on auto-reanalyze. Pure SQLite, no MusicKit. Rendered by a **collapsible/resizable detail-pane panel** built on `tqbf/fdg`'s `ForceGraph`, **vendored at `Vendor/ForceGraph`** (v1.0.0 commit + 5 "DJROOMBA PATCH" fixes 1–5: search-pulse redraw-pin, pan-only→zoom centring, neighbour-walk, onFocusChange callback, hub-cell crossing-detector O(E²) beachball) |
 | [plans/genre-browsing.md](plans/genre-browsing.md) | **Genre browsing + top-pane Back stack** — select a genre → its tracks fill the top pane (`songsWithStats(matchingGenre:)`, synthetic `isGenre` detail, per-song playback); associations-card rows navigate to the playlist; pure unit-tested `DetailNavStack` (LIFO, cap 50) wired via the `selectedPlaylistID.didSet` choke point; Back toolbar `chevron.backward` + ⌘[. In-session only, no schema change. Live-verified |
 | [plans/playlist-folders.md](plans/playlist-folders.md) | **Folders imported as playlists** — phased fix. Phase 0 ✅ (signed probe: MusicKit has *no* folder discriminator) + **Phases 1–4 ✅** (Option A `iTunesLibrary.framework`, exclude-only: classifier+8 tests, off-main folder source w/ graceful degradation, skip-before-fetch, active converge + isolation/associated-playlists tests; Phase 5 hierarchy **skipped** — optional/not requested). Signed blitz **EXECUTED & PASSED** on the real library (270→265, all 5 folders incl. "AAA ME" gone, graph de-skewed, one-way isolation held) |
