@@ -5384,10 +5384,17 @@ column — no schema change, batched, song-only one-way isolated.
   731→727 links** (merged node gone). Then native `Table` multi-select
   (click + shift-range + ⌘-point = 5 rows) → right-click → **"Add to
   Genre ▸ New Genre…"** → typed "2 Tone" ⇒ assigned to exactly those 5;
-  header chip strip + Genre Graph updated (**87→88 / 727→733**). Found +
-  noted (not a regression from this change): clicking the **Title** cell
-  doesn't select a row because its pre-existing `.draggable` swallows the
-  click — selection works via any other column. Not committed/merged.
+  header chip strip + Genre Graph updated (**87→88 / 727→733**).
+- **Follow-up FIXED (same branch/PR).** The first pass found clicking a
+  track's **Title** didn't select the row — the Title cell's pre-existing
+  `.draggable` swallowed the click. Moved the drag to the **row**
+  (`Table(of:…){columns} rows:{ ForEach { TableRow($0).draggable(…) } }`):
+  click selects, press-drag drags, and a multi-selection drag now carries
+  every selected song (the drop target already maps `[SongDragItem]`).
+  Computer-use re-verified: Title click selects; dragging a track **by
+  its Title** onto a playlist still adds it (0→1); column sort /
+  contextMenu / primaryAction unaffected; 208/33 still green, lint clean.
+  Not committed/merged.
   **Real-library edits made during the live test (sensible, kept):**
   merged "Electronica"→"Electronic"; added "2 Tone" to 5 Specials/Selecter
   tracks ('08 monkey man', A Message to You Rudy, Do the Dog, Ghost Town

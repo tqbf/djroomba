@@ -100,18 +100,30 @@ Back stack coherent after a rename (a `.genre(old)` entry becomes
   detail; assign works from any playlist's track table, not only a genre
   view), bound via `@Bindable` (no `Binding(get:set:)`).
 
-## Known follow-up (found in the live computer-use test)
+## Title-click-vs-drag fix (the tracked follow-up — DONE)
 
-The track `Table`'s **Title** cell has a pre-existing `.draggable`
-(drag-a-track-onto-a-sidebar-playlist). That drag source swallows a plain
-click, so clicking a track's *title* doesn't select the row — selection
-works from **any other column** (#, Artist, Album, Time, Plays, Last
-Played). This is **not introduced by this change** (the multi-select
-`Set` swap is correct and verified), but it does blunt the new
-multi-select since the title is the obvious click target. A fix
-(row-level drag, or a selection-preserving drag source) must not regress
-the proven drag-to-playlist feature, so it is tracked here rather than
-rushed into this PR. Workaround today: select via a non-title column.
+The track `Table` previously put `.draggable(SongDragItem)` on the
+**Title cell**. A per-cell drag gesture competes with the table's row
+gesture, so a plain click on the title never selected the row (selection
+only worked from other columns) — found in the first computer-use pass,
+and a real blunting of the new multi-select since the title is the
+obvious click target.
+
+**Fix:** moved the drag to the **row**. `TrackTableView` now uses the
+`Table(of:selection:sortOrder:){ columns } rows: { ForEach(tracks) {
+TableRow($0).draggable(SongDragItem(songID:)) } }` form. Row-level
+`.draggable` integrates with the table's own gesture (click → select,
+press-drag → drag) so the title click selects, and a drag of any
+selected row carries a `SongDragItem` for **every** selected row — so
+dragging a multi-selection onto a "My Playlists" row adds them all (the
+existing `.dropDestination(for: SongDragItem.self)` already maps
+`[SongDragItem]`; the drag contract is unchanged). The custom
+`music.note` drag-preview label is intentionally dropped — the system
+row snapshot is the more Finder/Music-native drag image. Column-header
+sort, `.contextMenu(forSelectionType:)` and `primaryAction` are
+unaffected (they attach to the `Table`). Computer-use verified: clicking
+a track's Title selects it; dragging a track **by its Title** onto a
+playlist still adds it (0 → 1 track).
 
 ## Out of scope
 
