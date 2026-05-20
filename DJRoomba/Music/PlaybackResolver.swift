@@ -61,6 +61,28 @@ final class PlaybackResolver {
     /// an unattributable position (see the type doc).
     var playContext: [String?]
     var unresolved: [String]
+    /// F1a (`plans/catalog-playlists.md` Phase-3 followup): the **start
+    /// index of each homogeneous-namespace chunk** in `songs`. Single-array
+    /// form: a chunk runs `[chunkBoundaries[k]..<chunkBoundaries[k+1])`,
+    /// with the final implicit boundary at `songs.count`. A library-only or
+    /// catalog-only resolution collapses to a single boundary `[0]` — the
+    /// unchanged single-queue path. A mixed `[L,L,C,C,L]` carries
+    /// `[0, 2, 4]`. Because `playContext` is also a flat parallel array of
+    /// length `songs.count`, the Phase-4 `advanceToRecord` detector keeps
+    /// consuming a **global** queue index across all chunks — the player
+    /// reports a local index per swapped queue and `PlaybackService`
+    /// translates local→global via `globalQueueIndex`. Empty `songs` ⇒
+    /// empty `chunkBoundaries`.
+    var chunkBoundaries: [Int] = [0]
+    /// Phase 4 (`plans/catalog-playlists.md`): the namespace of each chunk,
+    /// parallel to `chunkBoundaries` (same count, same order). Chunks are
+    /// homogeneous-namespace by construction (F1a), so one tag per chunk
+    /// suffices. Drives `PlayerStateSnapshot.nowPlayingNamespace` so the
+    /// now-playing thumbnail routes a catalog id to `ArtworkProvider`'s
+    /// catalog branch instead of mis-routing it through the library
+    /// branch (which returns nil → placeholder for genuinely catalog ids).
+    /// Empty `songs` ⇒ empty `chunkNamespaces`.
+    var chunkNamespaces: [Song.IDNamespace] = [.library]
   }
 
   // (The original Phase-3 batch `memberOf` `resolve(rows:startAt:)` was
@@ -101,6 +123,54 @@ final class PlaybackResolver {
   /// Ids that could not be re-resolved on the most recent attempt — the
   /// UI/PROGRESS can surface this honestly rather than failing silently.
   private(set) var unresolvedMusicItemIDs = [String]()
+
+  /// F1a — walk `rows` and return the **ranges of consecutive same-namespace
+  /// runs** in input order (the chunking the F1a sequential-sub-queue
+  /// playback layer needs). Pure, MusicKit-free, unit-testable. The
+  /// `ApplicationMusicPlayer.Queue` empirically rejects a mixed
+  /// library+catalog Song array on macOS (`MPMusicPlayerControllerErrorDomain`
+  /// error 6 — confirmed live in the Phase-3 finding; see PROGRESS
+  /// 2026-05-20 + APPLE-TOUCHPOINTS gotcha #10); this helper expresses the
+  /// per-chunk shape `PlaybackService` swaps through. A library-only or
+  /// catalog-only resolution collapses to a single range
+  /// (`[0..<rows.count]`), so the existing single-queue play path is the
+  /// unchanged single-chunk case. `[]` ⇒ `[]`.
+  nonisolated static func chunkByNamespace(_ rows: [TrackRow]) -> [Range<Int>] {
+    guard !rows.isEmpty else { return [] }
+    var ranges = [Range<Int>]()
+    var start = 0
+    var currentNamespace = rows[0].namespace
+    for index in 1..<rows.count {
+      if rows[index].namespace != currentNamespace {
+        ranges.append(start..<index)
+        start = index
+        currentNamespace = rows[index].namespace
+      }
+    }
+    ranges.append(start..<rows.count)
+    return ranges
+  }
+
+  /// F1a — translate a **player-local** queue index (the `Entry` ordinal
+  /// inside the currently-loaded `ApplicationMusicPlayer.Queue`, which
+  /// resets to 0 each chunk swap) to the **global** queue index across all
+  /// chunks (the ordinal into `Resolution.songs` / `Resolution.playContext`).
+  /// Pure, MusicKit-free, unit-testable. `globalQueueIndex(localIndex: 0,
+  /// currentChunk: 1, chunkBoundaries: [0, 3])` → `3` (the first song of
+  /// the second chunk). With a single-chunk resolution
+  /// (`chunkBoundaries == [0]`) this is the identity — the existing
+  /// single-queue path is unchanged. Out-of-range `currentChunk` falls back
+  /// to `localIndex` (defensive — the Phase-4 detector relies only on the
+  /// transition signal, so a brief one-tick misattribution is bounded and
+  /// the next real transition still records).
+  nonisolated static func globalQueueIndex(
+    localIndex: Int,
+    currentChunk: Int,
+    chunkBoundaries: [Int],
+  ) -> Int {
+    guard chunkBoundaries.indices.contains(currentChunk) else { return localIndex }
+    return chunkBoundaries[currentChunk] + localIndex
+  }
 
   /// Group a queue's rows by id namespace, de-duplicating ids within each
   /// namespace (the batch re-fetch only needs each id once; reassembly
@@ -145,8 +215,24 @@ final class PlaybackResolver {
     var songs = [MusicKit.Song]()
     var playContext = [String?]()
     var unresolved = [String]()
+    // F1a: chunk boundaries are computed against the **resolved** rows
+    // (the ones that actually take a slot in `songs` / `playContext`) so
+    // the boundaries align with the queue positions `PlaybackService` will
+    // chunk through. A dropped row never adds a slot, so it can't create a
+    // spurious chunk break either. Track the prior resolved row's
+    // namespace; a change from it starts a new chunk at the current `songs`
+    // count (which is also the current `playContext` count — parallel by
+    // construction).
+    var chunkBoundaries = [Int]()
+    var chunkNamespaces = [Song.IDNamespace]()
+    var previousNamespace: Song.IDNamespace?
     for row in rows {
       if let song = resolved[row.musicItemID] {
+        if previousNamespace != row.namespace {
+          chunkBoundaries.append(songs.count)
+          chunkNamespaces.append(row.namespace)
+          previousNamespace = row.namespace
+        }
         songs.append(song)
         playContext.append(row.songID)
       } else {
@@ -168,6 +254,8 @@ final class PlaybackResolver {
       startSongID: startSongID,
       playContext: playContext,
       unresolved: unresolved,
+      chunkBoundaries: chunkBoundaries,
+      chunkNamespaces: chunkNamespaces,
     )
   }
 
@@ -382,12 +470,19 @@ final class PlaybackResolver {
       }
 
       unresolvedMusicItemIDs = unresolved
+      // F1a: imported Apple playlists are library-only by construction
+      // (the import path tags every row `.library`). One chunk if any
+      // resolved; no chunks if none. The single-queue path is unchanged.
+      let chunkBoundaries = songs.isEmpty ? [] : [0]
+      let chunkNamespaces: [Song.IDNamespace] = songs.isEmpty ? [] : [.library]
       return Resolution(
         songs: songs,
         startSong: startSong,
         startSongID: startSongID,
         playContext: playContext,
         unresolved: unresolved,
+        chunkBoundaries: chunkBoundaries,
+        chunkNamespaces: chunkNamespaces,
       )
     } catch {
       lastError = error.localizedDescription
@@ -432,8 +527,20 @@ final class PlaybackResolver {
       for (rawID, song) in resolved { resolvedByMusicItemID[rawID] = song }
     }
 
-    // Dormant today (nothing catalog-namespace is imported). Per-id
-    // catalog resolution would slot in here the same way; kept minimal.
+    // LIVE since Phase 3 (2026-05-20): once Phase-2 ingest started
+    // landing `.catalog`-namespace rows, this branch flipped on. Catalog
+    // ids are globally stable (unlike library), so a batch `memberOf` is
+    // safe: the response's `Song.id.rawValue` matches each queried id 1:1
+    // and we key the resolved map by it. A mismatch (if it ever drifted)
+    // naturally falls into `reassemble`'s `unresolved` via the stored-id
+    // lookup — no explicit assertion needed. **Known limitation
+    // (Phase-3 live finding, see PROGRESS 2026-05-20 + APPLE-TOUCHPOINTS
+    // gotcha #10):** even when this branch succeeds AND the library
+    // branch above succeeds, an `ApplicationMusicPlayer.Queue` containing
+    // both library and catalog `Song`s is rejected by the player with
+    // `MPMusicPlayerControllerErrorDomain` error 6 (timeout). Pure-catalog
+    // and pure-library queues each work; the mix does not. Resolver
+    // itself is fine — the failure is at the player layer.
     do {
       if !plan.catalogIDs.isEmpty {
         let songs = try await fetchCatalogSongs(plan.catalogIDs)

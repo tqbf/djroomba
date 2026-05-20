@@ -33,6 +33,7 @@ final class MusicController {
     importService = ImportService(store: safeStore)
     genreImportService = GenreImportService(store: safeStore)
     genreGraphService = GenreGraphService(store: safeStore)
+    catalogIngestService = CatalogIngestService(store: safeStore)
     resolver = PlaybackResolver()
     autoReanalyzeGenreGraph = preferences.autoReanalyzeGenreGraph
     if openedStore == nil {
@@ -65,6 +66,25 @@ final class MusicController {
   let genreGraphService: GenreGraphService
   let resolver: PlaybackResolver
 
+  /// Phase 1 (`plans/catalog-playlists.md`): catalog `Song` → SQLite `song`
+  /// row, the prerequisite for any catalog track to participate in app
+  /// playlists. Phase 2's "Add Catalog Result to Playlist" path
+  /// (`addCatalogSong(_:toAppPlaylist:)`) calls into this; nothing else
+  /// does today. Kept internal — views never reach this service directly,
+  /// they go through the controller, exactly like every other write path.
+  let catalogIngestService: CatalogIngestService
+
+  /// Phase 2 (`plans/catalog-playlists.md`): the subordinate Apple Music
+  /// catalog search surface. `@Observable` so the search sheet binds to
+  /// `results` / `isSearching` / `lastError` / `hasMore` directly. Stateless
+  /// w.r.t. SQLite — ingest only happens when the user *acts on* a result.
+  let catalogSearch = CatalogSearchService()
+
+  /// Phase-0 catalog access gate (`plans/catalog-playlists.md`). Internal —
+  /// views never read it; they read `catalogProbeResult`, exactly like the
+  /// genre-import notice. No store dependency, so it self-initializes.
+  private let catalogProbeService = CatalogProbeService()
+
   /// Observable mirrors of the persisted app state. SQLite is authoritative;
   /// these are refreshed from it after writes (no dual store).
   private(set) var favoriteIDs = Set<String>()
@@ -85,6 +105,21 @@ final class MusicController {
   /// later incremental Refresh leaves the prior value (it describes the last
   /// full pass — acceptable). Dismissible via `dismissGenreImportNotice()`.
   private(set) var genreImportNotice: String?
+
+  /// The last Phase-0 catalog access probe verdict (a human-readable
+  /// success/failure string from `CatalogProbeService`). `nil` ⇒ no probe
+  /// run since launch or it was dismissed. Surfaced in the toolbar `.status`
+  /// slot via the same calm dismissible-popover idiom as `genreImportNotice`;
+  /// dismissed via `dismissCatalogProbeResult()`.
+  private(set) var catalogProbeResult: String?
+
+  /// Whether the Phase-2 catalog search sheet is presented. Bound by
+  /// `MainShellView.sheet(isPresented:)`; flipped by the Search ▸ Search
+  /// Apple Music… (⇧⌘F) menu command via `presentCatalogSearch()`. Not
+  /// `private(set)` because SwiftUI's `Bindable` needs settability for the
+  /// `.sheet(isPresented:)` two-way binding (the standard idiom for
+  /// app-level sheet state under `@Observable`).
+  var catalogSearchPresented = false
 
   /// Derived summary collections — **stored, input-driven state**, not
   /// per-`body` computed properties (Phase A spry fix; see
@@ -322,6 +357,12 @@ final class MusicController {
     genreImportNotice = nil
   }
 
+  /// Dismiss the Phase-0 catalog probe verdict (the toolbar info chip's
+  /// "Dismiss"). One-way: clears it until the probe is re-run.
+  func dismissCatalogProbeResult() {
+    catalogProbeResult = nil
+  }
+
   func bootstrap() async {
     authorization.refresh()
     if authorization.status == .authorized {
@@ -377,6 +418,70 @@ final class MusicController {
     } catch {
       storeError = error.localizedDescription
     }
+  }
+
+  /// Debug menu action: run the Phase-0 catalog access probe and surface its
+  /// verdict in the toolbar notice slot. Fire-and-forget-safe — the service
+  /// never throws (it returns a diagnostic string for both success and
+  /// failure). No `#if DEBUG` gate, for the same reason as
+  /// `seedSyntheticHistory`: the user's normal `make` build is debug-config
+  /// and the clearly-labelled "Debug" button is wanted.
+  ///
+  /// Two halves, both required for Phase 0 to pass
+  /// (`plans/catalog-playlists.md`): (1) a catalog search returns a song;
+  /// (2) that song actually plays via `ApplicationMusicPlayer`. The service
+  /// owns half (1) and hands back the first hit; the controller layers
+  /// half (2) by routing the song through the existing `PlaybackService`
+  /// — the same proven auto-start path the rest of the app uses, so a
+  /// success here proves catalog playback end-to-end, not a side channel.
+  /// On a confirmed play we let it run ~1.5 s (long enough to be visibly
+  /// audible / capture in a screenshot) and then pause; on a non-confirmed
+  /// play we report the failure and skip the pause.
+  /// Menu command target: open the Phase-2 catalog search sheet. Idempotent
+  /// — calling while presented is a no-op. The sheet owns the search field
+  /// (auto-focused on appear) and the debouncer.
+  func presentCatalogSearch() {
+    catalogSearchPresented = true
+  }
+
+  func runCatalogAccessProbe() async {
+    let probe = await catalogProbeService.searchProbe()
+    guard let firstSong = probe.firstSong else {
+      // Search half failed (or returned 0) — the service's verdict is the
+      // diagnostic; no playback to attempt.
+      catalogProbeResult = probe.verdict
+      return
+    }
+    let started = await playback.play(
+      songs: [firstSong],
+      startingAt: firstSong,
+      playlistContextID: nil,
+      namespace: .catalog,
+    )
+    guard started else {
+      catalogProbeResult = """
+      \(probe.verdict)
+
+      ❌ Playback FAILED — ApplicationMusicPlayer did not confirm `.playing` \
+      within the bounded wait. \
+      \(playback.lastError.map { "Player error: \($0)" } ?? "No player error reported.")
+
+      Phase 0 SEARCH PASSED, PLAYBACK FAILED.
+      """
+      return
+    }
+    // Audible window — long enough to be obviously playing (and to capture
+    // in a screenshot of the now-playing bar) without being annoying.
+    try? await Task.sleep(for: .milliseconds(1500))
+    playback.pause()
+    catalogProbeResult = """
+    \(probe.verdict)
+
+    ✅ Playback OK — ApplicationMusicPlayer confirmed `.playing` and was \
+    paused after ~1.5 s.
+
+    Phase 0 FULLY PASSED.
+    """
   }
 
   func isFavorite(_ summary: PlaylistSummary) -> Bool {
@@ -478,6 +583,50 @@ final class MusicController {
       await appPlaylistService.addSongs(songIDs, to: playlistID)
     }
     reanalyzeGenreGraphIfEnabled()
+  }
+
+  /// Phase 2 (`plans/catalog-playlists.md`) — Add Catalog Result to App
+  /// Playlist. Two-step seam built explicitly by Phase 1:
+  ///
+  ///   1. `CatalogSearchService.ingestResult(withCatalogID:using:)` maps the
+  ///      cached `MusicKit.Song` (from the in-memory search results) into
+  ///      our SQLite `song` table via `CatalogIngestService` and hands back
+  ///      the stable `song.id` (the same UUID an app-playlist FKs against).
+  ///   2. `appPlaylistService.addSongs(_:to:)` — verbatim the library path's
+  ///      add affordance. Catalog and library songs differ only in
+  ///      `id_namespace`; app-playlist membership is namespace-agnostic.
+  ///
+  /// `MusicKit.Song` is intentionally never reaches this method — the
+  /// controller stays MusicKit-free. The caller refers to a result by its
+  /// catalog id (`Song.id.rawValue`, which the view already shows / a
+  /// context-menu binding can carry), and the search service does the
+  /// MusicKit-side ingest hop inside its own boundary. Same shape as the
+  /// Phase-0 probe path (`firstSong` stays inside `CatalogProbeService`).
+  ///
+  /// Surfaces failures into `storeError` (the same place SQLite errors
+  /// land) — tolerate-and-surface, never crash on a bad ingest.
+  func addCatalogResult(
+    catalogID: String,
+    toAppPlaylist playlistID: String,
+  ) async {
+    do {
+      guard
+        let songID = try await catalogSearch.ingestResult(
+          withCatalogID: catalogID,
+          using: catalogIngestService,
+        )
+      else {
+        // Result vanished (a new search came in mid-click). Quietly no-op
+        // — the next click on a current result will succeed.
+        return
+      }
+      await mutateAppPlaylist(playlistID) {
+        await appPlaylistService.addSongs([songID], to: playlistID)
+      }
+      reanalyzeGenreGraphIfEnabled()
+    } catch {
+      storeError = error.localizedDescription
+    }
   }
 
   func removeTracks(at oneBasedPositions: [Int], fromAppPlaylist playlistID: String) async {
@@ -1192,9 +1341,18 @@ final class MusicController {
     // player's own live status, not the 0.5 s-lagged snapshot — the
     // Phase-3 follow-up fix; the old `snapshot.isPlaying` guard read the
     // stale poll too early so plays never recorded).
+    //
+    // F1a (`plans/catalog-playlists.md` Phase-3 followup): we always route
+    // through the resolution-aware overload now. For a single-chunk
+    // resolution (library-only OR catalog-only — the common case) this is
+    // identical to the prior `play(songs:startingAt:)` call: same player
+    // queue, same confirm-poll, no swap state. The only behavior change is
+    // in the **mixed** case, where the overload splits the queue at
+    // namespace boundaries and the 0.5 s monitor tick swaps chunks
+    // sequentially (the workaround for `MPMusicPlayerControllerErrorDomain`
+    // error 6 on a mixed `ApplicationMusicPlayer.Queue`).
     return await playback.play(
-      songs: resolution.songs,
-      startingAt: resolution.startSong,
+      resolution: resolution,
       playlistContextID: contextID,
     )
   }

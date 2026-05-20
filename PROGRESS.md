@@ -5,6 +5,1366 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-20 — ✅ `addSongsToAppPlaylist` dedupe-on-add (intra-batch + against existing)
+
+User decision (after the UX-corrective verification surfaced a duplicate
+Bohemian Rhapsody row in "New Playlist"): a song appears in any one app
+playlist at most once. Dedupe lives at the store layer so EVERY caller
+gets it — the catalog search-row `⊕`, the right-click "Add to Playlist
+▸" on library rows, any future drag-to-sidebar, programmatic adds.
+**Scope is strict**: only `app_playlist_track`. `play_history` /
+`song_stat` / Recently Played are fed from a different write path
+(`recordPlay`, etc.) and are explicitly unaffected — a song still
+records every time it plays.
+
+- **Behavior.** Inside the same write transaction as the INSERT:
+  fetch existing `song_id`s for the playlist, filter the input by
+  (a) intra-batch dedupe (collapse to first occurrence) AND (b)
+  drop any id already present. If nothing remains, **true no-op** —
+  no INSERT, no `updated_at` touch, no row-count delta. Otherwise
+  the existing chunked multi-row INSERT path runs unchanged. Atomic
+  by transaction boundary: a concurrent add can't slip a row
+  between the existing-membership read and our INSERT.
+- **Pre-existing duplicates are NOT removed.** No surreptitious
+  data mutation. The "New Playlist" playlist used for verification
+  retains its position-1 and position-4 Bohemian Rhapsody rows
+  (added before the dedupe shipped); the user can remove the dupe
+  manually via the existing remove-positions affordance.
+- **Files touched.**
+  - `DJRoomba/Persistence/LibraryStore.swift` — `addSongsToAppPlaylist`
+    gets the dedupe phase + the all-dupes early-return; doc comment
+    rewritten to make the new contract explicit (scope, no-op
+    semantics, "existing duplicates not removed").
+  - `Tests/DJRoombaTests/AppPlaylistCRUDTests.swift` — retired the
+    old `add appends and allows duplicates` test (1) and replaced
+    it with three (3) new tests covering both dedupe directions
+    and the no-op invariant. Net +2 tests.
+- **Skills.** swiftui-pro / macos-design — N/A (data-flow / store-
+  layer change, no view code). airbnb-swift-style applied. Toms-
+  laws lens: complexity unchanged (one read + one filter added to
+  an existing tx), no new globals, the dedupe is pure inside the
+  tx closure, no surface widening.
+- **Build gates.** `make check` clean. `swift test`
+  **218/34 → 220/34** (+3 dedupe tests, −1 retired allow-dupes
+  test = +2 net). Signed `make build` clean with embedded
+  provisioning profile.
+- **Live verification (agent, Mac 1).** Pre-state: "New Playlist"
+  4 tracks (with the pre-existing Bohemian Rhapsody at positions 1
+  AND 4 from the prior UX-corrective verification). ⌥⌘F → search
+  "queen" → click `⊕` on Bohemian Rhapsody → menu → "New Playlist".
+  Sidebar count stayed at **4 tracks** (same gesture as before,
+  which previously bumped it 3→4). The detail-pane rows are
+  unchanged; the pre-existing position-4 duplicate is intact (no
+  surreptitious cleanup). Dedupe path fired silently as designed.
+- **No commit.** Ready for PR.
+
+## 2026-05-20 — ✅ Catalog search-row UX corrective — discoverable `⊕` add affordance
+
+Phase-2 shipped catalog search results with only a right-click context
+menu for "Add to Playlist", which read as "inscrutable" — a left-click
+did nothing visible. Now every result row carries a trailing
+`plus.circle` button (a SwiftUI `Menu` rendering the same playlist
+dropdown the context menu uses; single source of truth via the existing
+`addToPlaylistContent` `ViewBuilder` — no menu drift). The right-click
+context menu is preserved for power-user muscle memory and keyboard nav.
+
+- **Files touched.** `DJRoomba/Views/CatalogSearch/CatalogSearchResultRow
+  .swift` only — added a `Menu` with `Label("Add to Playlist",
+  systemImage: "plus.circle")` (icon-only, secondary foreground,
+  borderless, indicator hidden, `.help("Add to Playlist")` for tooltip,
+  `.accessibilityLabel("Add to playlist")`). Changed
+  `accessibilityElement(children: .combine)` →
+  `.contain` because the row now has an actionable subview the
+  combine treatment would swallow (swiftui-pro accessibility ref).
+- **Skills.** `macos-design` (the always-visible-trailing-add pattern is
+  Apple Music's own search-row idiom — visible + low visual weight via
+  borderless/secondary). `swiftui-pro` (Menu primitive identical to
+  context-menu content keeps the two affordances byte-identical;
+  `.contain` is the right accessibility treatment for an actionable
+  row subview). Airbnb style applied.
+- **Build gates.** `make check` clean. `swift test` 218/34 unchanged
+  (no new test — this is a one-view-file UX corrective; the underlying
+  Add-to-Playlist path was already covered by Phase 2 verifications).
+  Signed `make build` clean with embedded provisioning profile.
+- **Live verification (agent, via computer-use, Mac 1).**
+  Quit + relaunch fresh build; ⌥⌘F → search sheet → "queen" → six rows
+  rendered with the `⊕` icon trailing each row (visible at row 1 next
+  to Bohemian Rhapsody's 5:55, row 2 Another One Bites the Dust 3:35,
+  etc.). Clicked the `⊕` on row 1 (Bohemian Rhapsody) → menu dropped
+  showing "New Playlist". Clicked "New Playlist" → sidebar count
+  immediately advanced **3 → 4 tracks**. Closed the sheet, opened
+  "New Playlist" — the new track 4 is "Bohemian Rhapsody / Queen /
+  Greatest Hits I, II & III: The Platinum Collection / 5:55", confirming
+  the end-to-end ingest-then-append fired through the new affordance.
+- **Incidental observation (NOT a regression of this fix).**
+  `AppPlaylistService.addSongs(songIDs:to:)` does not dedupe — the
+  playlist now has the same catalog song at positions 1 (added during
+  Phase 2 / 3 testing) and 4 (added by this fix's verification).
+  Same code path Phase 2 used; the dedupe-vs-allow-duplicates question
+  is a separate product decision. Filed as **F4 (followup):
+  decide whether `addSongs` should dedupe or allow intentional
+  repeats** — recommend the user pick before PR.
+- **No commit.** Branch `plan/catalog-playlists` working tree carries
+  the one-file change on top of the cumulative catalog-phase delta.
+
+## 2026-05-20 — ✅ Distribution path empirically OPEN — `make dist` output catalog-works on a Mac NOT in the provisioning profile
+
+The long-standing open question from `plans/project-setup.md` /
+`plans/catalog-playlists.md` (and PROGRESS 2026-05-19) — "does catalog
+work on macOS outside the App Store, on Macs not specifically registered
+to the provisioning profile?" — is empirically **yes**, with a specific
+recipe.
+
+- **Recipe (single data point).** A `make dist` bundle — Developer ID
+  Application signature + hardened runtime + timestamp + notarized +
+  stapled — with the **existing Apple-Development "MusicKit Test
+  Profile"** embedded at `Contents/embedded.provisionprofile` (whose
+  `ProvisionedDevices` list contains ONLY Mac 1's UDID; Mac 2 is NOT
+  registered) transferred to a second Mac:
+  `MusicCatalogSearchRequest("Bohemian")` → 6 catalog rows, 5 of 6
+  with real Phase-4 artwork (Queen Greatest Hits, Suicide Squad, etc.;
+  the lone placeholder is an Apple-side `nil` `Song.artwork` for one
+  release variant, same code path). No `MusicTokenRequestError`. No
+  error chip.
+- **What it means.** For native macOS apps distributed outside the
+  Mac App Store, Apple's MusicKit token issuance (1) accepts the
+  embedded profile as authoritative for the App-Service assertion,
+  and (2) **does not enforce the profile's device list when the
+  binary is Developer-ID-signed + notarized.** Device-locking is an
+  Apple-Development-cert concept; once `make dist`'s re-sign step
+  flips to Developer ID Application, the same profile becomes
+  effectively non-device-locked for catalog purposes.
+- **Caveats (honest).**
+  - **Undocumented combination** (mixing an Apple-Development *type*
+    provisioning profile with Developer-ID *signing*). Apple could
+    close this path at any time. Don't treat it as a long-term
+    contract.
+  - **Single data point.** Both Macs share the same Apple ID + active
+    subscription. A third party with their own subscription / Mac is
+    untested.
+  - Holds for `make dist` only. A profile-less or
+    Apple-Development-signed dev build distributed to a non-registered
+    Mac still fails catalog (unchanged from 2026-05-19 finding).
+- **Implications.**
+  - The `plans/project-setup.md` open question "whether a notarized
+    Developer ID build needs a MusicKit-App-Service profile for
+    catalog" — answered: it needs the embedded profile, AND the
+    existing Apple-Development one suffices when paired with
+    Developer ID re-sign + notarization. No separate "Developer ID
+    provisioning profile" needed for catalog to work on non-registered
+    Macs.
+  - PR (held pending this verification) is unblocked at the
+    distribute-and-run level.
+- **Still unverified on Mac 2** (small remaining exercises).
+  - Catalog **playback** end-to-end (same MusicKit path as search;
+    one Play click confirms).
+  - Mixed library+catalog **F1a sub-queue swap** under `make dist`
+    (Phase 3 / F1a was proven under `make build`).
+  - The Add-to-Playlist context menu via **right-click** (left-click
+    on a result row is inert; UX miss, documented followup).
+- **UX followup.** Search-result left-click does nothing; only
+  right-click → "Add to Playlist ▸" acts. Options surfaced: trailing
+  `plus.circle`, double-click default action, hover-revealed button.
+  Defer until user picks.
+- **No code change. Nothing committed.**
+
+## 2026-05-20 — ✅ Catalog Phase 4 (artwork) DONE + LIVE VERIFIED — `plans/catalog-playlists.md` Phases 0–4 ALL DONE
+
+**Headline.** Catalog artwork is live. `ArtworkProvider` (the `actor` +
+LRU cache) now branches on `(namespace, kind)`: library songs still go
+through `MusicLibraryRequest<Song>` (the D2 path), and catalog songs
+re-resolve via `MusicCatalogResourceRequest<Song>(matching: \.id,
+memberOf: [id])` — the same shape `PlaybackResolver.fetchCatalogSongs`
+uses for playback. The catalog-search sheet's result rows now render
+real Queen cover art instead of the `.quaternary` placeholder, and a
+catalog song's now-playing thumbnail re-resolves correctly. Library
+behavior is unchanged. This is the final phase of
+`plans/catalog-playlists.md` — Phases 0 through 4 are ALL DONE.
+
+- **Architecture (one paragraph).** The retired `guard namespace ==
+  .library else { return nil }` precondition in `ArtworkProvider` was
+  the entire dormancy gate; with Phase 0 having proved the MusicKit App
+  Service entitlement live and Phase 3 + F1a proving the catalog
+  request path, the precondition was already false. The `Key` struct
+  already discriminated by namespace, so catalog and library entries
+  for a same-id collision cache independently and the FIFO ceiling
+  serves both namespaces with no policy change. The `private
+  nonisolated static resolve(musicItemID:namespace:kind:)` helper grew
+  one new `case (.catalog, .song)` arm issuing the catalog request,
+  plus an explicit `case (.catalog, .playlist) -> nil` documenting "we
+  don't import catalog playlists" as a deliberate non-goal. No new
+  types, no schema change, no entitlement work, no URL-fetch path —
+  `ArtworkImage(artwork, width:height:)` renders both library and
+  catalog `Artwork` (MusicKit picks the right transport internally),
+  so the consumer view (`ArtworkThumbnail`) is unchanged.
+- **The follow-on bug the live gate caught and fixed in the same
+  phase.** The first signed run showed catalog rows rendering cleanly
+  in the search sheet (Queen "Greatest Hits I, II & III" cover) but
+  the now-playing bar showed the placeholder for a playing catalog
+  song. Root cause: `PlayerStateSnapshot.artworkRef` was hard-coded
+  to `namespace: .library`, so the player was passing a catalog id
+  through the library branch — which returns nil → placeholder. Fix
+  threaded namespace through the snapshot: `PlayerStateSnapshot`
+  gained `nowPlayingNamespace`; `Resolution` gained `chunkNamespaces:
+  [Song.IDNamespace]` parallel to `chunkBoundaries` (one tag per
+  chunk, emit-together / skip-together with the boundaries in
+  `reassemble`); `PlaybackService.PendingChunk` gained `namespace`;
+  `PlaybackService.refreshSnapshot` reads the active chunk's
+  namespace and stamps `snap.nowPlayingNamespace`. The single-shot
+  `play(songs:startingAt:)` overload now takes an explicit
+  `namespace:` parameter (the catalog probe passes `.catalog`); a
+  fallback `singleShotNamespace` field covers the snapshot reader
+  when no resolution is loaded. The `?? .library` in `artworkRef` is
+  a total backstop.
+- **Files touched.**
+  - `DJRoomba/Views/ArtworkProvider.swift` — retired the library
+    guard; `resolve` now switches over `(namespace, kind)` with new
+    catalog arm; updated docstring to explain per-namespace branching.
+  - `DJRoomba/Views/CatalogSearch/CatalogSearchResultRow.swift` —
+    replaced the local `placeholderThumbnail` view with
+    `ArtworkThumbnail(ref: .song(song.id.rawValue, namespace:
+    .catalog), size: 40)`; updated docstring.
+  - `DJRoomba/Models/PlayerStateSnapshot.swift` — added
+    `nowPlayingNamespace`; `artworkRef` passes it to
+    `ArtworkRef.song(_:namespace:)` with `?? .library` fallback.
+  - `DJRoomba/Music/PlaybackResolver.swift` —
+    `Resolution.chunkNamespaces` field; `reassemble` emits it in
+    lock-step with `chunkBoundaries`; `resolvePlaylist` (imported
+    Apple playlist) sets `chunkNamespaces = [.library]` for non-empty,
+    `[]` for empty (parallel emptiness).
+  - `DJRoomba/Music/PlaybackService.swift` — `PendingChunk.namespace`;
+    new `chunkNamespaces` + `singleShotNamespace` `@ObservationIgnored`
+    fields; `play(songs:startingAt:playlistContextID:)` now takes
+    `namespace:`; `play(resolution:)` mirrors `resolution
+    .chunkNamespaces` into the service field; `buildChunks` propagates
+    per-chunk namespace; `refreshSnapshot` stamps `snap
+    .nowPlayingNamespace`.
+  - `DJRoomba/Music/MusicController.swift` — `runCatalogAccessProbe`
+    passes `namespace: .catalog` to the single-shot `play(songs:)`.
+  - `Tests/DJRoombaTests/PlaybackResolverTests.swift` — two new
+    tests: `chunkNamespaces parallel to chunkBoundaries` and the
+    empty-input parallel emptiness invariant.
+- **Build & test gates.** `make check` clean (debug). `swift test`
+  216 → 218 (+2 new tests), 34 suites green. Signed build with
+  `MusicKit_Test_Profile.provisionprofile` produced;
+  `Contents/embedded.provisionprofile` present.
+- **Live verification (signed build).**
+  - **Test A — catalog search results render artwork.** ⌥⌘F → typed
+    "queen" → six rows returned (Bohemian Rhapsody, Another One
+    Bites the Dust, We Will Rock You, Don't Stop Me Now, Somebody to
+    Love, We Are the Champions) — every row renders the iconic Queen
+    "Greatest Hits I, II & III: The Platinum Collection" cover at
+    40×40 with no placeholder. Confirmed via zoom screenshot.
+  - **Test B — catalog song's now-playing thumbnail renders.**
+    Dismissed sheet → "New Playlist" detail (mixed catalog + library)
+    → Bohemian Rhapsody clicked + played → the now-playing bar's
+    40×40 thumbnail now shows the Queen Greatest Hits cover (was the
+    music-note placeholder before this fix). Plays count on the row
+    incremented (6 → 7) confirming the catalog song is the one
+    playing. Note: the track-table itself has no per-row thumbnail
+    column by design (it never has — see '80s Hits Essentials's same
+    layout); thumbnails surface in the playlist header, sidebar
+    rows, and now-playing bar.
+  - **Test C — library artwork regression check.** Clicked '80s
+    Hits Essentials in Library Playlists; the playlist-header art
+    ("Hits 80s" yellow cover), sidebar library covers, and the
+    still-playing Bohemian Rhapsody now-playing thumbnail all
+    render exactly as before. **No regression.**
+  - **Test D (placeholder fallback) — code-grep claim.**
+    `ArtworkProvider.resolve`'s `do { … } catch { return nil }` and
+    the empty-`.items` branch funnel a miss back through `store(nil,
+    for: key)` → caller sees nil → `ArtworkThumbnail` keeps the
+    `.quaternary` placeholder. The explicit `(.catalog, .playlist)
+    -> nil` branch reaches the same fallback by design.
+- **swiftui-pro + macos-design verdicts.** swiftui-pro: keep the
+  catalog request inside the existing `nonisolated static resolve`
+  switch (minimum surface, same isolation; `actor` + `Sendable
+  Artwork` boundary holds under Swift 6 strict concurrency); the
+  existing `Key (musicItemID, namespace, kind)` already gives
+  per-namespace cache isolation. macos-design: at 40×40 with the
+  existing 0.2 s easeOut cross-fade and `ArtworkImage`'s own bitmap
+  cache, scrolling needs no new affordance.
+- **Toms-laws self-check.** Diff is small and additive (one new
+  switch arm in `ArtworkProvider`, one `ArtworkThumbnail` swap in
+  `CatalogSearchResultRow`, plus namespace-plumbing for the
+  follow-on now-playing fix). No new types, no schema change, no
+  new entitlement, no new view code. Per-namespace cache isolation
+  falls out of the existing `Key` shape — DRY honored. The
+  architecture pre-anticipated this phase
+  (`plans/catalog-playlists.md`: "schema is already namespace-aware
+  + resolver branch dormant-wired ⇒ clean addition").
+- **Followups (documented, not blockers).**
+  - **Catalog playlists artwork** is a deliberate non-goal:
+    `ArtworkProvider`'s `(.catalog, .playlist)` arm returns nil and
+    the docstring records the rationale (we don't import catalog
+    playlists, only catalog songs). One future switch arm +
+    `MusicCatalogResourceRequest<Playlist>` lights it up if needed.
+  - **F1a known limitations** carry forward unchanged: cross-chunk
+    back-skip and ~1–2 s namespace-transition gap are still out of
+    scope; neither is artwork-related.
+
+## 2026-05-20 — ✅ Catalog Phase 3 / F1a (mixed-namespace playback via sequential sub-queues) DONE + LIVE VERIFIED
+
+**Headline.** F1a — the human-decided resolution for the Phase-3
+mixed-queue finding (the deterministic
+`MPMusicPlayerControllerErrorDomain` error 6 when an
+`ApplicationMusicPlayer.Queue` carries both library and catalog
+`Song`s on macOS) — is implemented and live-verified. A
+3-track mixed playlist (Bohemian Rhapsody catalog + Dancing Queen
+catalog + Take On Me library) now plays end-to-end: the catalog
+chunk plays first via Apple's queue, a Next at the chunk's tail
+swaps to a fresh `ApplicationMusicPlayer.Queue` holding the
+library chunk, and Take On Me plays. The previously-failing mixed
+queue no longer fails. Stats land for every song played
+(`play_history` + `song_stat` confirmed via SQLite). Pure-library
+playback ('80s Hits Essentials) is unchanged.
+
+- **Architecture (one paragraph).** The pure `PlaybackResolver`
+  layer gained two MusicKit-free helpers — `chunkByNamespace(_:)`
+  returning consecutive-same-namespace ranges, and
+  `globalQueueIndex(localIndex:currentChunk:chunkBoundaries:)`
+  translating a player-local queue index into the global queue
+  index across all chunks — plus a `chunkBoundaries: [Int]` field
+  on `Resolution` carrying the start index of each homogeneous
+  chunk in `songs` (single-chunk resolutions collapse to `[0]`; an
+  empty resolution to `[]`). The `PlaybackService` gained a new
+  `play(resolution:playlistContextID:)` overload that, for a
+  multi-chunk resolution, builds per-chunk views, plays the start
+  chunk via the unchanged `setQueueAndPlay` path, and on the 0.5 s
+  monitor tick detects natural end-of-chunk (`player.queue
+  .currentEntry == nil`) and swaps to the next chunk via
+  `Task { performChunkSwap(...) }` guarded by a
+  `chunkSwapInFlight: Bool` re-entrancy gate. The snapshot's
+  `queueIndex` is now translated to GLOBAL via
+  `globalQueueIndex(...)`, so the Phase-4 `advanceToRecord`
+  detector keeps consuming a monotonic global index across chunk
+  swaps without any change to its decision logic. Single-chunk
+  resolutions (library-only OR catalog-only — the common case) hit
+  the fast path that is identical to the old `play(songs:
+  startingAt:)` — zero behavior change.
+- **End-of-chunk detection signal (the load-bearing distinction).**
+  The swap fires when `player.queue.currentEntry == nil` AND there
+  are pending chunks. **A user pause keeps `currentEntry != nil`**
+  (Apple's player retains the loaded entry across a pause), so
+  user-paused is naturally distinguished from queue-ended without
+  reading `playbackStatus`. The re-entrancy gate
+  (`chunkSwapInFlight`) prevents the next 0.5 s tick observing the
+  in-flight swap (`currentEntry == nil` while we're awaiting
+  `player.play()`) from double-swapping.
+- **Empirical correction to the plan: special-case `skipNext` at
+  the chunk tail.** The plan's premise was "`player
+  .skipToNextEntry()` at the last entry of a chunk will either
+  fail or land in the same end-of-queue state; don't special-case
+  skipNext." Live-tested today: on macOS, `skipToNextEntry()` at
+  the tail of an `ApplicationMusicPlayer.Queue` does **not** empty
+  the queue — it **wraps** to the first entry of the same queue
+  (verified: Dancing Queen → Bohemian → Dancing → … indefinitely,
+  never emptying). So the natural `currentEntry == nil` swap
+  detector never fires on a manual Next-at-tail. F1a therefore
+  adds a `shouldSwapChunkOnSkipNext()` pre-check inside
+  `PlaybackService.skipNext()`: if the current entry equals the
+  chunk's last entry AND a next chunk exists, perform the chunk
+  swap instead of calling `skipToNextEntry`. The
+  `performChunkSwap(toChunkIndex:songs:)` path is shared with the
+  natural-end-of-queue detector — same swap, two triggers. The
+  re-entrancy gate makes the two triggers mutually exclusive.
+- **Stats accuracy across chunk swaps.** Verified live + via
+  SQLite. After the F1a run that walked through Bohemian (catalog)
+  → Dancing (catalog) → Take On Me (library), `play_history` shows
+  the in-order sequence ending at `seq=1015 song_local_id=8199`
+  (Take On Me, library namespace) and `song_stat` updated for all
+  three: Bohemian `play_count=6`, Dancing `play_count=4`, Take On
+  Me `play_count=2`. Each chunk swap left the player's local index
+  at 0 and the global-offset jumped to `chunkBoundaries
+  [currentChunkIndex]`, so `advanceToRecord` saw a transition from
+  the prior chunk's last index → the new chunk's first global
+  index and recorded the play — the **Phase-4 detector is
+  unchanged**; only its input (the global queueIndex) changed.
+- **Transition-gap measurement.** From the live test, catalog →
+  library swap took roughly 1–2 s of silence between the last
+  catalog song stopping and Take On Me starting. Within the plan's
+  "small gap (likely sub-second to ~2s)" budget; well under the
+  3-second stop condition.
+- **Files touched.**
+  - `DJRoomba/Music/PlaybackResolver.swift` — added pure
+    `chunkByNamespace(_:)` and `globalQueueIndex(localIndex:
+    currentChunk:chunkBoundaries:)`; added `chunkBoundaries:
+    [Int]` on `Resolution`; updated `reassemble` to compute
+    chunkBoundaries from the RESOLVED rows (a dropped row never
+    creates a spurious chunk break); the `resolvePlaylist`
+    (imported Apple playlist) path is library-only by construction
+    and tags `chunkBoundaries = songs.isEmpty ? [] : [0]` (the
+    unchanged single-queue path).
+  - `DJRoomba/Music/PlaybackService.swift` — added
+    `play(resolution:playlistContextID:)` overload; added
+    `pendingChunks`/`currentChunkIndex`/`chunkBoundaries`/
+    `chunkSwapInFlight` `@ObservationIgnored` state; added
+    `buildChunks`, `chunkContaining`,
+    `advanceToNextChunkIfNeeded`, `performChunkSwap`,
+    `shouldSwapChunkOnSkipNext`, `performChunkSwapForSkipNext`;
+    `refreshSnapshot` now translates the player-local queue index
+    to GLOBAL via `PlaybackResolver.globalQueueIndex(...)` and
+    calls `advanceToNextChunkIfNeeded` last (so the detector
+    observes the final queueIndex of the just-finished chunk
+    before any swap state changes); `skipNext()` short-circuits to
+    `performChunkSwapForSkipNext` at chunk tail. The existing
+    `play(songs:startingAt:playlistContextID:)` shape is
+    preserved (used by `playRecentlyPlayed` and the catalog
+    probe); it now resets `pendingChunks` so a one-shot play
+    never inherits stale chunk state.
+  - `DJRoomba/Music/MusicController.swift` — `startResolvedQueue`
+    routes through the new `playback.play(resolution:
+    playlistContextID:)` overload instead of `play(songs:
+    startingAt:)`. Single-chunk resolutions still hit the fast
+    path inside `play(resolution:)` — same behavior, same code
+    path, zero regression. The Phase-4 detector
+    (`detectAndRecordAdvance` via `onSnapshotRefresh`) is
+    unchanged.
+- **Tests (+3 net, 216/34 total).**
+  - `PlaybackResolverTests.swift` +3 new `@Test`s plus assertions
+    on existing tests:
+    1. `chunkByNamespace returns consecutive-same-namespace
+       ranges` — empty, single-row, all-library, all-catalog, the
+       `[L,C,L]` 3-element interleave, the `[L,L,C,C,L]` 5-element
+       case. Every chunk-by-namespace boundary from the plan's
+       "Concrete deliverables" 1.
+    2. `chunkByNamespace over resolved rows describes the queue
+       chunks` — the invariant `reassemble` relies on: a dropped
+       (unresolved) row does NOT create a phantom chunk between
+       its two flanking same-namespace runs (`[L,C,L,C(miss),L,C]`
+       → `[0..<1, 1..<2, 2..<4, 4..<5]`, the C2 miss collapsed,
+       the two flanking L runs merged because the row was dropped).
+    3. `globalQueueIndex translates local index by chunk start`
+       — local 0 in chunk 1 of `[0, 3]` ⇒ global 3; single-chunk
+       identity at every local index; mid-chunk; empty boundaries
+       (defensive identity); out-of-range chunk (defensive
+       identity). Every edge from the plan's "Concrete
+       deliverables" 5.
+    Existing tests (`reassemble reports every unresolved row…`,
+    `reassemble carries catalog start row attribution like
+    library`) gained `chunkBoundaries` assertions so the empty
+    case is locked in.
+  - Test-count delta: 213/34 → **216/34** (+3 tests, same suite
+    count).
+- **Skills consulted.**
+  - **Before deciding:** `swiftui-pro` for the
+    `@MainActor @Observable` chunk-sequence state shape, the swap
+    re-entrancy gate, and the safe `Task { … }` from inside the
+    synchronous `refreshSnapshot()`. Verdict: a single
+    MainActor-serialized `chunkSwapInFlight: Bool` plus a
+    fire-and-forget `Task` is the canonical shape; no actor hop,
+    no lock; the gate flip on the way out of the swap is a direct
+    assignment because the spawned `Task` inherits the enclosing
+    `@MainActor` isolation. The data-flow tradeoff against view
+    coupling is solved by `@ObservationIgnored` on every chunk
+    field (the `body` reads only `snapshot`; the global-offset
+    translation already lives inside `refreshSnapshot()` so the
+    queueIndex stays the single observable handle).
+  - **During writing:** `airbnb-swift-style` (the project's
+    project-skill applies to this Swift code path) — naming,
+    brace style, doc comments at the type / method, structured
+    concurrency only, `if let value {` shorthand. No
+    `foregroundColor` / `nanoseconds` / GCD anywhere in the new
+    code.
+  - **After writing:** `swiftui-pro` post-review — the only nit
+    found was a needlessly nested `defer { Task { … } }` for the
+    re-entrancy gate flip in `advanceToNextChunkIfNeeded`; fixed
+    to a direct assignment after `await performChunkSwap(…)`
+    (the spawned `Task` is already on the MainActor). No
+    deprecated API; no view body coupled to the 0.5 s tick (the
+    `@ObservationIgnored` discipline holds — verified by grep:
+    `MainShellView` / `NowPlayingBar` read only
+    `playback.snapshot`, never `pendingChunks` or
+    `currentChunkIndex`).
+  - **`toms-laws` self-check.** Complexity: bounded (one pure
+    chunking helper, one pure index-translation helper, one new
+    state struct, one new public play overload). Globals: zero
+    new — all state lives inside `PlaybackService` instances.
+    Purity: `chunkByNamespace` / `globalQueueIndex` /
+    `chunkContaining` are all pure and unit-tested; the swap is
+    the irreducible side effect. Coupling: stays inside `Music/`;
+    `MusicController` does not learn about chunks (it still calls
+    `resolveAppPlaylist` → `playback.play(resolution:)`); the
+    Phase-4 detector path is byte-identical. DRY: per-chunk
+    resolution reuses `resolveLibrarySongsIndividually` /
+    `fetchCatalogSongs` unchanged; the two swap triggers
+    (natural end-of-queue and Next-at-tail) share
+    `performChunkSwap(toChunkIndex:songs:)`. Boilerplate: minimal
+    — three small helpers + one struct. Error handling: the swap
+    tolerates-and-surfaces via `lastError`; no retry loop; no
+    crash on a refused-by-Apple swap.
+  - **`macos-design`** N/A — no user-visible UI changes; the only
+    behavior change is a brief silence (~1–2 s empirically) at a
+    namespace boundary, which the now-playing bar's existing
+    "Not Playing" → "song title" transition handles
+    indistinguishably from a single-song-to-next transition.
+- **Build / test gates.**
+  - `make check` — clean compile.
+  - `swift test` — **216/34 green** (before: 213/34; +3 tests,
+    same suite count = additions live inside the existing
+    `PlaybackResolverTests` suite).
+  - `make build PROVISION_PROFILE=…/MusicKit_Test_Profile
+    .provisionprofile` — clean signed dev build;
+    `build/DJRoomba.app/Contents/embedded.provisionprofile`
+    present.
+- **Live verification (agent, via computer-use).**
+  - **Test setup.** Quit any stale DJRoomba; launched
+    `build/DJRoomba.app`. The "New Playlist" was already in the
+    Phase-3 post-surgery state of 2 catalog rows (Bohemian
+    Rhapsody + Dancing Queen). Re-added the library row Take On
+    Me (a-ha) via row context-menu in '80s Hits Essentials →
+    Add to Playlist ▸ New Playlist; the playlist now had 3 rows
+    `[catalog, catalog, library]` — i.e. 2 chunks, 1 swap to
+    exercise.
+  - **Test A — mixed-queue playback. ✅** Played "New Playlist".
+    Now-playing bar showed "**Bohemian Rhapsody** — Queen
+    0:10/5:55"; no error chip; the previously-failing mixed
+    queue no longer fails. Pressed Next → "**Dancing Queen** —
+    ABBA 0:08/3:52" (catalog → catalog Next inside the catalog
+    chunk, as Phase 3 already proved). Pressed Next at the chunk
+    tail → after ~1–2 s of silence, "**Take On Me** — a-ha
+    0:09/3:49" (the catalog → library chunk swap fired). The
+    F1a `shouldSwapChunkOnSkipNext()` path took effect — the
+    empirical correction to the plan's premise (Apple's player
+    loops within a queue on Next-at-tail rather than emptying).
+    **All three songs of the previously-failing mixed playlist
+    played end-to-end, in order.** Screenshots saved.
+  - **Test B — stats land for every song. ✅** SQLite live query:
+    `play_history` newest entries `seq=1015 song_local_id=8199`
+    (Take On Me, library) — the play recorded after the chunk
+    swap. `song_stat` after the run:
+    `Take On Me library play_count=2 last_played_at=2026-05-20
+     19:29:22.818`
+    `Bohemian Rhapsody catalog play_count=6 last_played_at=2026
+     -05-20 19:29:22.467`
+    `Dancing Queen catalog play_count=4 last_played_at=2026
+     -05-20 19:29:08.857`
+    Each played song has a fresh `play_history` row attributed
+    to the right `local_id` and its `song_stat` advanced; the
+    chunk boundary did not double-count, did not drop the
+    boundary song, did not misattribute. The Phase-4
+    `advanceToRecord` detector continued to fire on the
+    global-queueIndex transition exactly as designed.
+  - **Test C — pure-library regression. ✅** Played
+    '80s Hits Essentials. "**Let's Go Crazy** — Prince & The
+    Revolution 0:11/4:38"; no swap state, no error. Confirms the
+    single-chunk fast path inside `play(resolution:)` is
+    behaviorally identical to the pre-F1a `play(songs:
+    startingAt:)`.
+  - **Test D — pure-catalog regression.** Covered structurally:
+    the single-chunk fast path is the same code for library-only
+    (`chunkBoundaries == [0]`) and catalog-only
+    (`chunkBoundaries == [0]`) resolutions, and Test C confirmed
+    the single-chunk fast path. Phase 3 already proved pure-
+    catalog end-to-end (PROGRESS 2026-05-20 prior entry — Bohemian
+    + Dancing as a 2-catalog-row playlist played, with
+    catalog→catalog Next working). F1a does not touch
+    `resolveLibrarySongsIndividually` / `fetchCatalogSongs` /
+    `setQueueAndPlay` — every behavior Phase 3 verified is
+    preserved.
+- **Followups.**
+  - **F1a-followup-1: cross-chunk back-skip (OUT OF SCOPE for
+    F1a).** `skipPrevious()` at chunk head does not currently
+    swap to the prior chunk — it stays within the current chunk
+    (or restarts the current song, which is Apple's default
+    behavior). Most users press Back rarely and Back at sub-queue
+    head is the rare case; punting is correct. Future work if
+    user feedback demands it.
+  - **F1a-followup-2: namespace-transition gap UX polish.** The
+    ~1–2 s silence at the namespace boundary is acceptable per
+    the plan but could be smoothed (e.g. a brief crossfade, or a
+    "Loading next…" hint in the now-playing bar). Defer until
+    user reports it as a defect.
+  - **F1a-followup-3: Apple Feedback Assistant ticket.** The
+    underlying Apple bug — `ApplicationMusicPlayer.Queue`
+    rejecting a mixed library+catalog `Song` array with
+    `MPMusicPlayerControllerErrorDomain` error 6 — is worth
+    filing so a future Apple fix lets F1a be deprecated. Not a
+    blocker for the project.
+- **What was NOT committed.** Nothing. Branch
+  `plan/catalog-playlists` working tree carries the F1a changes
+  on top of Phases 1–3; no commit, no push, no merge per
+  CLAUDE.md.
+
+## 2026-05-20 — ⚠️ Catalog Phase 3 (playback) PARTIALLY LIVE VERIFIED — pure-catalog OK, mixed library+catalog queue FAILS (real bug)
+
+**Headline.** Phase 3 flipped the dormant `PlaybackResolver` catalog
+branch on. **Pure-catalog playback works end-to-end** on the
+dev-signed, profile-embedded build — a catalog song lands in an app
+playlist (Phase-2 path), `resolveAppPlaylist` routes its id through
+`fetchCatalogSongs` (`MusicCatalogResourceRequest<MusicKit.Song>(
+matching:\.id, memberOf:)`), and `ApplicationMusicPlayer` plays it.
+Two catalog songs in one app playlist also work — including
+Next-button skip from one catalog song to the next, with both plays
+correctly attributed to their catalog `song.id` in `play_history` and
+`song_stat` (the stats path proved namespace-agnostic empirically).
+**BUT: a mixed library+catalog `ApplicationMusicPlayer.Queue` is
+rejected by Apple's player with `MPMusicPlayerControllerErrorDomain
+error 6` ("request timed out").** That's a real product-level finding
+that needs human triage. Stats / search / ingest unchanged; the bug
+is at the player-queue layer only.
+
+- **Analysis-first answers (the 4 plan-mandated Qs).**
+  1. **Q1: Do catalog `memberOf` results round-trip by queried id?**
+     **Yes, empirically.** Apple says catalog ids are globally stable;
+     the resolver builds the resolved-by-stored-id map by writing
+     `resolvedByMusicItemID[song.id.rawValue] = song`. The pure-catalog
+     2-track playback test (Bohemian Rhapsody + Dancing Queen, 2
+     unrelated catalog ids — `1440650711` + `1422648513`) succeeded:
+     both songs played in order. If `Song.id.rawValue` had differed
+     from the queried id even once, `reassemble`'s stored-id lookup
+     would have dropped that row into `unresolved` and the queue
+     would have been incomplete. It wasn't — both rows played. So
+     the no-D1-hazard claim for catalog holds for the two ids
+     exercised, on this build. (Not a universal proof — but it is
+     the verification the plan asked for.)
+  2. **Q2: Any `.library`-only switch arms that silently drop
+     `.catalog` rows on the playback path?** **No.** Grep
+     (`namespace == .library` / `case .library`) found exactly 3
+     hits across `DJRoomba/`: `PlaybackResolver.swift:115` (the
+     `groupByNamespace` switch — paired with a `.catalog` arm, not
+     special-casing), `Views/Sidebar/SidebarUnavailableView.swift:29`
+     (sidebar UI state, off-path), and `Views/ArtworkProvider.swift:59`
+     (a `guard namespace == .library else { return nil }` — owned by
+     Phase 4, NOT Phase 3). Nothing on the play path filters by
+     namespace.
+  3. **Q3: Is the play-recording path namespace-agnostic?** **Yes —
+     proved both by code-read and by live SQLite.** `LibraryStore.
+     recordPlay(songID:)` (line 1089) accepts our app-stable
+     `song.id` UUID, looks up `local_id`, and writes
+     `PlayHistoryEntry(songLocalID:)` keyed entirely on our canonical
+     numeric id; same for `recordSkip` / `recordReplay`. Nothing on
+     that path reads `id_namespace`. Live SQLite confirms it
+     end-to-end: `play_history seq=1003,1005` both point at the
+     catalog Bohemian Rhapsody row (`local_id=8230`,
+     `id_namespace=catalog`); `seq=1006` points at the catalog
+     Dancing Queen row (`local_id=8231`, recorded by the
+     `advanceToRecord` auto-advance detector on the Next-button skip
+     between two catalog songs); `song_stat` rows correctly
+     incremented (`play_count=2` for Bohemian Rhapsody, `1` for
+     Dancing Queen). **No code change needed for stats.**
+  4. **Q4: Does `groupByNamespace`/`reassemble` already handle
+     mixed input correctly?** **Yes.** `groupByNamespace` (lines
+     108–127) has paired `.library`/`.catalog` arms with per-namespace
+     de-dup; `reassemble` (lines 140–172) walks `rows` in input order
+     keyed by `row.musicItemID`, never reading `row.namespace` —
+     structurally namespace-agnostic. The new mixed-input unit tests
+     (below) lock that in.
+- **Code changes.** **None to production code** — the four Qs all
+  resolved clean. The dormant branch was already correct; Phase 2
+  satisfied its "must only ever get genuinely catalog ids"
+  precondition; nothing required surgery. The defensive verification
+  the plan asked us to consider (debug assertion / `lastError` setter
+  on a catalog id mismatch) was kept implicit: `reassemble`'s
+  stored-id lookup naturally drops any mismatch into `unresolved`
+  (and thence into `unresolvedMusicItemIDs`), so the symptom is
+  caught without an explicit assertion. Default-position rationale
+  in the plan held.
+- **Tests (+4 net, 213 / 34 total).**
+  - `PlaybackResolverTests.swift` +3 new `@Test`s:
+    1. `group by namespace partitions interleaved library and
+       catalog rows` — mixed 7-row input partitions into the right
+       buckets, per-namespace de-duped, discovery order preserved.
+    2. `reassembly walks a mixed library and catalog queue in input
+       order` — 6-row mixed input with a library miss AND a catalog
+       miss: queue is rows-in-order, both misses reported, dups
+       re-expand, every context entry is our `song.id` (no Apple id).
+    3. `reassemble carries catalog start row attribution like
+       library` — when the start row is a catalog row, the
+       attribution/fallback path is identical to library (the only
+       field `reassemble` reads is `row.songID`, which is
+       namespace-agnostic).
+  - `CatalogIsolationTests.swift` +1 new `@Test`:
+    1. `recordPlay for a catalog song lands on the catalog row by
+       local_id` — ingest a catalog song AND a library row with a
+       colliding `music_item_id`, call `recordPlay(songID:
+       catalogRecord.id)`, assert (a) catalog row's `song_stat`
+       advanced, (b) library collider's `song_stat` is `nil` —
+       proving the play was attributed by our PK not by Apple id —
+       (c) `play_history` carries `song_local_id == catalog row's
+       local_id`. The store-level mirror of what the live test then
+       verified end-to-end.
+  - **Test count delta:** 209/34 → **213/34** (+4 tests, same suite
+    count).
+- **Skills.**
+  - **Before:** `swiftui-pro` consulted on the dormant-branch flip-
+    on concurrency posture. Verdict: no actor adjustment needed —
+    the `@MainActor` resolver hops off-main for `try await
+    request.response()` like every other MusicKit call, returns,
+    and the MainActor serialization at the call site
+    (`resolveAndPlay`'s load-bearing-ordering invariant) already
+    handles overlapping resolves. Defensive verification can stay
+    implicit: a hypothetical id mismatch would naturally fall into
+    `unresolved` via `reassemble`'s stored-id lookup.
+  - **After:** `swiftui-pro` post-review on the test additions only
+    (no production diff). `airbnb-swift-style` applied to the new
+    test files (existing-file conventions preserved). `macos-design`
+    N/A (no UI changes). `toms-laws` self-check: zero production
+    code added (complexity neutral); only test additions
+    (locked-in invariants).
+- **Build gates.**
+  - `make check` — clean compile.
+  - `swift test` — **213/34 green** (before: 209/33; after: 213/34
+    — +4 tests, same suite count = additions live in the existing
+    `PlaybackResolverTests` and `CatalogIsolationTests` suites).
+  - `make build PROVISION_PROFILE=…/MusicKit_Test_Profile.provision
+    profile` — clean signed dev build; `build/DJRoomba.app/Contents/
+    embedded.provisionprofile` present.
+- **Live verification (agent, via computer-use).**
+  - **Test A — pure-catalog playback. ✅** Quit + relaunched the
+    profile-embedded build; New Playlist (1 catalog row, Bohemian
+    Rhapsody, `music_item_id=1440650711` from Phase 2) → Play.
+    After ~3 s the now-playing bar showed "**Bohemian Rhapsody —
+    Queen**" at `0:04 / 5:55` with the pause button (engine at
+    `.playing`). No error chip. Sidebar got a fresh **Recently
+    Played** section above My Playlists (the recents bump fired).
+    Empirical first-ever flip of the dormant catalog resolver
+    branch on this build.
+  - **Test B — mixed library + catalog playback. ❌ FAILED (real
+    bug).** Added a SECOND catalog song (ABBA — Dancing Queen,
+    `music_item_id=1422648513`) via ⌥⌘F → search "abba dancing
+    queen" → context-menu "Add to Playlist ▸ New Playlist". Added
+    a library song (a-ha — Take On Me) from `'80s Hits Essentials`
+    via row context-menu "Add to Playlist ▸ New Playlist". New
+    Playlist now had 3 interleaved rows (catalog / catalog /
+    library). Clicked Play. The now-playing bar dropped to "Not
+    Playing" and an inline orange warning appeared under the Play
+    button: **"⚠ The operation couldn't be completed.
+    (MPMusicPlayerControllerErrorDomain error 6.)"** Retry → same
+    error. Per Apple's MediaPlayer.framework, **error 6 in
+    `MPMusicPlayerControllerErrorDomain` is `requestTimedOut`**
+    (not an auth or capability error). Both `resolveAppPlaylist`
+    branches resolved without throwing — `resolver.lastError` was
+    nil; the error originated from `playback.lastError`, set inside
+    `setQueueAndPlay`'s `do {...} catch` (PlaybackService.swift:222
+    on the `try await player.play()` line, given the queue
+    construction itself doesn't throw).
+  - **Test B isolation. ✅** Played a library-only library playlist
+    (`'80s Hits Essentials`) — "**Let's Go Crazy** — Prince & The
+    Revolution" played at `0:13 / 4:38`, no error. The library path
+    is independently healthy. Then surgically removed the one
+    library row from the app playlist via direct SQL (`DELETE
+    FROM app_playlist_track WHERE song_id=…`), restarted the app,
+    played the now-pure-catalog 2-track playlist. **Played fine.**
+    "Bohemian Rhapsody" at `0:10 / 5:55`. Pressed Next: cleanly
+    advanced to "**Dancing Queen** — ABBA" at `0:09 / 3:52`.
+    No error, both songs played, the Next was a catalog→catalog
+    transition.
+    **Conclusion: error 6 is reproducibly specific to a single
+    `ApplicationMusicPlayer.Queue` containing both library and
+    catalog `MusicKit.Song`s.** Library-only and catalog-only
+    queues each work fine; mixing them in one queue does not.
+  - **Test C — stats. ✅ VERIFIED via live SQLite.** After Tests A
+    + the pure-catalog 2-track run, queried the app's SQLite at
+    `~/Library/Containers/org.sockpuppet.djroomba/Data/Library/
+    Application Support/DJRoomba/library.sqlite`:
+    - `play_history` (newest first):
+      `seq=1006  song_local_id=8231  Dancing Queen  catalog`
+      `seq=1005  song_local_id=8230  Bohemian Rhapsody  catalog`
+      `seq=1004  song_local_id=8192  Let's Go Crazy  library`
+      `seq=1003  song_local_id=8230  Bohemian Rhapsody  catalog`
+      `seq=1002  song_local_id=3762  Jump Around library`
+      (older library rows below)
+    - `song_stat` for catalog rows:
+      `Bohemian Rhapsody catalog play_count=2 last_played_at=2026
+       -05-20 18:52:41.223`
+      `Dancing Queen catalog play_count=1 last_played_at=2026
+       -05-20 18:52:59.294`
+    Both the explicit start-record (Phase-3's `recordPlayStart`)
+    and the auto-advance detector (Phase-4's `advanceToRecord` →
+    `storedSongID` → `recordPlay`) attributed catalog plays to the
+    correct catalog `song.id` / `local_id`, with the catalog rows
+    intermingling cleanly with library rows in the bounded history.
+    **End-to-end empirical proof that the play-recording path is
+    namespace-agnostic.**
+  - **Recently Played surface.** The sidebar Recently Played
+    section accumulated entries through every test play (New
+    Playlist + '80s Hits Essentials), visible in the Test B / Test
+    C screenshots. No catalog vs library disparity in surfacing.
+- **What this means.**
+  - The Phase-3 *core claim* — "flip the dormant catalog branch on,
+    catalog playback works, stats are namespace-agnostic" — is
+    **empirically TRUE for pure-catalog queues** (single track and
+    multi-track-with-skip-advance).
+  - The Phase-3 *secondary claim* — "reassembly of a **mixed**
+    library+catalog queue works" — is empirically **FALSE on the
+    current Apple stack**: `ApplicationMusicPlayer` on this macOS /
+    MusicKit build rejects a queue containing both
+    library-namespace `Song`s and catalog-namespace `Song`s with
+    error 6 (timeout). The reassembly itself succeeds — the bug
+    is downstream, inside Apple's player.
+- **Stop condition raised (per plan): "The mixed-queue auto-advance
+  hangs, drops, or misattributes (real bug; needs human triage)."**
+  Filing the follow-up needed below; not committing.
+- **Followups (Phase 3 → human triage required).**
+  - **F1 (DECISION).** Mixed library+catalog `ApplicationMusicPlayer.
+    Queue` is rejected by Apple's player on this build. Options to
+    evaluate (not chosen here — needs a human decision):
+    - **F1a (likely correct).** Split the resolved queue by
+      namespace into per-namespace sub-queues at the
+      `PlaybackService` layer; play the first, then on its end
+      transition swap to the next sub-queue. Preserves UX
+      ("Bohemian Rhapsody → Take On Me → Dancing Queen" plays in
+      order from the user's POV) at the cost of a queue swap (and
+      a brief gap) at namespace boundaries. Each sub-queue is then
+      a homogeneous-namespace `Queue`.
+    - **F1b.** Re-resolve every library row's `MusicKit.Song` into
+      its catalog equivalent (by ISRC or by catalog search) and
+      build a pure-catalog queue. Requires an Apple-Music
+      subscription (we assume it) and another catalog round trip
+      per library row. Risk: ISRC isn't always present; catalog
+      search by title+artist is fuzzy.
+    - **F1c (gives up the freight).** Forbid mixing namespaces in
+      one app playlist at the UI layer ("Add to Playlist ▸" greys
+      out catalog playlists when adding a library song and vice
+      versa). Simplest, sacrifices the only real product reason to
+      have catalog songs in app playlists.
+    - **F1d.** Wait on a Feedback Assistant ticket — the Apple
+      surface area is `ApplicationMusicPlayer.Queue(for: [Song])`
+      with mixed-namespace songs; the symptom is a deterministic
+      `MPMusicPlayerControllerErrorDomain` error 6 ("requestTimedOut")
+      even on a fast network. (The mixed queue was a 3-element
+      list with 2 catalog + 1 library; not a size/throttle issue.)
+  - **F2 (Phase 4 prerequisite, already deferred).** Catalog
+    artwork — search-result placeholder thumbnails are visible in
+    the Test B screenshot. Phase 4 owns that; not regressed.
+  - **F3 (test-only).** Once F1 is decided, add a live integration
+    sketch (manual checklist) for the chosen mixed-namespace path.
+- **What was NOT committed.** Nothing. Branch `plan/catalog-
+  playlists` is clean of any new commit; only the working tree has
+  the new tests + the doc updates. Per CLAUDE.md hard constraint
+  ("MUST NOT ever merge them to main"), and no commit/push was
+  asked for here.
+
+## 2026-05-20 — ✅ Catalog Phase 2 (subordinate search surface) code-complete + LIVE VERIFIED
+
+End-to-end: a user can summon a focused Apple Music **catalog** search
+sheet, type a query, see real results paged off `MusicCatalogSearchRequest`,
+right-click any result → "Add to Playlist ▸ <My Playlist>", and watch the
+catalog track land in their SQLite-only app playlist via the Phase-1
+ingest seam. Live-verified on the dev-signed, profile-embedded build —
+typed "queen", saw the same Bohemian-Rhapsody-and-friends results the
+Phase-0 probe returned, added Bohemian Rhapsody to a freshly-created
+"New Playlist", confirmed the row appeared in the detail pane (title +
+artist + album + 5:55 duration + auto-derived "Music, Rock" genre chips)
+AND in SQLite (`id_namespace = 'catalog'`, `music_item_id = 1440650711`,
+the globally-stable catalog id).
+
+- **Sheet vs. pane decision: SHEET.** Per `macos-design` —
+  `interaction-patterns.md`'s "appear when needed, get out of the way"
+  axiom, and the plan's "deliberately subordinate" / "the app never
+  *opens* into it" requirement. A sheet has clear in/out semantics, owns
+  its own focus, and doesn't compete with the sidebar/detail/inspector
+  triad the way a fourth pane would (a pane would persistently steal
+  playlist-forward real estate, the explicit non-goal). Implemented with
+  `.sheet(isPresented:)` bound to `controller.catalogSearchPresented`.
+- **Keyboard shortcut: ⌥⌘F (Option+Cmd+F).** A two-step collision-check
+  process: (1) ⌘F is bound by `.searchable` on both the playlist sidebar
+  filter (`PlaylistSidebarList.swift:68`) and the track-table filter
+  (`TrackTableView.swift:113`) — can't use it. (2) ⇧⌘F was planned and
+  rejected after live verification: the vendored `ForceGraph`'s
+  `KeyCaptureView` swallows **any** command-F that lacks Option/Control
+  (`Vendor/ForceGraph/Sources/ForceGraph/Interaction/KeyCaptureView.swift
+  :127–132`) — ⇧⌘F summoned the graph's search HUD instead of the
+  sheet. ⌥⌘F is explicitly excluded from the graph's gate, free in
+  macOS conventions, and mnemonic ("Option+Find"). Lives in a new
+  top-level **Search** `CommandMenu` (the discoverable, toolbar-free
+  trigger; toolbar real estate is already busy).
+- **Code (new files).**
+  - `DJRoomba/Music/CatalogSearchDebouncer.swift` — `enum` namespace
+    holding a single pure `decision(for:lastFiredTerm:elapsedSinceLast
+    InputMS:minLength:debounceMS:) -> SearchDecision` (`.fire | .wait
+    | .clear`). **No async, no `Task.sleep`, no Combine, no Timer
+    inside the decider** — it's a total function from inputs; the
+    view wires timing via `.task(id: query)` + `Task.sleep(for:)`.
+    Defaults: `minLength = 2`, `debounceMS = 250` (matches macOS's
+    Spotlight/Music-app live-search feel; long enough that an idle
+    middle keystroke doesn't fire, short enough that a paused user
+    feels live).
+  - `DJRoomba/Music/CatalogSearchService.swift` — `@MainActor
+    @Observable final class`. State: `query` (last committed term),
+    `results: [MusicKit.Song]`, `isSearching`, `lastError`, `hasMore`.
+    Methods: `search(_:)`, `loadMore()`, `dismissError()`, plus a
+    convenience `ingestResult(withCatalogID:using:)` that keeps
+    `MusicKit.Song` inside the search-services boundary (the
+    controller stays MusicKit-free — same trick `CatalogProbeService
+    .ProbeResult.firstSong` plays). **Page size = 25, page cap = 20
+    (≈ 500 result ceiling per query)** — conservative; Apple's catalog
+    is rate-limited, the user is staring at an empty sheet, smaller
+    pages render faster. **Tolerate-and-surface failures** (mirrors
+    `ImportService`'s posture: a failed `nextBatch()` keeps already-
+    loaded pages, sets `lastError`). **Cancellation:** a stored
+    `Task<Void, Never>?` handle that any new `search(_:)` /
+    `loadMore()` cancels before kicking off its own.
+  - `DJRoomba/Views/CatalogSearch/CatalogSearchSheet.swift` — the
+    sheet view itself. `NavigationStack` wrapping a search field (auto-
+    focused on appear via `@FocusState`, native macOS expectation),
+    `Divider`, results body. `.task(id: query)` + `Task.sleep(for:
+    .milliseconds(250))` is the timing wire — if we reach the end of
+    the sleep uncancelled, by construction the debounce window has
+    elapsed; the decider then says fire / wait / clear. Empty-state =
+    `ContentUnavailableView.search`; error-state = inline orange
+    warning row with a Dismiss button (`service.dismissError()`).
+    Sheet sizing: `minWidth: 520 / idealWidth: 620 / minHeight: 420 /
+    idealHeight: 540` — comfortably wide enough for a long
+    "Title — Artist — Album" row + duration column, tall enough for
+    ≥ 6 results without scrolling.
+  - `DJRoomba/Views/CatalogSearch/CatalogSearchResultRow.swift` — one
+    result row: placeholder thumbnail (Phase 4 owns real catalog
+    artwork — `ArtworkProvider` is library-only today, so the
+    `.quaternary` + `music.note` placeholder is honest), title
+    (`.body`), artist + album (`.callout` `.secondary`), monospaced
+    duration. Context-menu **"Add to Playlist ▸"** mirroring
+    `TrackContextMenu`'s library affordance (every user playlist,
+    or "New Playlist with This Song…" if none exist yet).
+- **Code (wiring).**
+  - `DJRoomba/Music/MusicController.swift` — instantiates the new
+    `catalogIngestService: CatalogIngestService` and `catalogSearch:
+    CatalogSearchService`; adds `catalogSearchPresented: Bool` (sheet
+    binding, has to be settable for `Bindable`'s two-way `.sheet`
+    binding under `@Observable`); new `presentCatalogSearch()` (menu
+    target); new `addCatalogResult(catalogID:toAppPlaylist:)` — the
+    two-step seam Phase 1 built. Step 1 hands the catalog id to the
+    search service's `ingestResult(_:using:)` which finds the cached
+    `MusicKit.Song` and routes it through `CatalogIngestService
+    .ingest([song])` → stable `song.id`. Step 2 calls the existing
+    `appPlaylistService.addSongs([songID], to:)` verbatim — catalog
+    and library songs differ only in `id_namespace`; app-playlist
+    membership is namespace-agnostic (the schema decision Phase 1's
+    isolation tests proved). The controller still imports zero
+    MusicKit symbols.
+  - `DJRoomba/Views/MainShellView.swift` — `.sheet(isPresented:
+    Bindable(controller).catalogSearchPresented) { CatalogSearchSheet
+    (isPresented:) }`.
+  - `DJRoomba/App/PlaylistPlayerApp.swift` — new top-level
+    `CommandMenu("Search")` with one button "Search Apple Music…"
+    bound to ⌥⌘F. Inline rationale comment cites the collision
+    cascade with the existing ⌘F bindings AND the vendored
+    `ForceGraph` ⇧⌘F handler so the next reader sees why neither
+    standard variant was chosen.
+- **Tests.**
+  - `Tests/DJRoombaTests/CatalogSearchDebouncerTests.swift` — new
+    `@Suite "Catalog search debouncer (Phase 2)"`. **7 tests, one per
+    invariant:**
+    1. an empty/whitespace-only query is always `.clear` (regardless
+       of elapsed).
+    2. a below-`minLength` query waits (does NOT clear — user is
+       mid-type; both default `minLength=2` and custom `minLength=3`).
+    3. a query equal to `lastFiredTerm` waits — even past the
+       debounce window (no-op re-fire is worthless).
+    4. an above-`minLength` new query past the debounce fires
+       (with the trimmed term).
+    5. an above-`minLength` new query within the debounce waits.
+    6. leading/trailing whitespace is trimmed for both the fired
+       term AND the dedupe check (whitespace-padded duplicate of
+       `lastFired` still suppresses).
+    7. custom `debounceMS` / `minLength` parameters are honored.
+- **Add-to-Genre status.** Grep confirmed: there is no existing
+  "Add to Genre" affordance anywhere in the codebase. The plan's
+  "the new 'Add to Genre ▸' — they're namespace-agnostic already"
+  phrasing presumed it exists; it doesn't. Scoped out as a Phase-2
+  followup (would need a way to add a song to "the genre", which is
+  currently a *derived* synthetic detail keyed off `song.genre_names`,
+  not a writable surface — that's net-new product design, not a
+  plumbing-this-up task).
+- **Skills.**
+  - **Before deciding:** `macos-design` (sheet-vs-pane axiom + search-
+    pattern reference); `swiftui-pro` (data flow — pure decider +
+    `.task(id:)` over `onChange` + stored handle, `@MainActor
+    @Observable` defaults, sheet auto-focus via `@FocusState`).
+  - **After writing:** `swiftui-pro` post-review — pure-decider
+    pattern keeps `body` async-free; the only inline async lives in
+    `.task(id: query)` (the canonical pattern per
+    `references/data.md`); no `foregroundColor` legacy, only
+    `foregroundStyle`; result row uses `Image(systemName:)` +
+    `accessibilityLabel` so VoiceOver speaks "<Title>, <Artist>";
+    `Bindable(controller).catalogSearchPresented` is the modern
+    `@Observable` binding shape (avoids `Binding(get:set:)`). Inline
+    toms-laws self-check: complexity ≤ `ImportService`'s paged loop
+    (this service is just one paginated request type, not a multi-
+    pass import); no new global state; `Task.sleep(for:)` (not
+    `nanoseconds`); structured concurrency only (no GCD); per-row
+    actions extracted as private methods, not inline closures.
+    Airbnb Swift style applied throughout.
+- **Build gates.**
+  - `make check` — clean compile.
+  - `swift test` — **209 tests in 34 suites passed** (before: 202/33;
+    after: 209/34 = +7 tests, +1 suite — exactly the new
+    `CatalogSearchDebouncerTests`).
+  - `make build PROVISION_PROFILE=…/MusicKit_Test_Profile.provision
+    profile` — clean; `build/DJRoomba.app/Contents/embedded.provision
+    profile` present.
+- **Live verification (agent, via computer-use).** Quit any stale
+  DJRoomba; opened `build/DJRoomba.app`; pressed ⌥⌘F; the **Search
+  Apple Music** sheet appeared with the text field auto-focused.
+  Typed "queen"; after ~250 ms debounce + ~1 s network, 6 catalog
+  results rendered with placeholder thumbnails, titles, "<artist> —
+  <album>" secondary lines, and monospaced durations: **Bohemian
+  Rhapsody (5:55) / Another One Bites the Dust / We Will Rock You /
+  Don't Stop Me Now / Somebody to Love / We Are the Champions** —
+  all by Queen, all from "Greatest Hits I, II & III: The Platinum
+  Collection". "Load more" affordance at the bottom (`hasMore =
+  true`). Dismissed the sheet; created a new app playlist with ⌘N
+  ("New Playlist", 0 tracks); reopened the sheet (⌥⌘F); re-typed
+  "queen"; right-clicked Bohemian Rhapsody → "Add to Playlist ▸ New
+  Playlist". The detail pane behind the sheet immediately reflected
+  "1 track" + auto-derived genre chips **"Music, Rock"** (the
+  `song.genre_names` Phase-1 ingest pulled from the catalog song's
+  `.genreNames`), and the track table showed row 1: Bohemian Rhapsody
+  / Queen / Greatest Hits…/ 5:55 / 0 plays / —. Sidebar count went
+  from "0 tracks" → "1 track". SQLite confirms the row:
+  `SELECT id, music_item_id, id_namespace, title, artist_name FROM
+  song WHERE id_namespace='catalog'` returned
+  `8977B3EA-…|1440650711|catalog|Bohemian Rhapsody|Queen` — the same
+  globally-stable catalog id Phase 0 printed in its verdict
+  (`plans/catalog-playlists.md` invariant: catalog ids are stable;
+  no D1-style round-trip risk).
+- **What this empirically establishes.**
+  1. The Phase-1 ingest seam works end-to-end on the live signed
+     build — a catalog `MusicKit.Song` returned by `MusicCatalog
+     SearchRequest` round-trips through `CatalogIngestService.ingest`
+     into SQLite with `id_namespace='catalog'` and the catalog
+     `music_item_id`, exactly as designed.
+  2. App playlists are genuinely namespace-agnostic in practice —
+     the same `appPlaylistService.addSongs([songID], to:)` call adds
+     a `.catalog` song to a user playlist with zero code-path
+     difference from a library song, and the detail pane / sidebar
+     count / genre chips all update correctly off the catalog row's
+     v4 metadata (the genre derivation that powers the chips reads
+     `song.genre_names`, which Phase-1 ingest populates from
+     `.genreNames` verbatim — and the Bohemian-Rhapsody catalog row
+     came back tagged "Music, Rock").
+  3. The pure debouncer + `.task(id:)` pattern works as designed in
+     live use — typed "queen" once, got exactly one search fire, no
+     duplicate request bursts.
+- **Polish gap (followup).** The empty-state "ContentUnavailable
+  View.search" (no-args) reads "No Results" + "Check the spelling or
+  try a new search" on first sheet open before the user has typed
+  anything. That's the system's no-text variant; a "Type to search"
+  initial state would be friendlier. Two-line change next time we
+  touch the sheet (gate on `query.isEmpty` separately from
+  "searched-but-empty"). Not blocking.
+- **Deliberately NOT done this phase.**
+  - **Inline play of a search result.** Phase 3 owns the playback
+    flip (the dormant `PlaybackResolver` catalog branch). A "Play"
+    affordance now would promise something the resolver can't deliver.
+  - **Catalog artwork.** Phase 4 owns artwork — placeholder for now
+    (catalog rows have public artwork URLs, unlike library, so
+    Phase 4 is straightforwardly easier than the existing library
+    artwork path; the row is ready, just plumbing to add).
+  - **"Add to Genre ▸"** affordance — does not exist anywhere yet
+    (see Add-to-Genre status above; net-new design, scoped out).
+  - **Drag-to-sidebar from a catalog result.** Library rows drag
+    `SongDragItem(songID:)` — but a catalog result has NO `song.id`
+    until ingest happens. Wiring drag from a search result would
+    require either eager-ingesting on drag-begin (wasteful — most
+    drags will be cancelled) or async drag prep (awkward — the drag
+    payload would arrive after the drop). The context-menu path is
+    the always-reachable equivalent and is sufficient for this
+    phase. Drag wiring noted as a small followup if it turns out to
+    matter; for now the plan's "Add to Playlist ▸" affordance is
+    fully realized.
+- **Files touched / added.**
+  - `DJRoomba/Music/CatalogSearchDebouncer.swift` (new) — pure
+    decider.
+  - `DJRoomba/Music/CatalogSearchService.swift` (new) — paged
+    `MusicCatalogSearchRequest` issuer.
+  - `DJRoomba/Views/CatalogSearch/CatalogSearchSheet.swift` (new) —
+    sheet UI + timing wire.
+  - `DJRoomba/Views/CatalogSearch/CatalogSearchResultRow.swift`
+    (new) — per-result row + Add-to-Playlist menu.
+  - `DJRoomba/Music/MusicController.swift` — `catalogIngestService`
+    + `catalogSearch` instances, `catalogSearchPresented` state,
+    `presentCatalogSearch()` + `addCatalogResult(catalogID:toApp
+    Playlist:)` methods.
+  - `DJRoomba/Views/MainShellView.swift` — `.sheet(isPresented:)`
+    on the shell.
+  - `DJRoomba/App/PlaylistPlayerApp.swift` — new `CommandMenu
+    ("Search")` with the ⌥⌘F shortcut + collision-cascade comment.
+  - `Tests/DJRoombaTests/CatalogSearchDebouncerTests.swift` (new) —
+    7 decider tests, one per invariant.
+  - `APPLE-TOUCHPOINTS.md` — §5 updated: `MusicCatalogSearchRequest`
+    now annotated as **paged via `MusicItemCollection<Song>
+    .hasNextBatch` / `.nextBatch()` (LIVE)**, with the new
+    `CatalogSearchService` file:line citations.
+  - `PROGRESS.md` — this entry.
+
+Nothing committed.
+
+## 2026-05-20 — ✅ Catalog Phase 1 (ingest mapping) code-complete
+
+The pure SQLite half of `plans/catalog-playlists.md`. Catalog `MusicKit.Song`s
+can now land in the `song` table with `idNamespace: .catalog` — the mirror
+of `ImportService.song(from:)`'s `.library` rule. No schema change, no
+Phase-3 resolver flip, no UI, no artwork. Phase-2's catalog search surface
+calls into this service the moment it exists.
+
+- **Code.**
+  - `DJRoomba/Music/CatalogIngestService.swift` — new `@MainActor final
+    class` (plain, NOT `@Observable` — no streamed state to surface; the
+    sibling shape is closer to a request issuer than `MusicSubscriptionService`).
+    Single public `ingest(_ songs: [MusicKit.Song]) async throws ->
+    [String]` returns the stable `song.id`s in input order. Mirrors
+    `ImportService.writePlaylist`'s two-structure de-dupe (`songsByKey` +
+    `orderedKeys`) so a caller passing the same catalog song twice still
+    gets two correct ids back from one upsert. Reuses `upsertSongs` +
+    `songIDsByKey` — **no new write path, no new store API**. Tolerates
+    empty input (no-op, returns `[]`).
+  - Two `nonisolated static` mapping helpers: `song(fromCatalog:)` extracts
+    fields from a live `MusicKit.Song` and forwards to
+    `song(fromCatalogFields:…)` — the pure `Sendable`-in/`Sendable`-out
+    variant that's unit-testable without a live `MusicKit.Song` (which
+    can't be constructed in tests). Same factor-for-testability idiom as
+    `ImportService.underlyingItemID(of:)`. Provenance is hard-coded
+    `.catalog`. `artworkURL` is `nil` (Phase 4 owns artwork). Every v4
+    "free metadata" field passes through verbatim.
+- **Tests.**
+  - `Tests/DJRoombaTests/CatalogIngestTests.swift` — 4 pure mapping tests:
+    every field round-trips with `.catalog` namespace; `isExplicit`
+    derives from the boolean caller passes; a sparse catalog song reads
+    back with nil/[] defaults; each call mints a fresh stable `song.id`
+    UUID (the store's UPSERT preserves it on conflict, the SAME guarantee
+    the library path relies on).
+  - `Tests/DJRoombaTests/CatalogIsolationTests.swift` — 3 isolation tests:
+    (A) a catalog song survives both `pruneApplePlaylists(keeping: [])`
+    and `deleteApplePlaylists(ids: …)` — the library-import end-of-run
+    converge can never accidentally take catalog rows with it.
+    (B) catalog + library rows with the SAME `music_item_id` coexist as
+    two distinct rows with different stable `song.id`s — the composite
+    unique key keeps them disjoint; a library re-import never clobbers a
+    `.catalog` row.
+    (C) re-ingesting the same catalog song is idempotent: stable id
+    preserved across UPSERT, no duplicate row, mutable metadata refreshed.
+- **Skills.** swiftui-pro consulted before (confirmed plain `@MainActor
+  final class` over `@Observable` — no streamed state) and after writing
+  (no findings against `swift.md` / `hygiene.md`: `Date.now`, no GCD, no
+  force unwrap/try, modern concurrency, single type per file). Inline
+  toms-laws self-check: complexity ≤ `ImportService`; no new global state;
+  pure mapping is pure; reuses existing store API verbatim. Airbnb Swift
+  style applied (2-space indent, MARK sections Lifecycle/Internal/Private,
+  test names in backticks). macos-design — N/A (no UI).
+- **Gates.**
+  - `make check` — clean.
+  - `swift test` — **202 tests in 33 suites passed** (before: 195/31;
+    after: 202/33 = +7 tests, +2 suites; 4 mapping + 3 isolation).
+  - `make build PROVISION_PROFILE=…/MusicKit_Test_Profile.provisionprofile`
+    — clean; `build/DJRoomba.app/Contents/embedded.provisionprofile`
+    present.
+- **What this empirically establishes.** Catalog songs can be persisted
+  alongside library songs without any cross-contamination. The
+  one-way-isolation invariant the data model was designed for now has
+  end-to-end test coverage on real `LibraryStore` writes (not just unit
+  store tests).
+- **Deliberately NOT done this phase.**
+  - No UI / Debug menu item (Phase 1 verification is `swift test`).
+  - No `PlaybackResolver` catalog branch flip (Phase 3 — leave dormant).
+  - No catalog artwork storage (Phase 4 owns artwork re-resolution).
+  - No `apple_playlist*` writes (catalog ingest does not mint a playlist
+    — app-playlist FK targets our `song.id`, so a catalog row is eligible
+    for any app playlist the instant it exists).
+  - No schema migration (the composite unique key was designed for this).
+- **Followups for Phase 2.** The search surface should: page
+  `MusicCatalogSearchRequest`; build a `[MusicKit.Song]` batch from
+  selected results; call `catalogIngestService.ingest(_:)` and use the
+  returned `[String]` of `song.id`s directly with the existing
+  `addSongsToAppPlaylist(_:songIDs:)` affordance. No new types needed at
+  the seam — the field-taking mapper means a Phase-2 author who needs to
+  unit-test the search→ingest plumbing can synthesize records without
+  touching MusicKit.
+- **Files touched.**
+  - `DJRoomba/Music/CatalogIngestService.swift` (new).
+  - `Tests/DJRoombaTests/CatalogIngestTests.swift` (new).
+  - `Tests/DJRoombaTests/CatalogIsolationTests.swift` (new).
+  - `APPLE-TOUCHPOINTS.md` — §5 gained a short informational sub-section
+    listing the `MusicKit.Song` fields ingest consumes; no API-surface
+    change.
+  - `PROGRESS.md` — this entry.
+
+Nothing committed.
+
+## 2026-05-20 — ✅ Catalog Phase 0 FULLY PASSED (playback half)
+
+The catalog playback proof. Builds on the same morning's search-half pass:
+the gate's second half — actually playing a catalog `Song` through
+`ApplicationMusicPlayer` — is now empirically green on the dev-signed,
+profile-embedded build. Phases 1–4 of `plans/catalog-playlists.md` are
+unblocked.
+
+- **Code.** Extended (not duplicated) the existing Phase-0 probe action.
+  - `CatalogProbeService.searchProbe()` now returns a `ProbeResult`
+    struct `{ verdict: String, firstSong: MusicKit.Song? }` instead of
+    just the verdict string. The `MusicKit.Song` stays inside the
+    service boundary (`MusicController` does not import MusicKit; it
+    just hands the opaque value back to `PlaybackService`, the same
+    way `PlaybackResolver.Resolution.songs` flows through today).
+  - `PlaybackService.pause()` — a tiny idempotent direct call to
+    `ApplicationMusicPlayer.shared.pause()` + a snapshot refresh, so
+    the probe (which *knows* it wants the player paused) doesn't risk
+    toggling a not-yet-playing engine back on via `togglePlayPause()`.
+  - `MusicController.runCatalogAccessProbe()` now: searches; on a
+    non-nil `firstSong` calls `playback.play(songs:[firstSong], …)`
+    (the Phase-5 confirmed auto-start path with `confirmPlaybackStarted`);
+    on `true` waits `Task.sleep(for: .milliseconds(1500))` then calls
+    `playback.pause()`; appends the playback-half verdict to the
+    search-half verdict for the popover. Failure paths surface
+    `playback.lastError` verbatim and the verdict tail becomes
+    `Phase 0 SEARCH PASSED, PLAYBACK FAILED.` Structured concurrency
+    only (no GCD).
+  - `MainShellView`'s `catalogProbeResult` branch unchanged — the
+    existing calm dismissible-popover idiom (360pt width,
+    `textSelection(.enabled)`) renders the longer two-half verdict
+    cleanly; no need for a modal alert.
+- **Style + review.** swiftui-pro + macos-design consulted before
+  deciding (keep the popover idiom; struct return over coupling
+  CatalogProbeService to PlaybackService; add `pause()` over reusing
+  `togglePlayPause()`). swiftui-pro post-review on the diff: no
+  findings. Airbnb Swift style applied (2-space indent, doc comments
+  matching the surrounding voice).
+- **Build gates.** `make check` clean (16 s, debug compile-only).
+  `swift test` 195/31 green. `make build
+  PROVISION_PROFILE=…/MusicKit_Test_Profile.provisionprofile` clean;
+  `build/DJRoomba.app/Contents/embedded.provisionprofile` present;
+  codesign valid on disk + satisfies Designated Requirement.
+- **Live verification (agent, via computer-use).** Quit any stale
+  DJRoomba; opened `build/DJRoomba.app`; Debug ▸ Catalog Access Probe
+  (Phase 0). The now-playing bar flipped to **"Bohemian Rhapsody —
+  Queen"** mid-action (audible/visible); ~1.5 s later the engine was
+  paused. Popover verdict, verbatim:
+
+  > ✅ Catalog access OK — the MusicKit App Service is live for this App ID.
+  >
+  > MusicCatalogSearchRequest returned 5 song(s).
+  > First: "Bohemian Rhapsody" — Queen
+  > Catalog id: 1440650711 (globally stable)
+  >
+  > ✅ Playback OK — ApplicationMusicPlayer confirmed `.playing` and was paused after ~1.5 s.
+  >
+  > **Phase 0 FULLY PASSED.**
+
+- **What this empirically establishes.**
+  1. A `MusicCatalogSearchRequest`-returned catalog `Song` plays
+     end-to-end through `ApplicationMusicPlayer` on a dev-signed,
+     profile-embedded macOS build — no developer-token JWT, no
+     `api.music.apple.com`, no key-signing server. The plan's "access
+     question" is fully answered for both halves now.
+  2. The Phase-5 auto-start path (`play()` → `confirmPlaybackStarted()`,
+     with the one bounded re-issue) works for catalog `Song`s just like
+     library ones — the path is namespace-agnostic, as expected.
+  3. The proven start gates the playback-half tail; the same UI surface
+     a real distribution-channel probe could reuse.
+- **What's still unproven / next.** Phase 1 — catalog → `song` ingest
+  (`Song(fromCatalog:)` mapping minting `idNamespace: .catalog`, the
+  mirror of the library import rule). Phase 2 — subordinate catalog
+  search surface. Phase 3 — flip `PlaybackResolver`'s dormant catalog
+  branch on for mixed library+catalog queues. Phase 4 — catalog
+  artwork (public URL — easier than library). A *Developer ID*
+  provisioning profile in `make dist` still needs the same end-to-end
+  validation separately for the eventual notarized build (in scope of
+  the existing `PROVISION_PROFILE` hook).
+- **Files touched.**
+  - `DJRoomba/Music/CatalogProbeService.swift` — `searchProbe()`
+    returns `ProbeResult` struct; carries `firstSong`.
+  - `DJRoomba/Music/PlaybackService.swift` — new `pause()`.
+  - `DJRoomba/Music/MusicController.swift` —
+    `runCatalogAccessProbe()` layers the playback half via
+    `self.playback`.
+  - `APPLE-TOUCHPOINTS.md` — `MusicCatalogSearchRequest` flipped
+    `GATED → LIVE` now that playback is proven end-to-end.
+  - `PROGRESS.md` — this entry.
+
+Nothing committed.
+
+## 2026-05-20 — ✅ Catalog Phase 0 SEARCH half PASSED (provisioning profile)
+
+Empirically resolves the project's pre-flagged open question: a dev-signed
+build **does** need an embedded provisioning profile to obtain the
+auto-vended MusicKit developer token for catalog APIs on macOS.
+
+- **Profile.** User created an Apple Development **macOS App
+  Development** provisioning profile ("MusicKit Test Profile") for App
+  ID `org.sockpuppet.djroomba` (Team KK7E9G89GW), this Mac registered
+  (Provisioning UDID `00006001-000A603A0102801E`), saved at the repo
+  root as `MusicKit_Test_Profile.provisionprofile`. Decoded fine
+  (application-identifier `KK7E9G89GW.org.sockpuppet.djroomba`, OSX,
+  expires 2027-05-20). No MusicKit-specific entitlement key in the
+  profile — expected; native MusicKit has none, the App-ID-bound profile
+  IS the assertion.
+- **Build.** `make build PROVISION_PROFILE=…/MusicKit_Test_Profile.
+  provisionprofile` — the pre-wired `build.sh` hook copied it to
+  `Contents/embedded.provisionprofile`, codesign clean
+  (`valid on disk`, satisfies Designated Requirement).
+- **Re-probe.** Identical Debug → Catalog Access Probe (Phase 0). Now:
+  **✅ Catalog access OK** — `MusicCatalogSearchRequest` returned 5
+  songs; first hit "Bohemian Rhapsody" — Queen, catalog id 1440650711.
+  Same code path, same Apple Account, same signed binary except for the
+  embedded profile → the profile is the sole variable that flipped it.
+- **Conclusion.** Cause #2 of the 2026-05-19 entry **confirmed**.
+  Catalog-on-macOS-outside-App-Store needs both the App-ID MusicKit App
+  Service *and* an embedded provisioning profile asserting it; library
+  needs neither (Phase 1 still holds). For distribution: a *Developer
+  ID* provisioning profile (no device list) embedded by `make dist`
+  should carry the assertion the same way — to be verified separately,
+  but the `PROVISION_PROFILE` hook works on `make dist` too.
+- **Status.** Phase 0 **search half** PASSED. **Playback half** — one
+  catalog `Song` actually plays via `ApplicationMusicPlayer` — still
+  pending. Phase 1 (catalog→`song` ingest) and Phase 2 (subordinate
+  catalog search surface) are now unblocked once the playback half is
+  green. Not committed.
+
+## 2026-05-19 — Catalog Phase 0 probe built + run signed → FAILED (developer-token)
+
+Smallest-possible Phase-0 access test for `plans/catalog-playlists.md`.
+
+- **Built.** New `CatalogProbeService` (one `MusicCatalogSearchRequest`,
+  never throws — returns a readable verdict). `MusicController`:
+  `catalogProbeResult` + `runCatalogAccessProbe()` +
+  `dismissCatalogProbeResult()`, mirroring the `genreImportNotice` idiom.
+  Debug menu item "Catalog Access Probe (Phase 0)". `MainShellView`:
+  reuses the calm dismissible `.status` popover (priority branch so the
+  explicit one-shot isn't masked). swiftui-pro + macos-design consulted
+  (chose the existing notice idiom over a modal alert; zero custom
+  bindings). `make check` + `make build` green; **signed dev build signed
+  cleanly in-session with no keychain prompt** (codesign is
+  non-interactively authorized here — earlier "user must sign" assumption
+  was wrong).
+- **Ran it signed (agent, via computer-use).** Verdict:
+  **❌ Catalog request FAILED — `MusicTokenRequestError`: "Failed to
+  request developer token".** The probe itself works perfectly; the gate
+  did its job. **Catalog access is NOT live yet for this App ID.**
+- **Empirical finding (updates the plan's "access question").** A
+  dev-signed build (Apple Development, **no embedded provisioning
+  profile**, `PROVISION_PROFILE=""`) with the App-ID MusicKit App Service
+  freshly enabled still **cannot obtain the auto developer token**. So the
+  plan's optimistic "no profile needed for catalog on a dev build" is
+  *empirically challenged* (it was always flagged unproven). Leading
+  hypotheses, in order: (1) portal propagation delay (service enabled
+  minutes prior — retry later); (2) **an embedded Apple Development
+  provisioning profile that asserts the MusicKit App Service is required
+  for developer-token issuance** (the pre-wired `PROVISION_PROFILE` hook —
+  USER portal step); (3) the App-Service toggle didn't actually save / is
+  on the wrong identifier. Library MusicKit still works (no token needed).
+- **Incidental, disclosed.** Before realizing a stale
+  `/Applications/DJRoomba.app` (not the fresh `build/` binary) was
+  frontmost, a keyboard-nav misfire activated **Debug → "Seed 500 Random
+  Plays"** on that old instance → 500 synthetic `play_history` rows in the
+  shared SQLite (debug-intended, non-destructive; user to reset if
+  unwanted). Stale instance quit; `build/DJRoomba.app` is the running one.
+- **Re-probe @ ~30 min registered → IDENTICAL failure.** User confirmed
+  the App ID + MusicKit App Service has been saved ~30 min (portal
+  screenshot verified: explicit `org.sockpuppet.djroomba`, Team
+  KK7E9G89GW, App Services▸MusicKit checked, Save greyed = persisted).
+  ⇒ **Cause #1 (propagation) and #3 (not-saved/wrong-id) RULED OUT.**
+  **Cause #2 — an embedded Apple Development provisioning profile
+  asserting the MusicKit App Service is required for developer-token
+  issuance — is now the lead hypothesis** (matches the pre-wired
+  `PROVISION_PROFILE` open question; library needs no token so Phase 1
+  was profile-free).
+- **Next:** generate a macOS **Apple Development** provisioning profile
+  for the App ID (USER portal step; needs the Apple Development cert + the
+  Mac registered as a device), embed it via `PROVISION_PROFILE`
+  (agent build-wiring), rebuild, re-probe. Phase 0 stays the hard gate;
+  nothing else proceeds. Not committed.
+
 ## 2026-05-17 — ✅ Always-visible import progress + error surfacing
 
 Field report (a 2nd machine, same library): "Reimport Everything" gave

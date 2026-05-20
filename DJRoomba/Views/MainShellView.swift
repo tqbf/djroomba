@@ -61,7 +61,38 @@ struct MainShellView: View {
       // (so a populated-library import/genre error is finally visible +
       // readable instead of silent), or nothing when idle.
       ToolbarItem(placement: .status) {
-        if let activity = controller.importActivity {
+        if let probe = controller.catalogProbeResult {
+          // Phase-0 catalog access probe verdict. Takes priority in the
+          // slot: it is an explicit, user-invoked one-shot the user is
+          // waiting to see, so it must not be masked by ambient
+          // import/library state. Same calm dismissible-popover idiom as
+          // the genre notice; the chip label is fixed (the verdict is
+          // multi-line — the full, selectable text lives in the popover).
+          Button {
+            showingCatalogProbe = true
+          } label: {
+            Label("Catalog probe result", systemImage: "info.circle")
+              .font(.callout)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+          }
+          .help("Phase-0 catalog access probe result")
+          .popover(isPresented: $showingCatalogProbe, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+              Text(probe)
+                .font(.callout)
+                .textSelection(.enabled)
+                .multilineTextAlignment(.leading)
+              Button("Dismiss") {
+                showingCatalogProbe = false
+                controller.dismissCatalogProbeResult()
+              }
+            }
+            .frame(width: 360, alignment: .leading)
+            .padding()
+          }
+          .accessibilityLabel("Catalog access probe result")
+        } else if let activity = controller.importActivity {
           HStack(spacing: 6) {
             ProgressView()
               .controlSize(.small)
@@ -166,6 +197,14 @@ struct MainShellView: View {
     .safeAreaInset(edge: .bottom, spacing: 0) {
       NowPlayingBar()
     }
+    // Catalog search sheet — the subordinate Phase-2 surface
+    // (`plans/catalog-playlists.md`). Triggered by the Search menu
+    // command ⇧⌘F via `controller.catalogSearchPresented`; the sheet
+    // owns its own focus + dismiss. Sheet (not pane): macos-design
+    // "appear when needed, get out of the way" — playlists stay first.
+    .sheet(isPresented: Bindable(controller).catalogSearchPresented) {
+      CatalogSearchSheet(isPresented: Bindable(controller).catalogSearchPresented)
+    }
   }
 
   // MARK: Private
@@ -198,5 +237,11 @@ struct MainShellView: View {
   /// affordances are mutually exclusive in the `.status` slot but each owns
   /// its own presentation state.
   @State private var showingGenreNotice = false
+
+  /// Drives the Phase-0 catalog probe verdict's popover. Independent state,
+  /// same calm idiom as `showingGenreNotice`; the probe branch takes priority
+  /// in the `.status` slot so an explicitly-invoked diagnostic is never
+  /// masked by ambient import/library state.
+  @State private var showingCatalogProbe = false
 
 }
