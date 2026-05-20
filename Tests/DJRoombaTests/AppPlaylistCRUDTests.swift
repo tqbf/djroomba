@@ -65,16 +65,51 @@ struct AppPlaylistCRUDTests {
   }
 
   @Test
-  func `add appends and allows duplicates`() async throws {
+  func `add dedupes against existing playlist membership`() async throws {
+    // Phase-2 corrective: a song appears in any one app playlist at most
+    // once. Second call's 'a' is silently dropped; 'c' is appended.
     let store = try TestSupport.freshStore()
     try await seedSongs(store, ["a", "b", "c"])
     let pl = try await store.createAppPlaylist(named: "P")
 
     try await store.addSongsToAppPlaylist(pl.id, songIDs: ["a", "b"])
-    try await store.addSongsToAppPlaylist(pl.id, songIDs: ["c", "a"]) // 'a' again
+    try await store.addSongsToAppPlaylist(pl.id, songIDs: ["c", "a"]) // 'a' deduped
 
     let ids = try await store.songs(inAppPlaylist: pl.id).map(\.id)
-    #expect(ids == ["a", "b", "c", "a"], "append preserves order; a song may repeat")
+    #expect(ids == ["a", "b", "c"], "existing membership is the dedupe gate; order preserved")
+  }
+
+  @Test
+  func `add dedupes within the input batch`() async throws {
+    // Same call passing the same id twice: only one row lands.
+    let store = try TestSupport.freshStore()
+    try await seedSongs(store, ["x", "y"])
+    let pl = try await store.createAppPlaylist(named: "P")
+
+    try await store.addSongsToAppPlaylist(pl.id, songIDs: ["x", "y", "x"])
+
+    let ids = try await store.songs(inAppPlaylist: pl.id).map(\.id)
+    #expect(ids == ["x", "y"], "intra-batch dupes collapse to first occurrence")
+  }
+
+  @Test
+  func `add of only existing songs is a no op`() async throws {
+    // All-dupes path: no INSERT, no `updated_at` touch, no row count delta.
+    let store = try TestSupport.freshStore()
+    try await seedSongs(store, ["a", "b"])
+    let pl = try await store.createAppPlaylist(named: "P")
+    try await store.addSongsToAppPlaylist(pl.id, songIDs: ["a", "b"])
+    let countBefore = try await store.songs(inAppPlaylist: pl.id).count
+
+    // Adding only-dupes from any combination of within-batch / existing.
+    try await store.addSongsToAppPlaylist(pl.id, songIDs: ["a", "b", "a"])
+
+    let countAfter = try await store.songs(inAppPlaylist: pl.id).count
+    #expect(countAfter == countBefore, "all-dupes add must not grow the playlist")
+    #expect(
+      try await store.songs(inAppPlaylist: pl.id).map(\.id) == ["a", "b"],
+      "no positional churn either",
+    )
   }
 
   @Test

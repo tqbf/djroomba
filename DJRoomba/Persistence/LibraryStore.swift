@@ -856,11 +856,26 @@ struct LibraryStore: Sendable {
     }
   }
 
-  /// Append `songIDs` to the end of an app playlist (duplicates allowed —
-  /// a song can appear in a playlist more than once). Batch idiom: one
-  /// chunked multi-row INSERT in a single transaction, with the starting
-  /// position read once inside that transaction so positions stay dense and
-  /// can't race a concurrent add. `updated_at` is stamped in the same write.
+  /// Append `songIDs` to the end of an app playlist, **deduping** both
+  /// within the input batch and against existing playlist membership: a song
+  /// appears in any one app playlist at most once. A call that contributes
+  /// no new rows (every id was already in the playlist, or the input was
+  /// only intra-batch duplicates) is a **true no-op** — no INSERT runs, and
+  /// `updated_at` is NOT bumped (the playlist genuinely didn't change). This
+  /// dedupe is **scoped strictly to `app_playlist_track`**: the
+  /// `play_history` / `song_stat` table and the Recently Played surface are
+  /// fed from a different write path and are unaffected — a song still
+  /// records every time it plays.
+  ///
+  /// Batch idiom: one chunked multi-row INSERT in a single transaction,
+  /// with the starting position read once inside that transaction so
+  /// positions stay dense and can't race a concurrent add. The dedupe
+  /// read (`SELECT song_id … WHERE app_playlist_id = ?`) runs inside the
+  /// same write transaction, atomic with the membership read it gates.
+  /// `updated_at` is stamped in the same write iff at least one row was
+  /// inserted. Existing duplicates from before this dedupe was introduced
+  /// are NOT removed (no surreptitious data mutation); they persist until
+  /// the user explicitly removes them.
   func addSongsToAppPlaylist(
     _ playlistID: String,
     songIDs: [String],
@@ -870,6 +885,24 @@ struct LibraryStore: Sendable {
     // 3 vars/row → chunk under the 999-variable cap.
     let maxRowsPerChunk = Self.sqliteVariableLimit / 3
     try await database.dbQueue.write { db in
+      // Dedupe phase. Atomic with the position-read + INSERT below — the
+      // whole sequence runs inside one write transaction, so a concurrent
+      // add can't slip a row between our existing-membership read and
+      // our INSERT.
+      let existingIDs = try Set(String.fetchAll(
+        db,
+        sql: "SELECT song_id FROM app_playlist_track WHERE app_playlist_id = ?",
+        arguments: [playlistID],
+      ))
+      var seenInBatch = Set<String>()
+      let toInsert = songIDs.filter { id in
+        guard !existingIDs.contains(id) else { return false }
+        return seenInBatch.insert(id).inserted
+      }
+      // All-dupes / intra-batch-only-dupes path: nothing to write, no
+      // touch. The playlist genuinely did not change.
+      guard !toInsert.isEmpty else { return }
+
       let nextPosition = try Int.fetchOne(
         db,
         sql: """
@@ -879,7 +912,7 @@ struct LibraryStore: Sendable {
         arguments: [playlistID],
       ).map { $0 + 1 } ?? 0
 
-      let positioned = songIDs.enumerated().map {
+      let positioned = toInsert.enumerated().map {
         (position: nextPosition + $0.offset, songID: $0.element)
       }
       for chunk in positioned.chunked(into: maxRowsPerChunk) {
