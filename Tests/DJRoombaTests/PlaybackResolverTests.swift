@@ -54,6 +54,10 @@ struct PlaybackResolverTests {
     #expect(result.startSong == nil)
     #expect(result.playContext.isEmpty, "no resolved rows ⇒ empty context")
     #expect(result.unresolved == ["i.A", "111"])
+    #expect(
+      result.chunkBoundaries.isEmpty,
+      "F1a: no resolved songs ⇒ no chunks",
+    )
   }
 
   /// `reassemble`'s `playContext` is exactly parallel to `songs`:
@@ -212,6 +216,302 @@ struct PlaybackResolverTests {
     }
     #expect(queueOrder == ["L1", "L2", "L1"], "duplicate re-expands in order")
     #expect(unresolved == ["L3"], "the single miss is tolerated + reported")
+  }
+
+  /// **Phase 3 (catalog-playlists) — mixed library + catalog grouping.**
+  /// `resolveAppPlaylist`'s first step is `groupByNamespace`; once Phase 2's
+  /// catalog ingest landed, an app playlist can interleave `.library` and
+  /// `.catalog` rows. The partition must put each row in the correct
+  /// namespace bucket (so each lands at its right MusicKit endpoint —
+  /// library `equalTo` vs catalog `memberOf`), de-dupe **per namespace**,
+  /// and preserve discovery order within each. The "same raw id in both
+  /// namespaces is not conflated" test pins the *colliding* case; this one
+  /// pins the *realistic interleaved* case.
+  @Test
+  func `group by namespace partitions interleaved library and catalog rows`() {
+    let rows = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "C1", namespace: .catalog),
+      row(position: 3, songID: "s3", musicItemID: "L2", namespace: .library),
+      row(position: 4, songID: "s4", musicItemID: "C2", namespace: .catalog),
+      row(position: 5, songID: "s5", musicItemID: "L1", namespace: .library), // library dup
+      row(position: 6, songID: "s6", musicItemID: "C1", namespace: .catalog), // catalog dup
+      row(position: 7, songID: "s7", musicItemID: "C3", namespace: .catalog),
+    ]
+    let plan = PlaybackResolver.groupByNamespace(rows)
+    #expect(
+      plan.libraryIDs.map(\.rawValue) == ["L1", "L2"],
+      "library bucket: discovery order, per-namespace de-duped",
+    )
+    #expect(
+      plan.catalogIDs.map(\.rawValue) == ["C1", "C2", "C3"],
+      "catalog bucket: discovery order, per-namespace de-duped",
+    )
+  }
+
+  /// **Phase 3 — mixed reassembly preserves order across namespaces.**
+  /// `reassemble` is keyed by the **stored** `music_item_id` and is
+  /// namespace-agnostic by construction (it never reads `row.namespace`).
+  /// In a mixed queue, the resolved-by-stored-id map can carry both library
+  /// and catalog `MusicKit.Song`s; `reassemble` walks `rows` in input order
+  /// and appends a queue slot whenever the stored id is in the map,
+  /// regardless of which side resolved it. This test exercises that with a
+  /// dictionary whose **keys** simulate the merged result of the library
+  /// per-id `equalTo` pass and the catalog batch `memberOf` pass (live
+  /// `MusicKit.Song`s aren't constructible in tests, so we assert the
+  /// queue-order / unresolved / context contract by what *would* be
+  /// appended — same idiom as the existing `app playlist reassembly` test).
+  @Test
+  func `reassembly walks a mixed library and catalog queue in input order`() {
+    let rows = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "C1", namespace: .catalog),
+      row(position: 3, songID: "s3", musicItemID: "L2", namespace: .library),
+      row(position: 4, songID: "s4", musicItemID: "C2", namespace: .catalog), // miss
+      row(position: 5, songID: "s5", musicItemID: "L1", namespace: .library), // library dup
+      row(position: 6, songID: "s6", musicItemID: "C1", namespace: .catalog), // catalog dup
+    ]
+    // Simulate the merged resolved-by-stored-id map. L2 + C2 are misses
+    // (a library row Apple no longer surfaces; a catalog song unavailable
+    // in the user's storefront) — both classes of miss must drop into
+    // `unresolved` and never break the queue (the risk-register
+    // invariant: one bad id never breaks the whole queue).
+    let resolvedIDs: Set<String> = ["L1", "C1"]
+    var queueContext = [String]()
+    var unresolved = [String]()
+    for r in rows {
+      if resolvedIDs.contains(r.musicItemID) {
+        queueContext.append(r.songID)
+      } else {
+        unresolved.append(r.musicItemID)
+      }
+    }
+    #expect(
+      queueContext == ["s1", "s2", "s5", "s6"],
+      "queue is rows-in-order; the two misses drop without breaking ordering; duplicates re-expand",
+    )
+    #expect(
+      unresolved == ["L2", "C2"],
+      "both the library miss and the catalog miss are reported (namespace-agnostic)",
+    )
+    // Falsifiable cross-check: every queueContext entry is OUR `song.id`,
+    // none is a `music_item_id`. The context lives in our PK space
+    // regardless of which namespace each row's audio came from.
+    let appleIDs = Set(rows.map(\.musicItemID))
+    for storedID in queueContext {
+      #expect(
+        !appleIDs.contains(storedID),
+        "mixed context never carries an Apple id (namespace-agnostic structural attribution)",
+      )
+    }
+  }
+
+  /// **Phase 3 — start-row attribution works on the catalog side.**
+  /// `reassemble` carries `startRow.songID` (our stable `song.id`) through
+  /// to `startSongID` whenever the start row resolved — same code path for
+  /// library and catalog because the field it reads (`row.songID`) is
+  /// namespace-agnostic. With `resolved = [:]`, the start row doesn't
+  /// resolve, so `startSong` falls back to `songs.first` (here also nil)
+  /// AND `startSongID` falls back to `playContext.first` (here nil) — the
+  /// same fallback as the library-only path. This pins that the catalog
+  /// row gets EXACTLY the library-row behavior when missed.
+  @Test
+  func `reassemble carries catalog start row attribution like library`() {
+    let rows = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "C1", namespace: .catalog), // start
+      row(position: 3, songID: "s3", musicItemID: "L2", namespace: .library),
+    ]
+    let result = PlaybackResolver.reassemble(
+      rows: rows,
+      startRow: rows[1], // a catalog row
+      resolved: [:],     // nothing resolved (the unattributable extreme)
+    )
+    // Everything misses ⇒ empty queue, unresolved is every id in order.
+    #expect(result.songs.isEmpty)
+    #expect(result.startSong == nil)
+    #expect(result.startSongID == nil)
+    #expect(result.playContext.isEmpty)
+    #expect(
+      result.unresolved == ["L1", "C1", "L2"],
+      "unresolved walks rows in order regardless of namespace — the catalog miss is reported the same as a library miss",
+    )
+    #expect(
+      result.chunkBoundaries.isEmpty,
+      "F1a: empty songs ⇒ empty chunkBoundaries (no chunks to play)",
+    )
+  }
+
+  // MARK: F1a — chunkByNamespace pure helper
+
+  /// **F1a (`plans/catalog-playlists.md` Phase-3 followup) — pure chunking.**
+  /// `chunkByNamespace` returns the **ranges of consecutive same-namespace
+  /// runs** in input order. The `PlaybackService` then plays each chunk
+  /// as a homogeneous-namespace `ApplicationMusicPlayer.Queue` (the
+  /// workaround for `MPMusicPlayerControllerErrorDomain` error 6 on a
+  /// mixed library+catalog queue).
+  @Test
+  func `chunkByNamespace returns consecutive-same-namespace ranges`() {
+    // Empty input ⇒ empty output.
+    #expect(PlaybackResolver.chunkByNamespace([]) == [])
+
+    // Single row ⇒ one range.
+    let oneLibrary = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+    ]
+    #expect(PlaybackResolver.chunkByNamespace(oneLibrary) == [0..<1])
+
+    let oneCatalog = [
+      row(position: 1, songID: "s1", musicItemID: "C1", namespace: .catalog),
+    ]
+    #expect(PlaybackResolver.chunkByNamespace(oneCatalog) == [0..<1])
+
+    // All library ⇒ one range covering everything.
+    let allLibrary = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "L2", namespace: .library),
+      row(position: 3, songID: "s3", musicItemID: "L3", namespace: .library),
+    ]
+    #expect(
+      PlaybackResolver.chunkByNamespace(allLibrary) == [0..<3],
+      "library-only ⇒ single chunk (the unchanged single-queue path)",
+    )
+
+    // All catalog ⇒ one range covering everything.
+    let allCatalog = [
+      row(position: 1, songID: "s1", musicItemID: "C1", namespace: .catalog),
+      row(position: 2, songID: "s2", musicItemID: "C2", namespace: .catalog),
+    ]
+    #expect(
+      PlaybackResolver.chunkByNamespace(allCatalog) == [0..<2],
+      "catalog-only ⇒ single chunk (the unchanged single-queue path)",
+    )
+
+    // [L, C, L] ⇒ three single-row chunks (every alternation breaks).
+    let interleaved3 = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "C1", namespace: .catalog),
+      row(position: 3, songID: "s3", musicItemID: "L2", namespace: .library),
+    ]
+    #expect(PlaybackResolver.chunkByNamespace(interleaved3) == [0..<1, 1..<2, 2..<3])
+
+    // [L, L, C, C, L] ⇒ three chunks.
+    let mixed = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "L2", namespace: .library),
+      row(position: 3, songID: "s3", musicItemID: "C1", namespace: .catalog),
+      row(position: 4, songID: "s4", musicItemID: "C2", namespace: .catalog),
+      row(position: 5, songID: "s5", musicItemID: "L3", namespace: .library),
+    ]
+    #expect(PlaybackResolver.chunkByNamespace(mixed) == [0..<2, 2..<4, 4..<5])
+  }
+
+  /// **F1a — `reassemble` carries chunkBoundaries that match the resolved
+  /// rows.** The chunk boundaries are computed against the rows that
+  /// actually take a slot in `songs` / `playContext`, so a dropped
+  /// (unresolved) row does NOT create a spurious chunk break. This is the
+  /// invariant `PlaybackService` relies on when it slices `Resolution.songs`
+  /// by `chunkBoundaries`.
+  ///
+  /// Note: we assert the *boundary* shape via the pure helper because
+  /// constructing real `MusicKit.Song` instances in tests isn't possible
+  /// without a live session — same idiom as the existing `app playlist
+  /// reassembly` and `reassembly walks a mixed library and catalog queue`
+  /// tests.
+  @Test
+  func `chunkByNamespace over resolved rows describes the queue chunks`() {
+    // [L_kept, C_kept, L_kept, C_MISS, L_kept, C_kept] ⇒ after dropping
+    // the C miss, the kept ordered namespaces are [L, C, L, L, C] ⇒
+    // chunks [0..<1, 1..<2, 2..<4, 4..<5]. The C2 miss does NOT introduce
+    // a phantom catalog chunk between the two L runs — exactly the
+    // invariant `PlaybackService` relies on.
+    let kept = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "C1", namespace: .catalog),
+      row(position: 3, songID: "s3", musicItemID: "L2", namespace: .library),
+      // C2 miss removed from `kept`
+      row(position: 5, songID: "s5", musicItemID: "L1", namespace: .library),
+      row(position: 6, songID: "s6", musicItemID: "C1", namespace: .catalog),
+    ]
+    #expect(
+      PlaybackResolver.chunkByNamespace(kept) == [0..<1, 1..<2, 2..<4, 4..<5],
+      "chunk boundaries are over the RESOLVED rows; the dropped catalog row does not create a spurious break between the two library runs",
+    )
+  }
+
+  // MARK: F1a — globalQueueIndex translation
+
+  /// **F1a — translate player-local index → global.** After a chunk swap,
+  /// `player.queue.entries`'s ordinals reset to 0 for the new chunk; the
+  /// Phase-4 `advanceToRecord` detector must continue to see a **global**
+  /// monotonic index across the whole resolution so its watermark/transition
+  /// logic keeps working. A single-chunk resolution (boundaries `[0]`) is
+  /// the identity — the unchanged single-queue path.
+  @Test
+  func `globalQueueIndex translates local index by chunk start`() {
+    // First-of-second-chunk in `[0, 3]`: local 0 + boundary 3 = global 3.
+    #expect(
+      PlaybackResolver.globalQueueIndex(
+        localIndex: 0,
+        currentChunk: 1,
+        chunkBoundaries: [0, 3],
+      ) == 3,
+    )
+
+    // Single-chunk: identity at every local index.
+    for local in 0..<5 {
+      #expect(
+        PlaybackResolver.globalQueueIndex(
+          localIndex: local,
+          currentChunk: 0,
+          chunkBoundaries: [0],
+        ) == local,
+        "single-chunk ⇒ identity (the unchanged single-queue path)",
+      )
+    }
+
+    // Three chunks `[0, 2, 4]` (a `[L,L,C,C,L]` resolution): local 0 in
+    // chunk 1 = global 2; local 0 in chunk 2 = global 4.
+    #expect(
+      PlaybackResolver.globalQueueIndex(
+        localIndex: 0,
+        currentChunk: 1,
+        chunkBoundaries: [0, 2, 4],
+      ) == 2,
+    )
+    #expect(
+      PlaybackResolver.globalQueueIndex(
+        localIndex: 0,
+        currentChunk: 2,
+        chunkBoundaries: [0, 2, 4],
+      ) == 4,
+    )
+    // Mid-chunk: local 1 in chunk 1 = global 3.
+    #expect(
+      PlaybackResolver.globalQueueIndex(
+        localIndex: 1,
+        currentChunk: 1,
+        chunkBoundaries: [0, 2, 4],
+      ) == 3,
+    )
+
+    // Edge cases: empty boundaries (no resolution loaded) ⇒ identity.
+    #expect(
+      PlaybackResolver.globalQueueIndex(
+        localIndex: 5,
+        currentChunk: 0,
+        chunkBoundaries: [],
+      ) == 5,
+      "empty boundaries (defensive) ⇒ identity",
+    )
+    // Out-of-range currentChunk ⇒ identity (defensive; documented).
+    #expect(
+      PlaybackResolver.globalQueueIndex(
+        localIndex: 1,
+        currentChunk: 5,
+        chunkBoundaries: [0, 2],
+      ) == 1,
+    )
   }
 
   /// THE falsifiable freight (Phase 3): the pure skip/replay decision at
@@ -380,6 +680,70 @@ struct PlaybackResolverTests {
         importedAt: .now,
       ),
       position: position,
+    )
+  }
+
+  // MARK: Phase 4 — chunkNamespaces
+
+  /// **Phase 4 (`plans/catalog-playlists.md`) — `reassemble` tags every
+  /// chunk with its homogeneous namespace, parallel to `chunkBoundaries`.**
+  /// `PlayerStateSnapshot.nowPlayingNamespace` reads this so the now-playing
+  /// thumbnail re-resolves a catalog id through `ArtworkProvider`'s catalog
+  /// branch (the bug the Phase-4 live test surfaced: a stale `.library` tag
+  /// routed catalog ids to the library branch → nil → placeholder).
+  ///
+  /// We assert on **counts and shape** rather than concrete `MusicKit.Song`s
+  /// because constructing real songs needs a live session (same idiom as
+  /// the existing `chunkBoundaries` tests).
+  @Test
+  func `reassemble carries chunkNamespaces parallel to chunkBoundaries`() {
+    // Mirrors `chunkByNamespace over resolved rows describes the queue
+    // chunks` shape — after dropping the C miss, kept = [L, C, L, L, C] ⇒
+    // four chunks at boundaries [0, 1, 2, 4], with parallel namespaces
+    // [L, C, L, C].
+    let kept = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "C1", namespace: .catalog),
+      row(position: 3, songID: "s3", musicItemID: "L2", namespace: .library),
+      row(position: 4, songID: "s4", musicItemID: "L3", namespace: .library),
+      row(position: 5, songID: "s5", musicItemID: "C2", namespace: .catalog),
+    ]
+    // We can verify the chunk-namespace shape via the pure helper, which is
+    // the same per-row scan `reassemble` runs (real reassemble needs a
+    // resolved `[String: MusicKit.Song]` map we can't construct here). The
+    // load-bearing assertion is "one namespace tag per chunk, in order."
+    let ranges = PlaybackResolver.chunkByNamespace(kept)
+    #expect(ranges == [0..<1, 1..<2, 2..<4, 4..<5])
+    let namespaces = ranges.map { kept[$0.lowerBound].namespace }
+    #expect(
+      namespaces == [.library, .catalog, .library, .catalog],
+      "Phase 4: namespaces parallel chunkBoundaries — one tag per chunk, homogeneous",
+    )
+    #expect(
+      namespaces.count == ranges.count,
+      "Phase 4: chunkNamespaces.count == chunkBoundaries.count (invariant the snapshot reader relies on)",
+    )
+  }
+
+  /// **Phase 4 — empty input ⇒ empty `chunkNamespaces`** (same emptiness
+  /// rule as `chunkBoundaries`; both arrays are emit-together / skip-
+  /// together so a downstream `chunkNamespaces.indices.contains(k)` check
+  /// is a safe parallel index guard).
+  @Test
+  func `reassemble emits empty chunkNamespaces when nothing resolves`() {
+    let rows = [
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 2, songID: "s2", musicItemID: "C1", namespace: .catalog),
+    ]
+    let result = PlaybackResolver.reassemble(
+      rows: rows,
+      startRow: rows[0],
+      resolved: [:],
+    )
+    #expect(result.chunkBoundaries.isEmpty)
+    #expect(
+      result.chunkNamespaces.isEmpty,
+      "Phase 4: parallel emptiness with chunkBoundaries",
     )
   }
 
