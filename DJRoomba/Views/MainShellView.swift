@@ -10,7 +10,12 @@ struct MainShellView: View {
   // MARK: Internal
 
   var body: some View {
-    NavigationSplitView(columnVisibility: $columnVisibility) {
+    // `@Bindable` over the `@Environment` controller so the snapshot
+    // pickers bind to its presentation flags directly (swiftui-pro: no
+    // `Binding(get:set:)`); same instance, just made bindable.
+    @Bindable var controller = controller
+
+    return NavigationSplitView(columnVisibility: $columnVisibility) {
       PlaylistSidebar()
         .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
     } detail: {
@@ -92,7 +97,10 @@ struct MainShellView: View {
             .padding()
           }
           .accessibilityLabel("Catalog access probe result")
-        } else if let activity = controller.importActivity {
+          // `activityText` (not `importActivity`) — the snapshot branch
+          // unified the activity source so MusicKit-import AND snapshot
+          // export/import progress share this slot.
+        } else if let activity = controller.activityText {
           HStack(spacing: 6) {
             ProgressView()
               .controlSize(.small)
@@ -152,6 +160,44 @@ struct MainShellView: View {
             .padding()
           }
           .accessibilityLabel("Genre import notice")
+        } else if let result = controller.snapshotResult {
+          // A completed snapshot metadata-merge. Same calm, dismissible
+          // chip idiom as the genre notice (macos-design: a status note,
+          // not an alert) — its popover shows the full tally and the
+          // Revert action that "appears after the import completes".
+          Button {
+            showingSnapshotResult = true
+          } label: {
+            Label(result.headline, systemImage: "clock.arrow.circlepath")
+              .font(.callout)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+          }
+          .help(result.headline)
+          .popover(isPresented: $showingSnapshotResult, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+              Text(result.details)
+                .font(.callout)
+                .textSelection(.enabled)
+                .multilineTextAlignment(.leading)
+              HStack {
+                if controller.canRevertSnapshot {
+                  Button("Revert This Import", role: .destructive) {
+                    showingSnapshotResult = false
+                    Task { await controller.revertSnapshotImport() }
+                  }
+                }
+                Spacer()
+                Button("Dismiss") {
+                  showingSnapshotResult = false
+                  controller.dismissSnapshotResult()
+                }
+              }
+            }
+            .frame(width: 360, alignment: .leading)
+            .padding()
+          }
+          .accessibilityLabel("Snapshot import result")
         }
         // No `else`: when idle the ToolbarItem renders nothing, so the
         // toolbar stays clean (the spec's EmptyView intent — an empty
@@ -205,6 +251,23 @@ struct MainShellView: View {
     .sheet(isPresented: Bindable(controller).catalogSearchPresented) {
       CatalogSearchSheet(isPresented: Bindable(controller).catalogSearchPresented)
     }
+    // Document import/export (plans/snapshot-export-import.md). The
+    // exporter's bytes are built off-main *before* its flag flips true
+    // (`beginSnapshotExport`), so the document is always ready here.
+    .fileExporter(
+      isPresented: $controller.isPresentingSnapshotExporter,
+      document: controller.snapshotExportDocument,
+      contentType: .djroombaSnapshot,
+      defaultFilename: Self.exportFilename(),
+    ) { result in
+      controller.completeSnapshotExport(result)
+    }
+    .fileImporter(
+      isPresented: $controller.isPresentingSnapshotImporter,
+      allowedContentTypes: [.djroombaSnapshot],
+    ) { result in
+      Task { await controller.completeSnapshotImport(result) }
+    }
   }
 
   // MARK: Private
@@ -243,5 +306,16 @@ struct MainShellView: View {
   /// in the `.status` slot so an explicitly-invoked diagnostic is never
   /// masked by ambient import/library state.
   @State private var showingCatalogProbe = false
+
+  /// Drives the snapshot-import result chip's popover (the full tally +
+  /// Revert / Dismiss). Independent of the other `.status` popovers.
+  @State private var showingSnapshotResult = false
+
+  /// "DJ Roomba Library 2026-05-18" — ISO date so it sorts and has no
+  /// path-illegal `/`. `.fileExporter` appends the `djroomba` extension
+  /// from the content type.
+  private static func exportFilename() -> String {
+    "DJ Roomba Library \(Date.now.ISO8601Format(.iso8601Date(timeZone: .current)))"
+  }
 
 }

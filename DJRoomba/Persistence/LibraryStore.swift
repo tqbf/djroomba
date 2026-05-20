@@ -1401,6 +1401,119 @@ struct LibraryStore: Sendable {
     }
   }
 
+  /// Write a clean, transactionally-consistent single-file copy of the
+  /// whole DB to `fileURL` via `VACUUM INTO`. The live `DatabaseQueue`
+  /// stays open the entire time (no fd swap, no app quiesce) and the copy
+  /// is defragmented. Used for both the `.djroomba` export payload and the
+  /// quiet pre-import backup. `VACUUM INTO` fails if the destination
+  /// already exists, so the caller owns ensuring a clean path.
+  func snapshot(to fileURL: URL) async throws {
+    try await database.dbQueue.vacuum(into: fileURL.path)
+  }
+
+  /// Overwrite the **live** database with the contents of the SQLite file
+  /// at `backupURL`, using SQLite's Online Backup API. This copies every
+  /// page through the already-open live connection on GRDB's writer queue
+  /// (off-main) — semantically "swap the SQLite databases" as the user
+  /// described, but done via SQLite's own API instead of an unsafe `mv`
+  /// under an open fd, so the whole `LibraryStore`/services object graph
+  /// stays valid and only the in-memory view caches need a reload.
+  ///
+  /// The backup was produced by *this* app (a prior `snapshot(to:)`), so
+  /// its schema is byte-identical to the live one — GRDB's lazily re-read
+  /// schema cache stays correct after the page copy. Caller reloads all
+  /// derived UI state afterward.
+  func restore(from backupURL: URL) async throws {
+    let source = try DatabaseQueue(path: backupURL.path)
+    try await database.dbQueue.writeWithoutTransaction { destinationDB in
+      try source.read { sourceDB in
+        try sourceDB.backup(to: destinationDB)
+      }
+    }
+  }
+
+  /// Apply matched-snapshot metadata onto existing `song` rows in ONE
+  /// chunked statement per ≤999-var batch — the `applyAlbumGenres` /
+  /// `reorderAppPlaylists` idiom, never a per-row loop. `UPDATE … FROM
+  /// (VALUES …)` keyed on the stable `song.id`: identity/relations
+  /// (`id`, `local_id`, `music_item_id`, `id_namespace`, `imported_at`)
+  /// and **every other table** are untouched, so all playlist/history FKs
+  /// stay intact (the one-way-isolation invariant — asserted by test, like
+  /// every other store mutation). Returns rows changed.
+  ///
+  /// 15 binds/row (id + 14 columns) ⇒ 999/15 = 66 rows/chunk. `genre_names`
+  /// goes through `Song.encodeGenreNames` so it round-trips identically to
+  /// the `upsertSongs` path; `release_date` binds a `Date` exactly as the
+  /// upsert does (GRDB `.datetime`).
+  @discardableResult
+  func applyImportedMetadata(_ updates: [MetadataUpdate]) async throws -> Int {
+    guard !updates.isEmpty else { return 0 }
+    let columnsPerRow = 15
+    let maxRowsPerChunk = Self.sqliteVariableLimit / columnsPerRow
+    return try await database.dbQueue.write { db in
+      var changed = 0
+      for chunk in updates.chunked(into: maxRowsPerChunk) {
+        let rowPlaceholder = "(" + Array(repeating: "?", count: columnsPerRow)
+          .joined(separator: ", ") + ")"
+        let valuesClause = Array(repeating: rowPlaceholder, count: chunk.count)
+          .joined(separator: ", ")
+        var arguments = [(any DatabaseValueConvertible)?]()
+        arguments.reserveCapacity(chunk.count * columnsPerRow)
+        for update in chunk {
+          arguments.append(update.targetSongID)
+          arguments.append(update.title)
+          arguments.append(update.artistName)
+          arguments.append(update.albumTitle)
+          arguments.append(update.duration)
+          arguments.append(update.isExplicit)
+          arguments.append(update.trackNumber)
+          arguments.append(update.discNumber)
+          arguments.append(Song.encodeGenreNames(update.genreNames))
+          arguments.append(update.releaseDate)
+          arguments.append(update.composerName)
+          arguments.append(update.isrc)
+          arguments.append(update.hasLyrics)
+          arguments.append(update.workName)
+          arguments.append(update.movementName)
+        }
+        // A column-named CTE (`WITH v(col,…) AS (VALUES …)`) is the SQLite
+        // form — SQLite does not accept the `AS alias(col,…)` column list
+        // on a `(VALUES …)` subquery (that is Postgres syntax). `UPDATE …
+        // FROM cte` is supported (SQLite ≥ 3.33; the system SQLite on
+        // macOS 14 is well past that).
+        try db.execute(
+          sql: """
+            WITH v(
+              id, title, artist_name, album_title, duration, is_explicit,
+              track_number, disc_number, genre_names, release_date,
+              composer_name, isrc, has_lyrics, work_name, movement_name
+            ) AS (VALUES \(valuesClause))
+            UPDATE song SET
+              title = v.title,
+              artist_name = v.artist_name,
+              album_title = v.album_title,
+              duration = v.duration,
+              is_explicit = v.is_explicit,
+              track_number = v.track_number,
+              disc_number = v.disc_number,
+              genre_names = v.genre_names,
+              release_date = v.release_date,
+              composer_name = v.composer_name,
+              isrc = v.isrc,
+              has_lyrics = v.has_lyrics,
+              work_name = v.work_name,
+              movement_name = v.movement_name
+            FROM v
+            WHERE song.id = v.id
+            """,
+          arguments: StatementArguments(arguments),
+        )
+        changed += db.changesCount
+      }
+      return changed
+    }
+  }
+
   // MARK: Private
 
   /// SQLite hard-limits a statement to 999 bound parameters (the historical
