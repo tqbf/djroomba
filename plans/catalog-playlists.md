@@ -104,9 +104,63 @@ are namespace-agnostic (keyed on our `song.id`) so stats "just work".
 Subscription is assumed (above); the existing gate stays as the safety
 net only.
 
+> **F1a (2026-05-20) — DONE.** The Phase-3 live test discovered that
+> Apple's `ApplicationMusicPlayer.Queue` deterministically rejects a
+> mixed library+catalog `Song` array with
+> `MPMusicPlayerControllerErrorDomain` error 6 on macOS. F1a — the
+> human-decided option — splits the resolved queue into homogeneous-
+> namespace chunks at the `PlaybackService` layer and plays them
+> sequentially, swapping the player queue at each namespace boundary.
+> Pure helpers `PlaybackResolver.chunkByNamespace` + `globalQueueIndex`
+> are unit-tested; `Resolution` carries a `chunkBoundaries: [Int]`
+> field; `PlaybackService.play(resolution:playlistContextID:)` is the
+> new entry point; the 0.5 s monitor tick detects end-of-chunk
+> (`currentEntry == nil` AND a pending chunk) and the swap fires via a
+> MainActor-serialized `chunkSwapInFlight` re-entrancy gate. A
+> `Next`-button press at the tail of a chunk also triggers the swap
+> (Apple's player wraps within a queue on `skipToNextEntry()` at tail
+> rather than emptying — empirical correction to the original plan's
+> "don't special-case skipNext"). Stats accuracy is preserved because
+> `refreshSnapshot()` translates the player-local queue index to
+> GLOBAL via `globalQueueIndex(...)` before publishing — the Phase-4
+> `advanceToRecord` detector is unchanged and continues to consume a
+> monotonic global index across chunk swaps. Live-verified
+> 2026-05-20: the previously-failing 3-track mixed playlist
+> (Bohemian Rhapsody + Dancing Queen + Take On Me) plays end-to-end;
+> SQLite confirms all three plays recorded against the right
+> `local_id` / namespace. See PROGRESS 2026-05-20 F1a entry + the new
+> APPLE-TOUCHPOINTS gotcha #11 (the `skipToNextEntry()` wrap).
+>
+> F1a out of scope (followups): cross-chunk back-skip (currently
+> `skipPrevious` stays within the current chunk); namespace-transition
+> gap UX polish (~1–2 s silence empirically); Apple Feedback Assistant
+> ticket for the underlying queue rejection bug.
+
 **Phase 4 — Artwork.** Add a catalog branch to `ArtworkProvider`
 (`MusicCatalogResourceRequest<Song>` re-resolve). Easier than library —
 catalog artwork is a public URL, not the private `musicKit://` scheme.
+
+> **Phase 4 ✅ DONE (2026-05-20).** Retired the `.library`-only guard
+> in `ArtworkProvider.artwork(...)`; `nonisolated static resolve` now
+> switches over `(namespace, kind)` with a new `(.catalog, .song)` arm
+> issuing `MusicCatalogResourceRequest<Song>(matching: \.id, memberOf:
+> [id])` (same shape as `PlaybackResolver.fetchCatalogSongs`); the
+> `(.catalog, .playlist)` combination returns nil by design (we don't
+> import catalog playlists — non-goal documented in the switch).
+> `CatalogSearchResultRow` swapped its local placeholder view for
+> `ArtworkThumbnail`, so search-result rows render real cover art
+> (Queen "Greatest Hits I, II & III" live-verified). The signed live
+> gate caught a follow-on bug — `PlayerStateSnapshot.artworkRef` was
+> hard-coded `namespace: .library`, mis-routing catalog ids → nil →
+> placeholder — fixed in the same phase by threading namespace
+> through the snapshot: `Resolution.chunkNamespaces` parallel to
+> `chunkBoundaries`, `PlaybackService` per-chunk + single-shot
+> namespace tracking, `PlayerStateSnapshot.nowPlayingNamespace`
+> stamped on every snapshot refresh. Library artwork unchanged; no
+> schema change; no new entitlement; no new view code. Tests 216 →
+> 218 (+2); 34 suites green. See PROGRESS 2026-05-20 +
+> APPLE-TOUCHPOINTS §7. **With Phase 4 done, all phases (0, 1, 2, 3,
+> F1a, 4) of this plan are complete.**
 
 ## Cross-cutting invariants / risks
 

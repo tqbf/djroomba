@@ -142,6 +142,26 @@ struct PlaylistPlayerApp: App {
           .keyboardShortcut("l", modifiers: .command)
       }
 
+      // Phase-2 catalog search surface (`plans/catalog-playlists.md`).
+      // Top-level **Search** menu — discoverable, doesn't compete with
+      // the busy toolbar.
+      //
+      // Shortcut: **⌥⌘F**. The natural choice ⌘F is already bound by
+      // `.searchable` on the playlist sidebar + track-table filters.
+      // ⇧⌘F was also tried and rejected after live verification: the
+      // vendored `ForceGraph`'s `KeyCaptureView` swallows EVERY
+      // command-F combo that lacks Option/Control (`Vendor/ForceGraph/
+      // Sources/ForceGraph/Interaction/KeyCaptureView.swift:127–132`) —
+      // so ⇧⌘F summons the graph's search HUD instead of this sheet.
+      // ⌥⌘F is free, explicitly excluded from the graph's gate, and
+      // mnemonic enough ("Option+Find" → catalog find).
+      CommandMenu("Search") {
+        Button("Search Apple Music…") {
+          controller.presentCatalogSearch()
+        }
+        .keyboardShortcut("f", modifiers: [.command, .option])
+      }
+
       // Clearly labelled developer affordance: seed synthetic plays so
       // the Recently Played surface is testable without listening to 500
       // songs. Intentionally NOT `#if DEBUG`-gated — the user's normal
@@ -149,6 +169,9 @@ struct PlaylistPlayerApp: App {
       CommandMenu("Debug") {
         Button("Seed 500 Random Plays") {
           Task { await controller.seedSyntheticHistory(count: 500) }
+        }
+        Button("Catalog Access Probe (Phase 0)") {
+          Task { await controller.runCatalogAccessProbe() }
         }
       }
     }
