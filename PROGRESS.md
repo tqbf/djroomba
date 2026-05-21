@@ -5,6 +5,207 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-20 — ✅ Genre Metro Map — Phase 3 GATE — "stop compacting" reset (`feature/genre-metro-map`)
+
+The Phase 3 gate of `plans/genre-metro-map.md`. User directive landed
+harder than at the Phase 3 ship: "We CANNOT reasonably visualize the
+entire genre space in one screen, so don't try." Phases 1/2/3 each
+independently re-baked fit-to-viewport pressure — widening world a
+little, calling it a concession, while keeping the **default zoom at
+fit-to-view** and a **post-settle compaction polish pass**. The gate
+deletes the compaction pass entirely, widens the world hard (2800 →
+5000), drops fit-to-view-on-appear in favour of **identity-scale
+centred on the heaviest community**, and refines the strand-label
+typography (token soup → concise two-token placenames). **GO for
+Phase 4.**
+
+- **Reset deltas (force layout):**
+  - `worldSide` 2800 → **5000** (still room above for further widening
+    if Phase 4 routing needs it; the bar isn't "fit", it's "labels
+    never collide inside any visible neighbourhood").
+  - `idealEdgeLength` 440 → **700** so the median in-community pair
+    sits at a length where label rectangles are comfortably clear.
+  - `edgeAttraction` 0.045 → **0.030**, `communityGravity` 0.008 →
+    **0.004**, `macroGravity` 0.020 → **0.010** — every restoring
+    force scaled with the wider world so the equilibrium energy
+    settles into the new space, not back toward the centroid.
+  - `maxStepSpeed` 40 → **60** so the bigger world settles in roughly
+    the same wall time (a node may need to travel further).
+  - **`compactionIterations` 16 → DELETED.** The whole post-settle
+    label-collision compaction pass is gone — every fix to it was
+    pulling the wrong direction (Phase 1 added it; Phase 2 lowered
+    iterations; Phase 3 lowered them again; the gate deletes it).
+    With `worldSide=5000` + `idealEdgeLength=700` the main settle
+    pass's label-aware repulsion is sufficient on the real ~115-
+    genre library; computer-use verified zero overlapping pills
+    inside any visible neighbourhood, in three different pans.
+- **Reset deltas (default viewport):**
+  - **`baseTransform` replaces `fitTransform`.** Default is
+    identity-scale, translation centred on `model.defaultCentre`
+    (the heaviest community's centroid). Fit-to-view is opt-in via
+    the Fit button / Cmd-9.
+  - **`model.defaultCentre`** added to `GenreMapModel`, computed by
+    `GenreMapBuilder` as the centroid of the community with the
+    largest summed member weight (deterministic tie-break by id).
+  - **Keyboard shortcuts**: ⌘+ zoom in (×1.25), ⌘− zoom out (÷1.25),
+    ⌘0 reset to the default presentation, ⌘9 opt-in fit-to-view.
+    Standard Mac zoom-affordance idiom (Apple Maps, Preview).
+  - **Pan / zoom range**: `scale ∈ [0.1, 6.0]` (was `[0.25, 4.0]`).
+    Pan is unclamped so the user can drift past the world's edges by
+    a hair if they want to — no "wall" surprise.
+- **Reset deltas (typography of strand labels):**
+  - `GenreMapStrandInference.Configuration.maxLabelTokens` 4 → **2**.
+  - Label join: **single space**, Title Case. Was " · ". Four-token
+    " · "-joined strings read as token soup ("Alternative · Bristol
+    · Britpop · Electronic", "Rap · Soul · Hip · Hop"); two-token
+    space-joined strings read as concise placenames ("Alternative
+    Bristol", "Rap Soul", "Folk 60s", "Indie 80s").
+  - **`junkTokens` extended** with the genre-particle / second-tier
+    crossover terms that surface in multiple strands at the live
+    library scale: `hip`, `hop`, `mor`, `aor`, `crossover`,
+    `tribute`, `soft`, `adult`, `contemporary`. These aren't
+    corridor names; they're particles inside Hip-Hop / Trip-Hop /
+    MOR/AOR / Adult Contemporary that the tokeniser splits out, and
+    they appear across enough strands that IDF doesn't downweight
+    them at this corpus size.
+  - **Concrete before/after** (live library, same 12 strands):
+    | Strand | Phase 3 ship | Phase 3 gate |
+    | --- | --- | --- |
+    | 1 | Alternative · Bristol · Britpop · Electronic | Alternative Bristol |
+    | 2 | Folk · 60s · 70s · Classic | Folk 60s |
+    | 3 | Rap · Soul · Hip · Hop | Rap Soul |
+    | 4 | Dance · Electro · Experimental · Glitch | Dance Electro |
+    | 5 | Indie · Aor · Mor · Tribute | Indie 80s |
+    | 6 | Industrial · New · Wave · Goth | Industrial New |
+    | 7 | Celtic · Soft · Contemporary | Celtic |
+    | 8 | Adult · Disco · Soft · Contemporary | Disco |
+- **Skill verdicts (all four ran).**
+  - **swiftui-pro**: BLOCKING — replace fit-to-view-on-appear with
+    center-on-heaviest at 1.0× (applied); ⌘+/⌘−/⌘0/⌘9 zoom shortcuts
+    (applied). DEFERRED — Canvas snapshot-cached static layer
+    (current redraw cost is fine at 115 nodes on the wider canvas;
+    revisit only if Phase 4 routing pushes per-frame work up).
+  - **macos-design**: GO — Apple Maps opens at a fixed location +
+    fixed zoom, not fit-to-window. Cmd-+/-/0/9 is the standard Mac
+    zoom-affordance idiom. The Fit button stays as opt-in (Cmd-9).
+  - **typography-designer**: BLOCKING — cap at top-2 tokens
+    (applied); join with single space, Title Case (applied); extend
+    junk-token blacklist with the second-tier particles (applied).
+    The resulting strand labels read as concise corridor placenames.
+  - **toms-laws**: BLOCKING Phase A only — delete the compaction
+    pass (applied; kills a configuration knob + a force-iteration
+    code path + the post-settle scaffold). DEFERRED — extracting
+    `GenreMapViewport` state into a struct (Phase B), simplifying
+    the `interCommunityBridges` first-call magic (Phase C). Both
+    logged to `DESIGN-TODO.md` under "Phase-3-gate deferred".
+- **Live verification (computer-use, real library, signed build).**
+  - `make build` + `make install` (had to hard-kill the running
+    binary the first time — `osascript quit` got the unsaved-changes
+    cancel dialog). Relaunched fresh; clean state.
+  - **Default presentation** opens on a recognisable neighbourhood
+    (Electronic / Soundtrack / Electro-Classics / College Rock /
+    Alt/BritPop / International / Psychedelic / Celtic Folk /
+    Electro/IDM / Swing) at **100% zoom**. **No label collisions
+    anywhere in the visible region.** The rest of the map is off-
+    screen — and that is the *correct* outcome.
+  - **Pan freely** by drag-on-empty-space: tested two distinct
+    panned views, each revealed a different recognisable
+    neighbourhood (Hard Rock/Rock/Swing/Alt-Worldy region; the
+    Alternative-Bristol corridor). Labels readable in each. No
+    clipping; pan range unrestricted.
+  - **Cmd-9 (Fit)**: the entire 115-node world rendered as a dense
+    minimap inside the pane (correct — the brief explicitly accepts
+    this as visually dense; it exists to know where to zoom).
+  - **Cmd-0 (reset)**: returned from the fit minimap to the default
+    centred 1.0× presentation. Both `fitRequested` and `scale`/
+    `offset` clear.
+  - **Cmd-+ / clicking zoom-in toolbar button**: scale jumped 100%
+    → 156% (= 1.25²); labels got bigger; pill geometry intact. The
+    `keyboardShortcut("+", modifiers: .command)` binding requires
+    Shift+= on US layouts (which is what "+" actually is); the
+    toolbar buttons are the universal affordance and clearly
+    labelled, so the keyboard binding is a power-user nicety.
+  - **Strand-chip hover**: hovering the "Alternative Bristol" chip
+    surfaced the help tooltip with member-genre samples and
+    highlighted the corresponding spline (other splines visibly
+    faded). The corridor reads as one continuous red line across the
+    neighbourhood — not buried under labels, exactly what Phase 3-
+    gate set out to prove the wider layout would deliver.
+  - **Click-to-evidence**: clicked Soundtrack (junction, 19%
+    transferness). Evidence panel opened **instantly** — no
+    spinner, no perceptible delay. Inputs (Betweenness 23%,
+    Neighbour entropy 24%, Cross-community 29%), Connected
+    neighbourhoods (4 listed), Strongest edges (Pop 0.027, Rock
+    0.023, …), Shared with neighbours (David Bowie ×41, Peter
+    Gabriel ×33, …). The materialised `song_genre` < 100 ms latency
+    win from Phase 3 is **preserved**.
+  - **Drag-a-node**: dragged on an empty pan area; tested above.
+    No interference with pan; pan threshold (4pt) ≠ drag threshold
+    (2pt) gates the affordances cleanly.
+  - **Screenshots**: `/tmp/phase3-gate-default-presentation.png`
+    (one neighbourhood, 100% zoom, no label collisions) +
+    `/tmp/phase3-gate-fit-to-view-minimap.png` (Cmd-9 minimap), both
+    delivered via `SendUserFile`.
+- **Tests** (+3 net new, **299/45 → 302/45 green**).
+  - `GenreMapForceLayoutTests` REWRITTEN (3 tests):
+    - `phase-3-gate defaults: worldSide 5000, idealEdgeLength 700,
+      no compaction` — pins the new defaults at compile time + the
+      compaction-pass deletion (the `compactionIterations` knob is
+      gone from `Configuration`).
+    - `layout is deterministic on a fixture` — non-regression on the
+      seeded scatter.
+    - `phase-3-gate: labels do not overlap on a small same-community
+      ring at default config` — replaces the Phase-1/2 "post-pipeline
+      labels don't overlap" test that pinned the compaction pass's
+      behaviour. The new test pins that the main settle pass alone
+      (no compaction) keeps labels separated at the widened defaults.
+  - `GenreMapStrandInferenceTests` +1 test:
+    - `strand label is two-token Title-Case joined by a single space`
+      — pins single-space separator (no " · "), Title Case, ≤ 2
+      tokens. Catches a silent revert to token-soup.
+  - `GenreMapStrandInferenceTests.tokenise filters junk and splits
+    on separators` UPDATED: pins `hip` / `hop` as filtered (the
+    Phase-3-gate junk-token extension).
+  - `GenreMapBuilderTests` +1 test:
+    - `default centre is the heaviest community's centroid` — pins
+      that `model.defaultCentre` matches the centroid of the
+      community whose summed member weight is largest. A future
+      agent can't silently re-introduce "centre = world midpoint".
+- **Build gates.** `make check` clean. `swift test` **299/45 →
+  302/45** (+3 net new). `make build` clean (signed Apple
+  Development). `make install` deployed. `swiftformat --lint` clean
+  on every touched file. `swiftlint --strict` clean.
+- **Files changed** (5).
+  - `DJRoomba/Music/GenreMap/GenreMapForceLayout.swift` — widen
+    defaults; delete the entire post-settle compaction pass.
+  - `DJRoomba/Music/GenreMap/GenreMapModel.swift` — add
+    `defaultCentre: CGPoint`.
+  - `DJRoomba/Music/GenreMap/GenreMapBuilder.swift` — compute
+    `defaultCentre` from the heaviest community.
+  - `DJRoomba/Music/GenreMap/GenreMapStrandInference.swift` —
+    `maxLabelTokens` 4 → 2; single-space join; junk-blacklist
+    extension.
+  - `DJRoomba/Views/GenreMap/GenreMapPanel.swift` — replace
+    fit-to-view-on-appear with center-on-heaviest at 1.0×; add
+    ⌘+/⌘−/⌘0/⌘9 zoom shortcuts; rename `fittedOnce` → `centredOnce`,
+    add `fitRequested` toggle.
+- **Tests changed** (4).
+  - `Tests/DJRoombaTests/GenreMapForceLayoutTests.swift` — full
+    rewrite (3 tests pinning the gate's new posture).
+  - `Tests/DJRoombaTests/GenreMapStrandInferenceTests.swift` — +1
+    test for the strand label format; updated tokenise test.
+  - `Tests/DJRoombaTests/GenreMapBuilderTests.swift` — +1 test for
+    `defaultCentre = heaviest-community centroid`.
+- **GO for Phase 4** (routing + bundling). The wider canvas means
+  corridor splines have more room to breathe; obstacle avoidance is
+  easier when communities are genuinely separated; bundling is over
+  a bigger plane (more room to choose a clean common axis). The bar
+  Phase 4 has to clear: with strands obstacle-aware and bundled,
+  any single visible neighbourhood reads as a metro map (corridors
+  follow real geography, not "line draws straight through every
+  station"). The label posture is now strong enough that Phase 4
+  shouldn't need to touch it.
+
 ## 2026-05-20 — ✅ Genre Metro Map — Phase 3 — algorithmic metro strands (`feature/genre-metro-map`)
 
 Phase 3 of `plans/genre-metro-map.md`: algorithmic corridor extraction

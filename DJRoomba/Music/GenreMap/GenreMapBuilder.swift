@@ -99,6 +99,7 @@ enum GenreMapBuilder {
         layoutEdges: [],
         communities: [],
         worldBounds: .zero,
+        defaultCentre: .zero,
       )
     }
 
@@ -354,11 +355,34 @@ enum GenreMapBuilder {
       height: max(1, maxY - minY),
     )
 
+    // Phase-3-gate 2026-05-20: pick the **heaviest community** as the
+    // default viewport centre. "Heaviest" = the community with the
+    // largest summed member weight; deterministic tie-break by id.
+    // This is the recognisable-neighbourhood the panel opens on, *not*
+    // the world centroid. Empty communities (membership lost to the
+    // long tail) are excluded.
+    let weightByGenre = Dictionary(uniqueKeysWithValues: mapNodes.map {
+      ($0.genre, $0.weight)
+    })
+    let heaviestCommunity = communities
+      .filter { !$0.members.isEmpty }
+      .max { lhs, rhs in
+        let lhsWeight = lhs.members.reduce(0.0) { $0 + (weightByGenre[$1] ?? 0) }
+        let rhsWeight = rhs.members.reduce(0.0) { $0 + (weightByGenre[$1] ?? 0) }
+        if lhsWeight != rhsWeight { return lhsWeight < rhsWeight }
+        return lhs.id > rhs.id
+      }
+    let defaultCentre = heaviestCommunity?.centroid ?? CGPoint(
+      x: bounds.midX,
+      y: bounds.midY,
+    )
+
     return GenreMapModel(
       nodes: mapNodes,
       layoutEdges: layoutEdges,
       communities: communities,
       worldBounds: bounds,
+      defaultCentre: defaultCentre,
       strands: strands,
     )
   }

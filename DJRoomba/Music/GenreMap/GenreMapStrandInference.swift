@@ -99,8 +99,14 @@ enum GenreMapStrandInference {
     var maxStrandsAfterCull = 12
     /// Member-Jaccard ≥ this ⇒ cull (loser absorbed as a branch).
     var cullJaccard = 0.6
-    /// Top-k TF-IDF tokens kept per strand (the spec's "top 2–4").
-    var maxLabelTokens = 4
+    /// Top-k TF-IDF tokens kept per strand. **Phase-3-gate 2026-05-20
+    /// (typography-designer):** 4 → 2. Four tokens joined with " · "
+    /// read as token soup ("Alternative · Bristol · Britpop ·
+    /// Electronic", "Rap · Soul · Hip · Hop"). Two tokens joined by a
+    /// single space ("Alternative Britpop", "Rap Soul") read as a
+    /// concise placename — the corridor's recognisable identity, not a
+    /// list of its tags.
+    var maxLabelTokens = 2
     /// Min `length + 1` of a branch path (a branch must have at least
     /// one off-spine station; lower = noisy).
     var minBranchLength = 2
@@ -132,6 +138,15 @@ enum GenreMapStrandInference {
   /// **Junk-token blacklist** (lowercased; deliberately small so a tag
   /// like `Indie` survives and informs the TF-IDF). Matches the plan's
   /// "drop `misc`, `other`, `genre`, `music`, …".
+  ///
+  /// **Phase-3-gate 2026-05-20 (typography-designer pass):** extended
+  /// with the genre-particle tokens that appear in multiple strands at
+  /// the live ~115-genre library scale — "hop" and "hip" are not
+  /// corridor names, they're stuck inside `Hip-Hop` / `Trip-Hop` and
+  /// the tokeniser splits them out; "crossover" / "tribute" / "mor" /
+  /// "aor" are equally noisy at this corpus size. Cap-at-2 + this
+  /// blacklist together turn "Rap · Soul · Hip · Hop" into "Rap Soul",
+  /// "Hip · Hop · Crossover · Electro" into a placename, not a list.
   static let junkTokens: Set = [
     "misc",
     "other",
@@ -152,6 +167,16 @@ enum GenreMapStrandInference {
     "&",
     "/",
     "-",
+    // Phase-3-gate additions (typography-designer):
+    "hip",
+    "hop",
+    "mor",
+    "aor",
+    "crossover",
+    "tribute",
+    "soft",
+    "adult",
+    "contemporary",
   ]
 
   /// Run the full Phase-3 pass.
@@ -779,9 +804,14 @@ enum GenreMapStrandInference {
         }
         .prefix(maxTokens)
         .map(\.token)
+      // **Phase-3-gate 2026-05-20 (typography-designer):** join with a
+      // single space, not " · ". With `maxLabelTokens = 2` and the
+      // extended junk-token blacklist, the label reads as one short
+      // placename — "Alternative Britpop", "Rap Soul", "Folk 60s" —
+      // the corridor's identity, not a comma-list of its tags.
       let label = topTokens
         .map { $0.prefix(1).uppercased() + $0.dropFirst() }
-        .joined(separator: " · ")
+        .joined(separator: " ")
       labels[strandID] = (label, Array(topTokens))
     }
     return labels

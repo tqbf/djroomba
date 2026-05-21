@@ -130,3 +130,72 @@ respected, **don't do it** — reverting/declining is the correct outcome.
 - **Effort:** S.
 - **Verify:** ⌘=/⌘-/⌘0 work in the panel; scroll-wheel zooms; no
   regression on pinch or stepper.
+
+## Phase-3-gate deferred (2026-05-20)
+
+The Phase-3 gate of `plans/genre-metro-map.md` (the "stop compacting"
+reset) executed the blocker — delete the compaction pass, widen the
+world, center-on-heaviest-community default, fix strand-label
+typography. Two `toms-laws` proposals were declined for the gate and
+deferred here.
+
+### Phase-3-gate Phase B — Extract `GenreMapViewport` state struct
+
+- **What:** `GenreMapPanel` holds `scale` / `offset` / `dragging` /
+  `centredOnce` / `fitRequested` / `selectedGenre` / `evidence` /
+  `isLoadingEvidence` / `evidenceTask` / `hoveredStrandID` /
+  `gestureScale` / `gestureOffset` as eleven separate `@State` /
+  `@GestureState` properties on the same view. Pull the viewport-
+  geometry subset (`scale`, `offset`, `centredOnce`, `fitRequested`,
+  `gestureScale`, `gestureOffset`) into a single `@Observable
+  GenreMapViewport` model. Wire the zoom shortcuts + the
+  `baseTransform` against the model instead of free properties.
+- **Law(s):** 6 (cohesion — viewport state is one thing), 11
+  (boilerplate — six @State props move to two: `viewport` + dragging
+  state).
+- **Pays its freight (falsifiable):** the view's `@State` /
+  `@GestureState` properties for viewport geometry drop from 6 → 1
+  (`@State private var viewport = GenreMapViewport()`); the
+  `resetZoom` / `fitToView` / `zoomIn` / `zoomOut` private functions
+  collapse into methods on the model.
+- **Risk:** medium — `@GestureState` semantics differ from `@State`
+  and don't trivially live on an `@Observable`; a naive port turns
+  the updating(_:state:) gesture composition into a mid-render
+  mutation. Veto if porting `gestureScale` / `gestureOffset` adds
+  more lines than it removes.
+- **Depends on:** none (pick freely).
+- **Verify:** the panel still pans/zooms; computer-use verifies the
+  default presentation is unchanged.
+- **Effort:** M.
+
+### Phase-3-gate Phase C — Simplify `interCommunityBridges` first-call magic
+
+- **What:** `GenreMapBuilder` currently runs Louvain *twice* — once
+  on the mutual-kNN ∪ MST substrate, then runs
+  `GenreMapLayoutGraph.interCommunityBridges` against the initial
+  partition, then re-runs Louvain on the widened layout graph. The
+  intermediate partition is only used to choose bridges. Replace
+  with a one-pass formulation: admit the heaviest cross-genre edge
+  per `mediumGamma`-cluster *as identified at one community-
+  detection pass* — i.e. detect on the widened graph directly,
+  using a structural admit-bridges criterion that doesn't depend on
+  an earlier partition.
+- **Law(s):** 1 (complexity — two Louvain runs for one final
+  partition), 6 (cohesion — the bridge-admission and partition-
+  detection are entangled across the same dataset twice).
+- **Pays its freight (falsifiable):** `GenreMapLouvain.detect` is
+  called once per `GenreMapBuilder.build` (the second call goes
+  away); the intermediate `initialPartition` variable in the
+  builder is deleted; the substrate-widening posture is preserved
+  (the Phase-2-gate test for "inter-community bridges admitted"
+  stays green).
+- **Risk:** medium — the structural admit-bridges criterion that
+  doesn't need a pre-existing partition is non-obvious. Veto if the
+  replacement criterion either loses the heaviest cross-pair signal
+  or admits more bridges than the current one (which would change
+  the layout substrate the Phase-2 transferness was tuned against).
+- **Depends on:** none (pick freely).
+- **Verify:** `GenreMapBuilderTests` + `GenreMapLayoutGraphTests`
+  green; computer-use spot-checks unchanged transfer-station count
+  on the real library.
+- **Effort:** L.

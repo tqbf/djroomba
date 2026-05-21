@@ -190,15 +190,64 @@ struct GenreMapStrandInferenceTests {
   }
 
   /// Tokenise: lowercase + split on `/`, `-`, `&`; junk tokens filtered.
+  /// **Phase-3-gate 2026-05-20 (typography-designer):** `hip` and `hop`
+  /// joined the junk blacklist because they're genre-particles inside
+  /// Hip-Hop / Trip-Hop and surface in multiple strands at the live
+  /// library scale — they're not corridor names. The strand-name
+  /// quality test below pins the new behaviour ("Rap Soul" instead of
+  /// "Rap · Soul · Hip · Hop").
   @Test
   func `tokenise filters junk and splits on separators`() {
     let tokens = GenreMapStrandInference.tokenise("Hip-Hop/Rap & Misc")
-    // "misc" is in the junk list; tokens lowercased; separators applied.
-    // "rap" is NOT in the junk list (Phase 3 keeps genre-meaningful tokens).
-    #expect(tokens.contains("hip"))
-    #expect(tokens.contains("hop"))
     #expect(tokens.contains("rap"))
     #expect(!tokens.contains("misc"), "junk token dropped")
+    #expect(!tokens.contains("hip"), "Phase-3-gate junk extension: 'hip' is a particle")
+    #expect(!tokens.contains("hop"), "Phase-3-gate junk extension: 'hop' is a particle")
+  }
+
+  /// **Phase-3-gate 2026-05-20 (typography-designer):** the strand
+  /// label must read as a concise placename, not a list of tokens.
+  /// Cap at top-2 tokens, joined by a **single space**, Title Case.
+  /// Pin the format so a future agent doesn't silently revert to
+  /// " · "-joined four-token soup.
+  @Test
+  func `strand label is two-token Title-Case joined by a single space`() {
+    let strands: [GenreMapStrandInference.Strand] = [
+      .init(
+        id: 0,
+        label: "",
+        tokens: [],
+        representativeGenres: [],
+        memberGenres: ["Acoustic Folk", "Indie Folk", "Folk Roots"],
+        pathStations: [],
+        colourID: 0,
+        isBranch: false,
+        parentStrandID: nil,
+      ),
+      .init(
+        id: 1,
+        label: "",
+        tokens: [],
+        representativeGenres: [],
+        memberGenres: ["Alternative", "Britpop"],
+        pathStations: [],
+        colourID: 1,
+        isBranch: false,
+        parentStrandID: nil,
+      ),
+    ]
+    let labels = GenreMapStrandInference.tfidfLabels(strands: strands, maxTokens: 2)
+    let firstLabel = labels[0]?.0 ?? ""
+    let secondLabel = labels[1]?.0 ?? ""
+    // Single-space separator, never " · ".
+    #expect(!firstLabel.contains(" · "), "single-space separator (got '\(firstLabel)')")
+    #expect(!secondLabel.contains(" · "), "single-space separator (got '\(secondLabel)')")
+    // Title Case (first letter upper, rest from token).
+    #expect(firstLabel.first?.isUppercase == true, "Title Case (got '\(firstLabel)')")
+    #expect(secondLabel.first?.isUppercase == true, "Title Case (got '\(secondLabel)')")
+    // At most two tokens ⇒ at most one space.
+    #expect(firstLabel.count(where: { $0 == " " }) <= 1)
+    #expect(secondLabel.count(where: { $0 == " " }) <= 1)
   }
 
   /// Stable across rebuilds for identical input.

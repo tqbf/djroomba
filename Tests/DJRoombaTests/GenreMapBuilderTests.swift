@@ -259,4 +259,79 @@ struct GenreMapBuilderTests {
     #expect(filtered.count == 1)
     #expect(filtered.first?.genreA == "G0")
   }
+
+  /// **Phase-3-gate 2026-05-20 (the "stop compacting" reset).** The
+  /// model's `defaultCentre` is the centroid of the **heaviest
+  /// community** — the one with the largest summed member weight — not
+  /// the world centroid. The panel uses this to centre the default
+  /// presentation on a recognisable neighbourhood at scale 1.0×; the
+  /// rest of the map scrolls.
+  @Test
+  func `default centre is the heaviest community's centroid`() throws {
+    // Two clear communities: heavy (G0/G1/G2 with weight ~0.9) and
+    // light (G3/G4/G5 with weight ~0.2). Edge weights make the
+    // partition unambiguous (heavy within-cluster, weak across).
+    let heavy = (0 ..< 3).map { index in
+      GenreNode(
+        genre: "G\(index)",
+        trackCount: 100,
+        albumCount: 20,
+        artistCount: 20,
+        weight: 0.9,
+      )
+    }
+    let light = (3 ..< 6).map { index in
+      GenreNode(
+        genre: "G\(index)",
+        trackCount: 5,
+        albumCount: 1,
+        artistCount: 1,
+        weight: 0.2,
+      )
+    }
+    var evidence = [GenreEdgeEvidence]()
+    func edge(_ a: String, _ b: String, _ weight: Double) -> GenreEdgeEvidence {
+      GenreEdgeEvidence(
+        genreA: min(a, b),
+        genreB: max(a, b),
+        artistOverlapJaccard: weight,
+        albumOverlapJaccard: weight,
+        trackOverlapJaccard: weight,
+        playlistCooccurWeight: weight,
+        sharedArtistCount: 4,
+        sharedAlbumCount: 2,
+        sharedTrackCount: 2,
+        totalWeight: weight,
+      )
+    }
+    // Heavy cluster — strong internal edges.
+    evidence.append(edge("G0", "G1", 0.9))
+    evidence.append(edge("G1", "G2", 0.9))
+    evidence.append(edge("G0", "G2", 0.85))
+    // Light cluster — strong internal edges (so it forms its own
+    // community), but weight-sum stays low because members are small.
+    evidence.append(edge("G3", "G4", 0.9))
+    evidence.append(edge("G4", "G5", 0.9))
+    evidence.append(edge("G3", "G5", 0.85))
+    // One weak bridge keeps the graph connected.
+    evidence.append(edge("G2", "G3", 0.05))
+    let model = GenreMapBuilder.build(
+      nodes: heavy + light,
+      evidence: evidence,
+      measureLabel: { text, _, _ in CGSize(width: CGFloat(text.count * 7), height: 22) },
+    )
+    // Find the heaviest community by summed member weight.
+    let weightByGenre = Dictionary(uniqueKeysWithValues: model.nodes.map { ($0.genre, $0.weight) })
+    let heaviestCommunity = try #require(model.communities.max(by: { lhs, rhs in
+      let lhsSum = lhs.members.reduce(0.0) { $0 + (weightByGenre[$1] ?? 0) }
+      let rhsSum = rhs.members.reduce(0.0) { $0 + (weightByGenre[$1] ?? 0) }
+      return lhsSum < rhsSum
+    }), "no communities")
+    // `defaultCentre` matches the heaviest community's centroid exactly.
+    #expect(abs(model.defaultCentre.x - heaviestCommunity.centroid.x) < 1.0e-6)
+    #expect(abs(model.defaultCentre.y - heaviestCommunity.centroid.y) < 1.0e-6)
+    // And the heaviest community's members are the high-weight ones.
+    let heaviestMembers = Set(heaviestCommunity.members)
+    #expect(heaviestMembers.contains("G0") || heaviestMembers.contains("G1") || heaviestMembers.contains("G2"))
+  }
 }

@@ -33,38 +33,54 @@ enum GenreMapForceLayout {
 
   struct Configuration: Sendable {
     /// Outer area's nominal world-space side (pre-zoom). Drives the
-    /// initial spread + the macro anchor offsets. Phase 3 widening
-    /// (`plans/genre-metro-map.md` user directive 2026-05-20: "the
-    /// whole map does not need to usefully fit on the screen all at
-    /// once — scrolling is fine"): 2000 → 2800 so the dense centre
-    /// can spread instead of compaction-pushing labels apart after
-    /// the fact.
-    var worldSide: CGFloat = 2800
+    /// initial spread + the macro anchor offsets.
+    ///
+    /// **Phase 3 gate 2026-05-20:** widened 2800 → 5000 per the user's
+    /// "stop compacting" directive — the map is a panable / zoomable
+    /// surface; the default zoom is a single recognisable neighbourhood,
+    /// not a fit-to-viewport overview. Phases 1 / 2 / 3 each baked in
+    /// fit-to-view pressure (`worldSide` 2000 → 2800; compaction polish
+    /// pass) and that posture was wrong direction every time. The
+    /// post-settle compaction pass is gone with this gate; the label-
+    /// aware repulsion in the main settle pass is sufficient at this
+    /// world size.
+    var worldSide: CGFloat = 5000
     /// Edge spring strength. Multiplied by `totalWeight` per edge.
-    /// Phase 3: 0.06 → 0.045 to take some of the inward pull off the
-    /// dense centre — preferring "more room" over post-settle
-    /// compaction polish (the user's scrolling-is-fine directive).
-    var edgeAttraction = 0.045
-    /// Target edge length (pre-weight). Bigger ⇒ more spread. Tuned up
-    /// after the first live verification (220 → 320), and again at
-    /// Phase 3 (320 → 440) per the user's scrolling-is-fine directive:
-    /// give labels more room in the first place so the compaction
-    /// polish becomes optional, not load-bearing.
-    var idealEdgeLength: Double = 440
-    /// Strength of the soft community-centroid pull.
-    var communityGravity = 0.008
+    /// Phase 3-gate 2026-05-20: 0.045 → 0.030, halved-and-some from the
+    /// Phase 3 ship as the world widened — keep the same equilibrium
+    /// energy at the new ideal length so the layout settles into the
+    /// bigger world instead of collapsing back toward the centroid.
+    var edgeAttraction = 0.030
+    /// Target edge length (pre-weight). Bigger ⇒ more spread.
+    /// **Phase 3 gate 2026-05-20:** 440 → 700, again per the "stop
+    /// compacting" directive — give labels enough room inside each
+    /// neighbourhood that the median in-community edge settles to a
+    /// length where neither endpoint's measured label rectangle
+    /// approaches the other. No compaction pass is needed at this
+    /// scale on the real ~115-genre library.
+    var idealEdgeLength: Double = 700
+    /// Strength of the soft community-centroid pull. Kept proportional
+    /// to the world widening — pull is `force ∝ k · displacement`; a
+    /// bigger world means displacements are bigger; halve `k` so the
+    /// centroid isn't pulling members back into a small clump.
+    var communityGravity = 0.004
     /// Strength of the macro-anchor pull (seeded from the coarse pass).
-    var macroGravity = 0.020
-    /// Strength of label-rectangle repulsion when boxes overlap. Bumped
-    /// from 8000 → 14000 after the first live verification; labels
-    /// inside dense clusters were still overlapping at 8000.
+    /// Also halved with the world widening, for the same reason.
+    var macroGravity = 0.010
+    /// Strength of label-rectangle repulsion when boxes overlap.
+    /// Unchanged across the Phase-3-gate widening — overlap math is
+    /// label-rectangle-AABB based, not world-side based, so the
+    /// repulsion impulse doesn't need re-tuning when the world grows.
     var labelRepulsion: Double = 14000
     /// Extra padding (world units) around each label box for spacing.
     var labelPadding: CGFloat = 12
     /// Per-step velocity damping (0…1, smaller = more damping).
     var damping = 0.85
-    /// Cap on per-step velocity magnitude (prevents instability).
-    var maxStepSpeed: Double = 40
+    /// Cap on per-step velocity magnitude (prevents instability). Bumped
+    /// 40 → 60 at the Phase-3 gate so the bigger world settles in
+    /// roughly the same wall time — a node may need to travel further
+    /// across the wider plane.
+    var maxStepSpeed: Double = 60
     /// Internal flag — set on the inner (super-node) pass so the kernel
     /// skips the macro-anchor recursion. Public API users never set this.
     var skipMacroAnchors = false
@@ -77,16 +93,6 @@ enum GenreMapForceLayout {
     var settleWindow = 8
     /// Seed for the deterministic initial scatter.
     var rngSeed: UInt64 = 0xD9_C1_57_2A_3C_22_77_77
-    /// Post-settle label-collision compaction pass. **Phase 3 reduces
-    /// 40 → 16** per the user's 2026-05-20 directive ("the whole map
-    /// does not need to usefully fit on the screen all at once —
-    /// scrolling is fine"). The Phase-2 polish was load-bearing because
-    /// the layout was tuned for a small viewport; Phase 3 widens the
-    /// substrate (`worldSide` 2000 → 2800, `idealEdgeLength` 320 → 440,
-    /// `edgeAttraction` 0.06 → 0.045) so labels rarely approach overlap
-    /// in the first place. The 16 polish steps remain as a final
-    /// resolver for the residual dense-centre pairs.
-    var compactionIterations = 16
   }
 
   struct InputNode: Sendable {
@@ -337,45 +343,17 @@ enum GenreMapForceLayout {
       }
     }
 
-    // Post-settle compaction polish pass (Phase 2 carry-forward).
-    // Gravity disabled; only the label-AABB repulsion runs. The settled
-    // geography is preserved (each node moves at most by the overlap it
-    // needs to clear), but labels that were still touching at the end
-    // of the equilibrium step slide apart along the short overlap axis.
-    // Inner-pass macro layouts (`skipMacroAnchors = true`) skip this —
-    // they're tiny graphs at scaled-up ideal lengths where polish would
-    // just churn.
-    if !configuration.skipMacroAnchors, configuration.compactionIterations > 0 {
-      for _ in 0 ..< configuration.compactionIterations {
-        var anyOverlap = false
-        for lhs in 0 ..< n {
-          for rhs in (lhs + 1) ..< n {
-            let dx = positionX[rhs] - positionX[lhs]
-            let dy = positionY[rhs] - positionY[lhs]
-            let overlapX = (halfBoxX[lhs] + halfBoxX[rhs]) - abs(dx)
-            let overlapY = (halfBoxY[lhs] + halfBoxY[rhs]) - abs(dy)
-            guard overlapX > 0, overlapY > 0 else { continue }
-            anyOverlap = true
-            // Slide apart along whichever axis has the smaller overlap
-            // (the shorter way out of the collision). Half the overlap
-            // goes to each side, so neither gets pushed all the way
-            // through the other.
-            if overlapX < overlapY {
-              let sign: Double = dx >= 0 ? 1 : -1
-              let push = overlapX * 0.55
-              positionX[lhs] -= push * sign * 0.5
-              positionX[rhs] += push * sign * 0.5
-            } else {
-              let sign: Double = dy >= 0 ? 1 : -1
-              let push = overlapY * 0.55
-              positionY[lhs] -= push * sign * 0.5
-              positionY[rhs] += push * sign * 0.5
-            }
-          }
-        }
-        if !anyOverlap { break }
-      }
-    }
+    // **Phase 3 gate 2026-05-20 (the "stop compacting" reset).** The
+    // post-settle label-collision compaction pass that lived here is
+    // GONE. It was a fit-to-viewport hack — added in Phase 1 to defeat
+    // label collisions in a small world, lowered in Phase 2 (40 → 16),
+    // lowered again in Phase 3 — every time pulling in the wrong
+    // direction from the user's "the map scrolls — give labels more
+    // room, don't compact them harder" directive. With `worldSide` at
+    // 5000 and `idealEdgeLength` at 700, the label-aware repulsion in
+    // the main settle pass keeps any single-neighbourhood view free of
+    // overlaps; pan/zoom is the interaction that surfaces the rest.
+    // See `plans/genre-metro-map.md` Phase-3-gate revision block.
 
     var positions = [String: CGPoint](minimumCapacity: n)
     for index in 0 ..< n {

@@ -51,8 +51,18 @@ struct GenreMapModel: Equatable, Sendable {
   /// from these.
   var communities: [GenreMapCommunity]
   /// World-space bounding box of the laid-out nodes (label centres,
-  /// pre-zoom). The panel uses it to fit-to-view on first appearance.
+  /// pre-zoom). The panel uses it for the **opt-in** Fit toolbar action
+  /// (Cmd-9). Default presentation centres on `defaultCentre` at scale
+  /// 1.0× — Phase-3-gate "stop compacting" reset (2026-05-20): the map
+  /// is a panable / zoomable surface, not a fit-to-viewport overview.
   var worldBounds: CGRect
+  /// World-space point the panel uses as the **default viewport
+  /// centre** on first appearance (Phase-3-gate 2026-05-20). Computed
+  /// as the centroid of the heaviest community — defined as the
+  /// community whose summed member `weight` is largest, deterministic
+  /// tie-break by community id. A recognisable neighbourhood, not the
+  /// world centroid; the user pans / zooms to discover the rest.
+  var defaultCentre = CGPoint.zero
   /// Phase 3 (`plans/genre-metro-map.md`): algorithmic metro strands
   /// extracted from the layout graph + community partition (heavy paths
   /// inside communities + cross-community bridge strands). Empty before

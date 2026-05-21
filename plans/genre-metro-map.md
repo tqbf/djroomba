@@ -248,22 +248,64 @@ strands.
 
 ### Phase 3 — Infer metro strands
 
-> **Phase-3 ship (2026-05-20):** delivered as planned, with two
-> compositional notes that affect Phase 4. **(a) User directive
+> **Phase-3-gate revision (2026-05-20, the "stop compacting" reset).**
+> The Phase-3 ship and the Phase-1 / 2 gates all carried implicit fit-
+> to-viewport pressure: widen world a little, run a post-settle
+> compaction pass, default-zoom = fit-to-view. User directive at the
+> gate landed harder: **"We CANNOT reasonably visualize the entire
+> genre space in one screen, so don't try."** Concretely applied:
+>
+> - **Scrolling is the interaction. The DEFAULT zoom is a single
+>   recognisable neighbourhood at 1.0×, NOT fit-to-view.** The user
+>   pans / zooms to discover the rest of the map. Fit-to-view becomes
+>   an opt-in toolbar affordance (⌘9) used as a minimap to know where
+>   to zoom; it does NOT define the default presentation.
+> - **Default centre = heaviest community's centroid**, not the world
+>   centroid. `GenreMapModel.defaultCentre` carries it; the
+>   builder computes it as `max community by Σ member.weight`.
+> - **Force layout widened hard.** `worldSide` 2800 → **5000**,
+>   `idealEdgeLength` 440 → **700**, `edgeAttraction` 0.045 → **0.030**,
+>   `communityGravity` × 0.5, `macroGravity` × 0.5, `maxStepSpeed`
+>   40 → **60**. The bar is "labels never collide inside any visible
+>   single-neighbourhood view", not "the whole world fits on screen".
+> - **`compactionIterations` DELETED.** The entire post-settle label-
+>   collision compaction polish pass that lived in
+>   `GenreMapForceLayout` is gone. It was a fit-to-viewport hack
+>   added in Phase 1 (40 iterations), lowered in Phase 2 (40 → 16),
+>   lowered again in Phase 3 (16 → 16) — three reductions all in the
+>   wrong direction. With the widened defaults the main settle pass's
+>   label-aware repulsion is sufficient on the real ~115-genre
+>   library (computer-use verified). **Do NOT re-add compaction
+>   pressure under another name.**
+> - **Zoom shortcuts.** ⌘+ (×1.25), ⌘− (÷1.25), ⌘0 (reset to default),
+>   ⌘9 (opt-in fit-to-view). Standard Mac zoom-affordance idiom.
+> - **Strand-label typography reset.** TF-IDF token cap 4 → 2; join
+>   separator " · " → single space; Title Case. Junk-token blacklist
+>   extended with `hip`, `hop`, `mor`, `aor`, `crossover`, `tribute`,
+>   `soft`, `adult`, `contemporary` — particles that surfaced in
+>   multiple strands at corpus scale. Labels read as concise
+>   placenames ("Alternative Bristol", "Rap Soul", "Folk 60s") not
+>   token soup ("Alternative · Bristol · Britpop · Electronic").
+>
+> What Phase-4 should NOT inherit: ANY assumption that the map must
+> fit on one screen, ANY post-settle compaction-like pass, ANY
+> default-zoom fit-to-view affordance. Routing + bundling get more
+> room to work in — that's the win the gate sets up for Phase 4.
+
+> **Phase-3 ship (2026-05-20, superseded above):** delivered as planned,
+> with two compositional notes that affect Phase 4. **(a) User directive
 > 2026-05-20:** "the whole map does not need to usefully fit on the
-> screen all at once — scrolling is fine!". This drops the implicit
-> fit-to-viewport pressure from Phases 1/2; the Phase-3 layout
-> widening (`worldSide` 2000 → 2800, `idealEdgeLength` 320 → 440,
-> `edgeAttraction` 0.06 → 0.045, `compactionIterations` 40 → 16) gives
-> labels more room *before* the polish pass. The panel still
-> fits-to-view on first appearance — Phase 4 should soften the
-> default zoom (cap ≤ 0.6×) so splines aren't routinely hidden under
-> dense pill clusters. **(b) `song_genre` materialised** lives in a
-> new migration `v8.songGenreMaterialised` (NOT inside v7) so
-> existing local DBs pick it up on next launch. CLAUDE.md "never
-> edit a shipped migration" — v7 is on `feature/genre-metro-map`
-> only, but the user's local DB already has v7 applied, so a new
-> migration name is the right call.
+> screen all at once — scrolling is fine!". The Phase-3 layout widening
+> (`worldSide` 2000 → 2800, `idealEdgeLength` 320 → 440, `edgeAttraction`
+> 0.06 → 0.045, `compactionIterations` 40 → 16) gave labels more room
+> *before* the polish pass — but kept fit-to-view-on-appear and a
+> compaction-polish pass. The gate above redoes this completely.
+> **(b) `song_genre` materialised** lives in a new migration
+> `v8.songGenreMaterialised` (NOT inside v7) so existing local DBs
+> pick it up on next launch. CLAUDE.md "never edit a shipped
+> migration" — v7 is on `feature/genre-metro-map` only, but the
+> user's local DB already has v7 applied, so a new migration name
+> is the right call.
 
 Extract algorithmic corridors from the topology. **No human-curated
 labels anywhere.**

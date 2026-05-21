@@ -165,7 +165,18 @@ struct GenreMapPanel: View {
   @State private var scale: CGFloat = 1.0
   @State private var offset = CGSize.zero
   @State private var dragging: DragState?
-  @State private var fittedOnce = false
+  /// `true` once the panel has applied the per-rebuild **default
+  /// presentation** (Phase-3-gate 2026-05-20): centre on the heaviest
+  /// community at scale=1.0×, NOT fit-to-view. Reset by re-Analyze and
+  /// when the model's node count changes (a fresh rebuild). Fit-to-view
+  /// is opt-in via the Fit toolbar button / Cmd-9.
+  @State private var centredOnce = false
+  /// Opt-in fit-to-view: set by the Fit toolbar button (Cmd-9). When
+  /// `true`, `baseTransform` computes a scale-and-translate that lands
+  /// every node inside the pane; when `false` (default), the transform
+  /// is identity-scale centred on `model.defaultCentre`. Reset on
+  /// re-Analyze / node-count change.
+  @State private var fitRequested = false
   /// Phase 2's click-to-evidence selection. Set by tapping a transfer-
   /// station or junction pill (ordinary pills are no-op for now), cleared
   /// by tapping outside the panel (background) or pressing the panel's
@@ -211,7 +222,7 @@ struct GenreMapPanel: View {
       Button("Re-Analyze", systemImage: "arrow.clockwise") {
         Task {
           await controller.analyzeGenreMap()
-          fittedOnce = false
+          centredOnce = false
         }
       }
       .labelStyle(.titleAndIcon)
@@ -248,7 +259,7 @@ struct GenreMapPanel: View {
       Button("Analyze") {
         Task {
           await controller.analyzeGenreMap()
-          fittedOnce = false
+          centredOnce = false
         }
       }
       .disabled(service.isAnalyzing)
@@ -260,24 +271,45 @@ struct GenreMapPanel: View {
       strandHoverRow
       HStack {
         Image(systemName: "hand.point.up.left")
-        Text("Drag to move a genre · Pinch to zoom · Hover a strand to highlight")
+        Text("Drag to move a genre · Pinch / ⌘+ / ⌘− to zoom · ⌘0 reset · ⌘9 fit · Hover a strand to highlight")
           .font(.caption)
           .foregroundStyle(.secondary)
         Spacer()
         Button {
-          scale = 1.0
-          offset = .zero
-          fittedOnce = false
+          zoomIn()
+        } label: {
+          Label("Zoom In", systemImage: "plus.magnifyingglass")
+        }
+        .labelStyle(.iconOnly)
+        .controlSize(.small)
+        .keyboardShortcut("+", modifiers: .command)
+        Button {
+          zoomOut()
+        } label: {
+          Label("Zoom Out", systemImage: "minus.magnifyingglass")
+        }
+        .labelStyle(.iconOnly)
+        .controlSize(.small)
+        .keyboardShortcut("-", modifiers: .command)
+        Button {
+          resetZoom()
+        } label: {
+          Label("Actual Size", systemImage: "1.magnifyingglass")
+        }
+        .labelStyle(.iconOnly)
+        .controlSize(.small)
+        .keyboardShortcut("0", modifiers: .command)
+        Button {
+          fitToView()
         } label: {
           Label("Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
         }
         .controlSize(.small)
-        Stepper(value: $scale, in: 0.25 ... 4.0, step: 0.1) {
-          Text(String(format: "%.0f%%", scale * 100))
-            .font(.caption.monospacedDigit())
-        }
-        .labelsHidden()
-        .controlSize(.small)
+        .keyboardShortcut("9", modifiers: .command)
+        Text(String(format: "%.0f%%", scale * 100))
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+          .frame(minWidth: 44, alignment: .trailing)
       }
     }
     .padding(.horizontal, 16)
@@ -307,6 +339,47 @@ struct GenreMapPanel: View {
       }
       .frame(maxHeight: 28)
     }
+  }
+
+  /// Cmd-+ — step zoom in. Centred about the current viewport centre.
+  private func zoomIn() {
+    scale = clamp(scale * 1.25, min: 0.1, max: 6.0)
+  }
+
+  /// Cmd-− — step zoom out. Centred about the current viewport centre.
+  private func zoomOut() {
+    scale = clamp(scale / 1.25, min: 0.1, max: 6.0)
+  }
+
+  /// Cmd-0 — reset to the default presentation: scale 1.0× centred on
+  /// the heaviest community. Clears `fitRequested` so the base transform
+  /// re-applies the heaviest-community centring instead of staying in
+  /// the fit-to-view minimap mode.
+  private func resetZoom() {
+    scale = 1.0
+    offset = .zero
+    fitRequested = false
+    centredOnce = false
+  }
+
+  /// Cmd-9 — opt-in fit-to-view. Different from `resetZoom`: this
+  /// computes the scale required to land all nodes inside the current
+  /// pane, then re-centres on the world midpoint. Kept as an opt-in
+  /// affordance per the Phase-3-gate "default is not fit-to-view"
+  /// directive; the user pans / zooms after using it.
+  ///
+  /// Resets the interactive scale / offset so the fit transform is the
+  /// only thing active — without this, a previously-panned offset
+  /// pushes the fitted minimap off-screen.
+  private func fitToView() {
+    guard
+      let model = service.model,
+      model.worldBounds.width > 0,
+      model.worldBounds.height > 0
+    else { return }
+    fitRequested = true
+    scale = 1.0
+    offset = .zero
   }
 
   private func strandChip(_ strand: GenreMapStrandInference.Strand) -> some View {
@@ -348,7 +421,12 @@ struct GenreMapPanel: View {
 
   @ViewBuilder
   private func mapBody(model: GenreMapModel, in size: CGSize) -> some View {
-    let fitted = fitTransform(model: model, into: size)
+    // Phase-3-gate 2026-05-20 (the "stop compacting" reset): the
+    // "fitted" transform is now an **identity world→screen mapping
+    // centred on the heaviest community** by default, NOT a fit-to-
+    // viewport scale. Fit-to-view becomes opt-in via the `Fit`
+    // toolbar button (Cmd-9), which sets `fitRequested = true`.
+    let fitted = baseTransform(model: model, into: size)
     let activeScale = scale * gestureScale
     let activeOffset = CGSize(
       width: offset.width + gestureOffset.width,
@@ -374,7 +452,7 @@ struct GenreMapPanel: View {
           state = current
         }
         .onEnded { final in
-          scale = clamp(scale * final, min: 0.25, max: 4.0)
+          scale = clamp(scale * final, min: 0.1, max: 6.0)
         }
     )
     .simultaneousGesture(
@@ -406,12 +484,14 @@ struct GenreMapPanel: View {
     )
     .accessibilityElement(children: .contain)
     .onAppear {
-      // Fit-to-view once per rebuild — re-runs after re-Analyze via the
-      // `fittedOnce` reset in the header button.
-      if !fittedOnce { fittedOnce = true }
+      // First-presentation hook — `baseTransform` consults `centredOnce`
+      // / `fitRequested` to pick the transform, so this onAppear is a
+      // no-op marker; the transform self-applies on first render.
+      if !centredOnce { centredOnce = true }
     }
     .onChange(of: model.nodes.count) { _, _ in
-      fittedOnce = false
+      centredOnce = false
+      fitRequested = false
       scale = 1.0
       offset = .zero
     }
@@ -577,26 +657,46 @@ struct GenreMapPanel: View {
     }
   }
 
-  /// Fit-to-view: compute the affine that maps world coords into the
-  /// panel's geometry. The interactive `scale`/`offset` multiply onto
-  /// THIS fit, so the user starts looking at the whole map and refines
-  /// from there.
-  private func fitTransform(model: GenreMapModel, into size: CGSize) -> FitTransform {
+  /// **Phase-3-gate 2026-05-20 (the "stop compacting" reset).**
+  /// Compute the base world → screen affine that the interactive
+  /// `scale`/`offset` multiplies onto.
+  ///
+  /// Default posture: **identity scale** (world units == screen pixels)
+  /// with the **translation centred on `model.defaultCentre`** — the
+  /// centroid of the heaviest community. The user opens the map
+  /// looking at one recognisable neighbourhood; the rest of the world
+  /// scrolls. Pan / zoom is the interaction.
+  ///
+  /// Opt-in fit-to-view (`fitRequested == true`, set by the Fit
+  /// toolbar button / Cmd-9) computes a scale that lands every node
+  /// inside the pane with a padding inset. Used as a minimap
+  /// affordance — the user clicks Fit, sees the dense overview, then
+  /// pans / zooms back in.
+  private func baseTransform(model: GenreMapModel, into size: CGSize) -> FitTransform {
     let bounds = model.worldBounds
     guard bounds.width > 0, bounds.height > 0, size.width > 0, size.height > 0 else {
       return FitTransform(scale: 1, translation: .zero)
     }
-    let padding: CGFloat = 80
-    let availableWidth = max(1, size.width - 2 * padding)
-    let availableHeight = max(1, size.height - 2 * padding)
-    let scale = min(availableWidth / bounds.width, availableHeight / bounds.height)
-    let scaledCentreX = (bounds.minX + bounds.width / 2) * scale
-    let scaledCentreY = (bounds.minY + bounds.height / 2) * scale
+    if fitRequested {
+      let padding: CGFloat = 80
+      let availableWidth = max(1, size.width - 2 * padding)
+      let availableHeight = max(1, size.height - 2 * padding)
+      let fitScale = min(availableWidth / bounds.width, availableHeight / bounds.height)
+      let scaledCentreX = (bounds.minX + bounds.width / 2) * fitScale
+      let scaledCentreY = (bounds.minY + bounds.height / 2) * fitScale
+      let translation = CGSize(
+        width: size.width / 2 - scaledCentreX,
+        height: size.height / 2 - scaledCentreY,
+      )
+      return FitTransform(scale: fitScale, translation: translation)
+    }
+    // Default: identity scale, centred on the heaviest community.
+    let centre = model.defaultCentre
     let translation = CGSize(
-      width: size.width / 2 - scaledCentreX,
-      height: size.height / 2 - scaledCentreY,
+      width: size.width / 2 - centre.x,
+      height: size.height / 2 - centre.y,
     )
-    return FitTransform(scale: scale, translation: translation)
+    return FitTransform(scale: 1, translation: translation)
   }
 
   private func clamp(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
