@@ -74,8 +74,8 @@ enum GenreTreeRadialPlan {
     // MARK: Lifecycle
 
     init(
-      r1: CGFloat = 280,
-      r2: CGFloat = 520,
+      r1: CGFloat = 420,
+      r2: CGFloat = 820,
       outOfFocusOpacity: Double = 0.06,
       twoHopOpacity: Double = 0.55,
       oneHopOpacity: Double = 1.0,

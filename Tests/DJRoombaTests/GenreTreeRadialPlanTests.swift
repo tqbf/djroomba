@@ -97,8 +97,8 @@ struct GenreTreeRadialPlanTests {
     #expect(b.ring == .oneHop)
     let dA = Self.distance(a.position, centre)
     let dB = Self.distance(b.position, centre)
-    #expect(abs(dA - 280) < 0.001) // default r1
-    #expect(abs(dB - 280) < 0.001)
+    #expect(abs(dA - 420) < 0.001) // default r1
+    #expect(abs(dB - 420) < 0.001)
   }
 
   @Test
@@ -112,7 +112,7 @@ struct GenreTreeRadialPlanTests {
     let c = try #require(plan.targetsByGenre["C"])
     #expect(c.ring == .twoHop)
     let d = Self.distance(c.position, plan.centre)
-    #expect(abs(d - 520) < 0.001) // default r2
+    #expect(abs(d - 820) < 0.001) // default r2
   }
 
   @Test
@@ -192,7 +192,7 @@ struct GenreTreeRadialPlanTests {
     let b = try #require(plan.targetsByGenre["B"])
     #expect(b.ring == .oneHop)
     let distance = Self.distance(b.position, plan.centre)
-    #expect(abs(distance - 280) < 0.001)
+    #expect(abs(distance - 420) < 0.001)
   }
 
   @Test
@@ -253,7 +253,7 @@ struct GenreTreeRadialPlanTests {
     ))
     let centre = plan.centre
     let heavyPos = try #require(plan.targetsByGenre["NHeavy"]).position
-    let expectedTop = CGPoint(x: centre.x, y: centre.y - 280)
+    let expectedTop = CGPoint(x: centre.x, y: centre.y - 420)
     #expect(abs(heavyPos.x - expectedTop.x) < 0.001)
     #expect(abs(heavyPos.y - expectedTop.y) < 0.001)
   }

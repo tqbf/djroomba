@@ -87,6 +87,64 @@ struct GenreTreeMapPanel: View {
         await controller.genreTreeService.build()
       }
     }
+    .onChange(of: selectedGenre) { _, newValue in
+      applyFocusViewport(for: newValue)
+    }
+  }
+
+  /// On focus: animate pan + zoom so the radial-focus cluster (the
+  /// selected genre at centre, the 1-hop ring around it) fills the
+  /// viewport with comfortable padding. Without this the focus
+  /// cluster lands at the selected pill's *original* world position,
+  /// which is usually off-screen at default zoom; the labels then
+  /// stack visually because the canvas isn't recentred.
+  ///
+  /// On clear: restore the user's pre-focus pan/zoom (so the trunk-
+  /// tree view returns to where they were exploring), or to identity
+  /// if no prior state was captured.
+  private func applyFocusViewport(for newSelection: String?) {
+    guard
+      viewportSize.width > 0,
+      viewportSize.height > 0,
+      let model = service.renderModel
+    else { return }
+
+    if
+      let genre = newSelection,
+      let placed = model.layout.placedNodes.first(where: { $0.genre.name == genre })
+    {
+      if preFocusViewState == nil {
+        preFocusViewState = SavedViewState(scale: scale, offset: offset)
+      }
+      let fitted = baseTransform(model: model, into: viewportSize)
+      let fittedCentre = CGPoint(
+        x: fitted.scale * placed.position.x + fitted.translation.width,
+        y: fitted.scale * placed.position.y + fitted.translation.height,
+      )
+      // Target: fit the outer ring + a half-pill margin inside the
+      // shorter viewport axis. `r2` is the outer-ring radius in world
+      // coords; the fit scale converts it to a screen radius.
+      let r2: CGFloat = 820
+      let padding: CGFloat = 90
+      let availableHalf = min(viewportSize.width, viewportSize.height) / 2 - padding
+      let targetRingScreen = max(180, availableHalf)
+      let rawScale = targetRingScreen / max(1, fitted.scale * r2)
+      let targetScale = clamp(rawScale, min: 0.1, max: 6.0)
+      withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
+        scale = targetScale
+        offset = CGSize(
+          width: viewportSize.width / 2 - targetScale * fittedCentre.x,
+          height: viewportSize.height / 2 - targetScale * fittedCentre.y,
+        )
+      }
+    } else {
+      let restore = preFocusViewState
+      preFocusViewState = nil
+      withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
+        scale = restore?.scale ?? 1.0
+        offset = restore?.offset ?? .zero
+      }
+    }
   }
 
   /// Community → swatch palette. Single-source duplicate of
@@ -113,6 +171,21 @@ struct GenreTreeMapPanel: View {
   }
 
   // MARK: Private
+
+  /// Canvas background — warm high-value low-saturation cream in
+  /// light mode; deep low-saturation blue in dark mode. Chosen to
+  /// give the strand / branch colour palette good legibility without
+  /// the canvas reading as "system grey." NSColor-backed so the
+  /// switch happens at the AppKit layer the moment the appearance
+  /// changes (no SwiftUI `colorScheme` plumbing required).
+  private static let canvasBackground = Color(
+    nsColor: NSColor(name: "GenreTreeCanvasBackground") { appearance in
+      let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      return isDark
+        ? NSColor(red: 0.078, green: 0.094, blue: 0.122, alpha: 1)
+        : NSColor(red: 0.985, green: 0.972, blue: 0.928, alpha: 1)
+    }
+  )
 
   private struct FitTransform {
     var scale: CGFloat
@@ -198,6 +271,17 @@ struct GenreTreeMapPanel: View {
 
   @GestureState private var gestureScale: CGFloat = 1.0
   @GestureState private var gestureOffset = CGSize.zero
+
+  /// Saved viewport state at the moment the user clicked into a
+  /// focus. `clearSelection()` restores from this so the user lands
+  /// back on the trunk-tree view they were exploring, not on the
+  /// canvas-centre identity zoom.
+  @State private var preFocusViewState: SavedViewState?
+
+  private struct SavedViewState: Equatable {
+    var scale: CGFloat
+    var offset: CGSize
+  }
 
   /// Visible "Clear Focus" affordance — appears in the footer in
   /// radial-focus mode and disappears in trunk-tree mode. Carries
@@ -345,11 +429,11 @@ struct GenreTreeMapPanel: View {
           }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .background(Color(nsColor: .underPageBackgroundColor))
+      .background(Self.canvasBackground)
     } else if service.isBuilding {
       ProgressView()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(Self.canvasBackground)
     } else {
       emptyState
     }
