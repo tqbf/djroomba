@@ -16,6 +16,572 @@ visual.
 > generic control was always a stepping stone — see Phase 7 for what to
 > upstream and what to retire).
 
+---
+
+## Ship status — 2026-05-21
+
+**Phases 1 through 6 + every phase gate landed on `feature/genre-metro-map`. PR #5 open, NOT merged. Phase 7 (upstream patches + vendor retirement) intentionally deferred per user 2026-05-21.**
+
+- Tests: **357 in 54 suites**, all green.
+- `make check`, `swift test`, `make build` (signed Apple Development), `swiftformat --lint`, `swiftlint --strict` all clean.
+- Live-verified on the user's real 115-genre / 117-layout-edge / 43-neighbourhood library across every phase gate.
+- The map is a working discovery tool on the live build today: hover a genre, click an ordinary / junction / transfer station, ⇧-click two genres to compare via Yen-k shortest paths over the layout graph, drag a node, pan/zoom, quit and relaunch — positions, community ids, strand colours and TF-IDF labels all preserved.
+
+### Commit ladder (`main..feature/genre-metro-map`)
+
+```
+14adb6b  Plan: genre-metro-map (successor to genre-graph display layer)
+2ebe223  Phase 1 — substrate
+c161497  Phase 1 GATE — candidate filter + typography + Toms'-Laws α/β/γ
+11034dd  Phase 2 — transferness + click-to-evidence
+c96db7c  Phase 2 GATE — substrate widening + rank classifier
+3eb41fa  Phase 3 — algorithmic strands + materialised song_genre
+810b5ad  Phase 3 GATE — "stop compacting" reset
+2984d16  Phase 4 — obstacle-aware A* routing + corridor bundling
+3506004  Phase 4 REDO — fix strand-through-label rendering
+d0acd69  Phase 4 GATE — parallel routing + verifier extraction + plan honesty
+2fdc663  Phase 5 — evidence + discovery UX
+4d27094  Phase 5 GATE — visual walkthrough + 4 firming fixes
+0ba904d  Phase 6 — persistence + incremental updates
+127d103  Phase 6 GATE — toms-laws A+B+C + skill verdicts
+```
+
+### Standing user directives, encoded
+
+Two directives reshaped the plan mid-execution. Each is now invariant; any
+future agent reading this plan must respect both.
+
+1. **2026-05-20 — "scrolling is fine".** First framing of the directive arrived
+   late in Phase 3: "the whole map does not need to usefully fit on the screen
+   all at once." The Phase 3 ship widened `worldSide` 2000 → 2800 and
+   `idealEdgeLength` 320 → 440 but kept a post-settle `compactionIterations=16`
+   polish pass to defeat label collisions in the dense centre — Phase 3 was
+   *still* trying to fit. The Phase 3 gate (the "stop compacting" reset)
+   internalised the directive properly: deleted the compaction pass entirely;
+   widened to `worldSide=5000` + `idealEdgeLength=700`; dropped
+   fit-to-view-on-appear; default zoom is now **identity scale, centred on
+   the heaviest medium-resolution community**. Cmd-+/-/0/9 wire the zoom
+   shortcuts. The map's default presentation is *one* readable neighbourhood;
+   the rest of the world is off-screen and the user pans to discover it.
+2. **2026-05-20 / 2026-05-21 — "We CANNOT reasonably visualize the entire
+   genre space in one screen, so don't try."** The hardened restatement
+   after the Phase 3 ship still framed widening as a "concession" to
+   scrolling. Phase 4 (routing) and Phase 5 (discovery UX) and Phase 6
+   (persistence) all inherit the same posture: don't compact, don't fit,
+   plan for a wide canvas the user explores. Memory at
+   `~/.claude/projects/.../genre-metro-map-scrolling-fine.md` enforces
+   this on every subsequent agent.
+
+### Phase-by-phase resolution
+
+Below: what each phase *actually* shipped, what was deferred or revised
+against the original spec, and what carry-forwards survived into the
+next phase or `DESIGN-TODO.md`.
+
+#### Phase 1 — Better graph substrate ✅
+
+*Commit `2ebe223` + Phase-1-GATE `c161497`.*
+
+**Shipped per spec.** `v7.genreMap` migration (additive over v1–v6 frozen):
+two new tables `genre_node` + `genre_edge_evidence` alongside the v6
+`genre_edge`. Pure pipeline in `DJRoomba/Music/GenreMap/`:
+`GenreMapLayoutGraph` (mutual-kNN ∪ MST ∪ inter-community bridges),
+`GenreMapLouvain` (in-tree Louvain at γ=0.4/1.0/1.8 — the three
+resolutions from the spec), `GenreMapForceLayout` (djroomba-owned
+constrained force layout with **label-rectangle repulsion** — the
+spec's headline correctness item — community gravity, algorithmic
+macro-region two-pass), `GenreMapBuilder` orchestrator,
+`GenreMapService` `@MainActor @Observable` wrapper. View layer:
+`GenreMapPanel` + `StationLabel` (pills sized by per-genre weight,
+4-tier weight ramp). Wired as a `Show Genre Map…` sibling action
+alongside (not replacing) the v6 panel — `Analyze Genre Map`
+keystroke ⌥⇧⌘A.
+
+**Phase 1 gate corrections.** Phase 1 shipped with the candidate
+filter too tight (41 layout edges, 93 over-fragmented Louvain
+communities). Gate widened the support floor (`(a_n + b_n + t_n)
+≥ 2` → `≥ 1 OR pl ≥ 0.10`), folded v6 `genre_edge` as a 4th source
+in the `pairs` CTE, lowered builder `minEdgeWeight` 0.015 → 0.0001,
+raised `topFractionPerNode` 0.25 → 0.50 — the live result moved to
+44 communities. The Phase 1 gate also locked the typography (12→26pt
+scale, four-tier `regular → medium → semibold → bold` weight ramp,
+font-size config in Builder matches StationLabel exactly), and
+deleted a dead `CommunityHull.swift` left over from a rejected
+hull-rendering attempt. Tests at gate: 264/42 green.
+
+**Carry-forwards.** 44 communities was still high at γ=1.0; Phase 2
+gate handed it to Phase 3 (which retuned to γ=0.85 → 43). The dense
+centre's label collisions were a known issue at gate; the Phase 3
+gate fixed them structurally by widening the world.
+
+#### Phase 2 — Transferness without strands ✅
+
+*Commit `11034dd` + Phase-2-GATE `c96db7c`.*
+
+**Shipped per spec.** Pure `GenreMapTransferness.swift` — Brandes'
+betweenness, Shannon neighbour-community entropy, cross-community
+edge fraction, composite per the spec's weights
+(`0.30·b + 0.25·e + 0.20·c + 0.15·me + 0.10·sc`, with the
+strand-count slot at 0 until Phase 3 fills it). **Generic-giant
+dampening** — if a node has high library weight AND low
+multi-community support, knock its transferness down — pinned by a
+named test (`giant generic genre is not a fake transfer station`).
+View layer extends `StationLabel` for three node kinds: ordinary
+(plain pill), junction (pill + `diamond.fill` glyph), transfer
+station (pill + `point.3.connected.trianglepath.dotted` glyph,
+1.5pt border at 0.85 hull-colour opacity). Click → side panel
+with the four input contributions + connected-community samples +
+1-hop evidence edges (the first time individual edges render).
+
+**Phase 2 gate corrections — substrate widening.** The Phase-2
+ship recalibrated thresholds from the plan's `0.35 / 0.65` →
+`0.20 / 0.45` and still produced **zero** transfer stations on
+the live library. That meant the composite SCORE was sub-spec,
+not the threshold. The gate's investigation found the layout
+graph was under-admitting bridge edges: applied **Path A** (admit
+the heaviest inter-community edge per community pair regardless of
+per-node top-N — `interCommunityBridges`) AND **Path B** (relative-
+rank classifier at `transferStationRank=0.90`, `junctionRank=0.75`
+— absolute `classify(composite:)` retained as canonical reference).
+Live result: **4 transfer stations** (Electronic, R&B/Soul, Pop,
+Alt/Indie) + 5 junctions (Hard Rock, Pop/Rock/New-Wave/80s,
+Soundtrack, Hip-Hop/Rap, Punk) + 106 ordinary. Rock/Alternative/
+Country/Folk all ordinary — dampening engaged correctly. Tests at
+gate: 286/44 green.
+
+**Plan revision recorded.** Phase 2 step 4 (lines 207–213) carries
+a Phase-2-gate revision block: absolute cuts don't work on a
+sparse-bridge library; the live path uses `classifyByRank` until
+Phase 3's strand_count slot starts contributing the missing 10%.
+
+**Carry-forwards.** Evidence-on-demand latency 6–8 s (two
+`json_each(genre_names)` explodes per click) → handed to Phase 3
+as the `song_genre` materialisation task.
+
+#### Phase 3 — Algorithmic metro strands ✅
+
+*Commit `3eb41fa` + Phase-3-GATE `810b5ad`.*
+
+**Shipped per spec.** Pure `GenreMapStrandInference.swift`:
+per-community MSTs → heavy paths (length ≥ 3, weight ≥ adaptive τ)
+with side-branch promotion (capped 2–4 per community);
+cross-community bridge strands via Dijkstra over cost
+`1 − total_weight`; member-Jaccard cull at ≥ 0.6 (loser absorbed
+as a branch); TF-IDF strand labels (top-2 tokens after
+junk-blacklist) plus 1–2 representative high-centrality genre
+names. **strand_count fed back into the Phase 2 transferness
+composite** — the slot finally non-zero. Rendered as faint
+Catmull-Rom splines (low opacity for non-selected), per-station
+**coloured strand ticks** (transfer stations show 2+ ticks one
+per serving strand), minimal hover affordance on the strand chip
+footer.
+
+**`song_genre` materialised view.** `v8.songGenreMaterialised`
+migration adds a flat `song_genre(song_id, genre, artist_key,
+album_key)` table populated wholesale by the v7 rebuild, with
+three indexes on `(genre, song_id)`, `(genre, artist_key)`,
+`(genre, album_key)`. **Evidence-on-demand latency collapsed 6–8 s
+→ <100 ms** (the Phase 2 gate's open carry-forward, closed).
+
+**Phase 3 gate corrections — "stop compacting" reset.** Phase 3
+shipped with token-soup strand labels ("Alternative · Bristol ·
+Britpop · Electronic") and the same fit-to-viewport pressure as
+before. User's hardened directive arrived: "we cannot reasonably
+visualize the entire genre space in one screen, so don't try."
+Gate response:
+- **Delete `compactionIterations` entirely.** The post-settle
+  compaction pass that defeated label collisions in the dense
+  centre was the wrong shape of fix.
+- `worldSide` 2800 → **5000**; `idealEdgeLength` 440 → **700**;
+  attraction / community gravity / macro gravity all scaled down
+  to match the bigger world.
+- **Drop fit-to-view-on-appear.** Default presentation is
+  identity-scale, centred on the heaviest medium-resolution
+  community.
+- Cmd-+/-/0/9 zoom shortcuts wired; scale range widened to
+  `[0.1, 6.0]`.
+- Strand label rendering: max 2 tokens, single-space join,
+  Title Case, junk-token blacklist extended with the genre-
+  particles `hip`/`hop`/`mor`/`aor`/`crossover`/`tribute`/`soft`/
+  `adult`/`contemporary`. "Alternative · Bristol · Britpop ·
+  Electronic" → **"Alternative Bristol"**. Live-verified clean.
+
+Tests at gate: 302/45 green. Live-verified on the signed build
+via computer-use — one neighbourhood readable at the default
+zoom; rest of the map scrolls.
+
+**Carry-forwards.** None blocking. Catmull-Rom splines visibly
+naïve; routing is Phase 4's job. γ=0.85 mediumresolution stays.
+
+#### Phase 4 — Obstacle-aware routing + corridor bundling ✅ (REDO + GATE)
+
+*Commits `2984d16` (initial) + `3506004` (REDO) + `d0acd69`
+(GATE).*
+
+**Initial ship.** Pure `GenreMapRouting.swift` — A* over a
+100×100 coarse grid over the 5000-side world (50pt cells),
+label-rectangle obstacle marking from authoritative
+`GenreMapNode.labelSize` + padding, cost terms (label-crossing,
+sharp-turn, proximity-to-non-member-station, long-detour),
+reward terms (existing-bundled-corridor following, transfer-
+station passage, member-station hugging). Spline relaxation via
+Catmull-Rom over A*-generated waypoints. Pure
+`GenreMapBundling.swift` — union-find corridor extraction over
+≥3-cell shared paths, ±k perpendicular-offset slot assignment,
+crossing inventory with transfer-station-discount. Background
+`GenreMapRoutingActor` (`ArtworkProvider` shape; layoutRevision-
+keyed cache; off-main `MainActor.run`-bridge of the result).
+Model gains `routedStrands` + `layoutRevision`; service gains
+`commitDrag` with `geographicEpsilon=6.0` to suppress micro-drag
+revisions. Renderer (`StrandSpline`) prefers the routed
+polyline; falls back to Phase-3 raw Catmull-Rom while routing
+is in flight. Synthetic 10-strand fixture inside the plan's
+200 ms budget. Initial Phase 4 ship reported "3 pans verified,
+no strand crosses a label".
+
+**REDO — Phase 4 visibly miss-shipped.** User opened the map and
+saw the Alternative-Bristol strand cut straight through "Hard
+Rock", "Electro/Crossover", and "Alt/Laptop/Bristol". Root cause
+hypotheses checked:
+- Renderer not consuming routed polyline? Already correct.
+- A* obstacle cost too small? `labelPenalty=1000` vs `baseCost
+  ≈1.4` is a clean 700× ratio.
+- Grid too coarse? 50pt cells over 5000 = 100×100 ⇒ ~2-3 cells
+  per label, sufficient.
+- `labelSize` not authoritative? Already so.
+- **Spline relaxation undoing A*.** This was it.
+  `GenreMapRouting.smoothPolyline`'s deflection-floor case was
+  *replacing* sharp-corner waypoints with two midpoints —
+  effectively drawing a diagonal cut across the corner that
+  re-entered labels A* had detoured around.
+- Fix: keep the corner waypoint, *insert* a fillet pair
+  bracketing it. `labelPadding` 8 → 12 pt.
+
+REDO landed (`3506004`). +4 tests = 320/48 green. Single-strand
+visual verification on Alternative-Bristol confirmed clean.
+
+**Phase 4 gate corrections.** The REDO ship skipped the
+plan-required 12-strand screenshot verification (rationalised
+that a unit-test invariant was "equivalent evidence" — the same
+rationalisation that hid the first defect). Gate enforced:
+- **Per-strand screenshot evidence**, all 12 strands, at
+  `/tmp/phase4-gate-strand-NN-*.png`. Each strand → CLEAN against
+  the headline criterion. Plus a DEBUG-only `GenreMapRouting
+  Verifier.runIfDebug` that mirrors the unit-test invariant
+  against the live data and emits per-strand sample counts to
+  stderr — caught the 1–2px grazes the synthetic fixtures don't
+  reproduce.
+- **Honest perf reconciliation.** Live routing on the real
+  library was **1789 / 1813 ms** post-REDO. Gate applied parallel
+  `routeConcurrent` via `withTaskGroup` (12 strands are
+  independent), bumped `labelPenalty` 1e3 → 1e4, bumped
+  `labelPadding` 12 → 24. Live cold ~1229 ms, drag-relax median
+  ~1267 ms, max ~1269 ms. **Still ~6× over the plan's 200 ms
+  target — explicitly re-classified as a Phase 5/6 polish item,
+  not a Phase 4 acceptance criterion.**
+- toms-laws A+B+C: (A) plan honesty annotation recording the
+  achieved-vs-aspirational perf budget; (B) De-Casteljau Bezier
+  helpers (`quadBezier`, `cubicBezier`) promoted to `nonisolated
+  static` on `StrandSpline` — three duplicates collapsed to one
+  canonical implementation; (C) the DEBUG verifier extracted from
+  the routing actor into a new `GenreMapRoutingVerifier.swift`
+  file (returns the actor to its pre-gate readability).
+
+Tests at gate: stable 322/48 green.
+
+**Plan revision recorded.** Phase 4 success criteria carry an
+explicit "200 ms target re-classified as Phase 5/6 polish, not a
+Phase 4 acceptance gate" note. The reality: parallel A* + `1e4`
+label penalty is a correctness-over-perf trade-off; the user's
+"scrolling is fine" posture means routing happens in the
+background actor, the main thread stays responsive, and the
+~1.3 s latency is observed only on layout-revision bumps (cold
+load, drag-release), never on hover/pan/zoom.
+
+**Carry-forwards.** Catmull-Rom self-overlap on extremely sharp
+interior corners still produces small curl loops on one or two
+configurations in the dense centre — cosmetic only. Disk-backed
+routing cache would close the cold-launch recompute (Phase 6
+persistence preserves positions ⇒ routing is byte-identical
+across re-launch ⇒ a cache that survives process death would
+make the second launch's routing free). Deferred to post-merge.
+
+#### Phase 5 — Evidence + discovery UX ✅
+
+*Commit `2fdc663` + Phase-5-GATE `4d27094`.*
+
+**Shipped per spec.** Pure `GenreMapDiscovery.swift`:
+selection enum (`.empty` / `.single` / `.compare(lhs, rhs)`),
+Yen-k shortest paths via Dijkstra-plus-spur-removals over the
+layout graph (cost `1 − total_weight`, k=5), 1-hop helpers,
+serving-strand index, transfer-stations-along-path,
+`transferMapPlan` (pure pan-and-zoom plan, view-side animation
+applied in the view layer). 5 new paginated `song_genre` reads
+in `LibraryStore+GenreMap.swift`: `genreMapTopArtists`,
+`genreMapTopAlbums`, `genreMapSharedArtists`,
+`genreMapSharedAlbums`, `genreMapSharedTracks` — all under the
+existing Phase 3 indexes; all <100 ms.
+
+Inspector restructured into modular subviews — `EvidenceHeader`,
+`EvidenceNeighbours`, `EvidenceStrands`, `EvidenceRepresentative`,
+`EvidenceConnectedNeighbourhoods`, `EvidenceCompare`. The plan's
+native `.inspector()` prescription assumed a window-level
+context; the metro map runs in a sheet (the v6 panel sits in the
+main window already), so the sheet hosts the equivalent
+**right-docked 340pt side-column inspector** with ⌘⌥I toggle and
+`sidebar.trailing` glyph. macos-design verdict: this is the
+correct equivalence inside a sheet; the proper native
+`.inspector()` waits on a Phase 6 / post-merge move to a
+top-level `WindowGroup`.
+
+**Interactions live.**
+- **Hover a genre.** Tooltip with transferness %, track/album/
+  artist counts, top-3 related genres with evidence counts.
+  Fade non-neighbours. Brighten serving strands. Pure cosmetic
+  state — no recompute. Hover-to-highlight < 16 ms.
+- **Click an ordinary genre.** Inspector docks. Header +
+  serving-strands + 1-hop neighbours + representative artists +
+  representative albums. <100 ms.
+- **Click a junction.** Above + a connected-neighbourhood
+  placenames section (the Phase 3 TF-IDF labels for strands
+  this junction serves).
+- **Click a transfer station.** **Transfer-map mode** activates:
+  pan-and-zoom plan animates to centre the pill at a chosen
+  scale (~40%); serving strands rise to high opacity; layout
+  edges incident to this station alone become visible (the
+  *only* state in the app where dense edges are allowed).
+- **⇧-click a second genre.** **Compare mode.** Yen-k paths
+  between the two highlighted on the canvas; transfer stations
+  along those paths surfaced; strands traversed listed; shared
+  artists / albums / tracks paginated in `EvidenceCompare`.
+  <250 ms end-to-end.
+- **Inspector toggle ⌘⌥I.** Collapse state persists across
+  relaunch via `@AppStorage("genreMapInspectorPresented")` —
+  `@SceneStorage` was the first attempt but required
+  `NSWindowRestoration` that the sheet doesn't enable.
+
+**Phase 5 gate corrections — 4 real defects caught by walkthrough.**
+The Phase 5 ship's first visual-verification attempt was
+interrupted by workstation auto-lock; only hover was visually
+verified. The gate's walkthrough on the re-unlocked machine
+caught:
+1. **Compare mode silently broken** — a `.simultaneousGesture
+   (TapGesture())` on the entire ZStack fired on every child
+   StationLabel tap, immediately cancelling
+   `compare-pending` selection state. Fix: dedicated
+   `Color.clear.contentShape()` at the back of the ZStack owns
+   the dismiss-on-empty tap; child labels handle their own.
+2. **`NSEvent.modifierFlags` race** — by tap-closure time the
+   modifier flags could have released. Fix: read
+   `NSApp.currentEvent?.modifierFlags` instead.
+3. **Transfer-map viewport misaligned** — `applyTransferMapPlan`
+   hardcoded `viewport: 900×600`, pushing the focused pill
+   off-screen on smaller windows. Fix: `@State viewportSize` +
+   `.task(id: geometry.size)` plumbs the live `GeometryReader`
+   size into the plan application.
+4. **Inspector collapse didn't persist** — `@SceneStorage`
+   requires `NSWindowRestoration` (off for this sheet). Fix:
+   `@AppStorage`.
+
+Also: case-mismatch typography tic (`Text("transferness 19%")`
+lowercase vs section header `TRANSFERNESS INPUTS` uppercase).
+Fixed.
+
+Tests at gate: 338/50 green.
+
+**Plan revisions recorded.** Phase 5 step E `.inspector()`
+prescription annotated with the right-docked-column equivalence
+rationale.
+
+**Carry-forwards in `DESIGN-TODO.md`.**
+- ⇧-click compare discoverability: surface a transient hint
+  when one genre is selected and the user hovers another.
+  Currently the footer says "⇧-click to compare" in body text;
+  Mac idiom suggests a more prominent overlay hint.
+- `NSEvent.modifierFlags` → SwiftUI's `.modifierKeyAlternate(.shift)`
+  modifier idiom once macOS 15 is the minimum target.
+- Tooltip clipping at the right edge of the canvas — single-
+  line fix; carry-forward.
+- Promote the Genre Map sheet to a top-level `WindowGroup`
+  (would enable the native `.inspector()` modifier + a future
+  "remember last pan/zoom" affordance).
+
+#### Phase 6 — Persistence + incremental updates ✅
+
+*Commit `0ba904d` + Phase-6-GATE `127d103`.*
+
+**Shipped per spec.** `v9.genreMapState` migration — two additive
+tables alongside v7/v8:
+
+```sql
+genre_map_state(
+  genre              TEXT PRIMARY KEY,
+  x, y               REAL NOT NULL,
+  community_coarse, community_medium, community_fine  TEXT NOT NULL,
+  strand_ids         TEXT NOT NULL,   -- JSON array
+  updated_at         INTEGER NOT NULL,
+  revision           INTEGER NOT NULL)
+
+genre_map_strand(
+  strand_id          TEXT PRIMARY KEY,
+  colour             INTEGER NOT NULL,
+  label_tokens       TEXT NOT NULL,   -- JSON array
+  revision           INTEGER NOT NULL)
+```
+
+Pure `GenreMapPersistence.swift`:
+- Community matching by member-set Jaccard ≥ 0.5: matched ⇒
+  reuse predecessor id (preserves anchor, colour, placename);
+  below ⇒ mint `new-N`. Runs at all three resolutions
+  independently.
+- Strand matching — **see Phase 6 gate honesty correction below**.
+
+`GenreMapBuilder.buildWithPersistence(previousState:)` is the
+new entrypoint; the legacy `build` overload calls through with
+`nil` (preserves the Phase 1 random-scatter behaviour for every
+pre-Phase-6 test). `GenreMapForceLayout` gains
+`previousPositions` + `stabilityForce` config — existing nodes
+seed from persisted `(x, y)` (no random reseed) and feel a
+per-step `μ · (previousPosition − currentPosition)` restoring
+force (`μ = 0.05`); new nodes settle naturally and aren't
+stability-anchored.
+
+`LibraryStore+GenreMap` adds `loadGenreMapState() ->
+GenreMapPersistedState?` (returns `nil` on empty DB) +
+`writeGenreMapState(states:, strands:)` (one write tx, multi-row
+`INSERT … VALUES (…), (…)` per CLAUDE.md SQL idiom).
+`GenreMapService.build` is now load → rebuild → write;
+`GenreMapService.load` (the panel's `.task`-driven non-rebuilding
+read) also reads previous state so a relaunch shows the
+persisted positions immediately. Two new instrumentation
+properties: `lastPersistedReadSeconds` / `lastPersistedWriteSeconds`.
+
+`MusicController.reanalyzeGenreGraphIfEnabled` +
+`rebuildGenreMapIfEnabled` collapse into a single
+`runMapRebuildIfEnabled()` funnel (UserDefaults key
+`autoReanalyzeGenreGraph` preserved; the v6 panel rebuild still
+fires alongside the v7 map rebuild — v6 retirement is a
+post-merge cleanup, NOT Phase 6).
+
+**Headline acceptance test pinned.** `GenreMapPhase6Acceptance
+Tests.mutating one neighbourhood preserves positions outside it`
+— builds M0, mutates the library (+5 new genres tightly
+connected to one existing genre), builds M1 twice (with and
+without `previousState`). Asserts the persisted-state median
+drift across unchanged genres is `< 0.6 × random-reseed control
+drift`. Strand ids + colours preserved; matched community ids
+retain their predecessor strings. `layoutRevision` increments
+by exactly 1.
+
+Live-verified on the real 115-genre library: quit + relaunch +
+re-analyze preserves strand pill row colours, community hull
+tints, and the world positions of pills present in both views.
+
+Persistence perf: `loadGenreMapState` ~3 ms; `writeGenreMapState`
+~9 ms — 5–10× headroom on the spec's 50 ms read / 100 ms write
+targets.
+
+**Phase 6 gate corrections — toms-laws A+B+C.**
+- **A.** Deleted `GenreMapPersistence.stockPalette` (12-entry
+  `[UInt32]` table) and `GenreMapPersistence.defaultColour(forStrandID:)`
+  — both unused. The renderer's `StrandSpline.colourAt` palette
+  is the actual source of truth; the persistence module's
+  parallel palette was dead weight pretending to be canonical.
+- **B (matcher honesty).** Renamed
+  `GenreMapPersistence.matchStrands(newStrands:oldStrands:)` →
+  `matchStrandsByMembers(newStrands:oldStrands:)`. Dropped
+  `struct PathPair`, `strandMemberWeight`, `strandPathWeight`,
+  `consecutivePairs(_:)`, and the `pathPairs` tuple element on
+  both sides. Pre-fix code claimed a `0.6·member + 0.4·path`
+  composite the only caller never had paths to feed (v9
+  doesn't persist consecutive station pairs) — so the
+  composite always collapsed to `0.6 · memberJaccard`, and the
+  stated 0.5 threshold required ~85% member overlap, not the
+  documented 50%. **Phase 6's published strand-matcher policy
+  is now explicitly member-Jaccard ≥ 0.5.** If a future phase
+  wants the real path-similarity composite, the right move is
+  to persist path-pairs in a `v10.genreMapStrandPaths` migration,
+  not to keep a half-truth API.
+- **C.** Added `lastError = nil` at the success site in
+  `GenreMapService.build` (after persistence write succeeds).
+  Pre-fix code only cleared `lastError` at the start of
+  `build()`, so a stale error from `load()` or a prior
+  persistence failure could survive across a successful
+  subsequent build and surface in the fail-soft UI chip. +2
+  unit tests pin the post-condition.
+
+Tests at gate: 357/54 green.
+
+**Carry-forwards (`DESIGN-TODO.md`).** Phase 6 gate's macos-design
+consult on "remember last pan/zoom across opens?" → defer.
+Sheets are modal task surfaces; Mac idiom is to reset to a
+sensible default each open (here: heaviest-community centre,
+the Phase 3 default). Persistent pan/zoom + selection is a
+window-level affordance — if we want it, the correct change is
+to promote Genre Map to a top-level `WindowGroup`, not bolt
+`@AppStorage` onto a sheet. No 1-file change applied.
+
+#### Phase 7 — Upstream patches + retire vendor ⏸ DEFERRED
+
+*Per user 2026-05-21: do not upstream. Stop here.*
+
+The five `DJROOMBA PATCH`es in `Vendor/ForceGraph/` are spec'd
+below (lines 379–425 of this plan) and are substantively
+correct improvements to the upstream `tqbf/fdg` library. The
+metro renderer is its own thing — djroomba no longer uses
+`ForceGraphView` for the genre map — but the v6 `genre_graph`
+panel still depends on the vendored copy. Vendor retirement
+therefore additionally depends on the v6 panel's retirement
+(itself a post-merge cleanup), so deferring the upstream PRs
+costs the project nothing today.
+
+State of the vendored patches as of this stop point:
+- **Patch 4 — `onFocusChange` callback** (`ForceGraphView.swift:78`,
+  `GraphEngine.swift:36/655/772…`). The cleanest of the five PRs.
+- **Patch 1 — search-pulse redraw-pin removal** (`GraphEngine.swift:351`).
+  Mechanical bugfix; needs a screen-capture diff in the PR.
+- **Patch 5 — `CrossingIndex` hub-cell O(E²) bound**
+  (`CrossingIndex.swift:67/169`). Mechanical perf fix + one
+  README sentence on the lower-bound HUD contract.
+- **Patch 2 — pan-only → focus-with-zoom on search centring**
+  (`GraphEngine.swift:630`, `Viewport.swift:99`). New
+  `Viewport.focus(on:minScale:)` — small API surface.
+- **Patch 3 — neighbour-walk** (`GraphEngine.swift:109/729`,
+  `KeyCaptureView.swift:137`). Largest API surface; the spec
+  itself notes this one "needs design discussion in the issue
+  first" and may stay open indefinitely.
+
+When the user decides to land these (or the project hits a
+moment where it wants to retire the v6 panel + drop the vendor
+dir), the plan-spec order is **4 → 1 → 5 → 2 → 3**; each is
+spec'd in detail at lines 379–425 below.
+
+### Current carry-forward inventory (across all phases)
+
+Captured in `DESIGN-TODO.md`. None of these block the metro-map
+programme as it stands today.
+
+- **Disk-backed routing cache** — Phase 4 carry-forward. Phase 6
+  preserves layout positions ⇒ routing is byte-identical across
+  re-launch; an on-disk cache would make the second launch's
+  routing free. Today the routing actor's cache is in-memory,
+  so cold A* runs on every fresh launch.
+- **⇧-click compare discoverability** — Phase 5 carry-forward.
+- **`NSEvent.modifierFlags` → SwiftUI `.modifierKeyAlternate`** —
+  Phase 5 carry-forward; awaits macOS-15 minimum.
+- **Tooltip clipping at canvas right edge** — Phase 5 carry-forward.
+- **Genre Map sheet → top-level `WindowGroup`** — Phase 5 + Phase 6
+  carry-forward; would unlock native `.inspector()` and persistent
+  pan/zoom.
+- **v6 genre_graph panel retirement** — post-merge cleanup; blocks
+  vendor retirement (Phase 7).
+- **200 ms routing-recompute budget** — Phase 4 gate's re-classed
+  Phase 5/6 polish item; current real-library median ~1.27 s on
+  cold + drag-relax, all on a background actor (main thread stays
+  responsive).
+
+---
+
 ## Product goal (the four questions the map must answer)
 
 1. **Where am I** in my library's genre space?

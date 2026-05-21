@@ -5,6 +5,131 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — ⏸ Genre Metro Map — programme paused at end of Phase 6 (Phase 7 intentionally deferred per user)
+
+**Phases 1–6 + every phase gate landed on `feature/genre-metro-map` (PR #5
+open, NOT merged). Phase 7 (upstream the 5 `DJROOMBA PATCH`es to
+`tqbf/fdg` + retire `Vendor/ForceGraph/`) intentionally deferred per
+user 2026-05-21 — "stop here. don't upstream."** This entry is the
+consolidation pointer; per-phase detail lives in the entries below and
+the exhaustive per-phase resolution lives in
+`plans/genre-metro-map.md`'s "Ship status — 2026-05-21" prelude block
+(top of that file).
+
+### What the user has on disk today
+
+- **357 tests in 54 suites, all green.**
+- `make check`, `swift test`, `make build` (signed), `swiftformat --lint`,
+  `swiftlint --strict` — all clean.
+- The map is a working discovery tool on the signed build: hover a
+  genre; click an ordinary / junction / transfer station (transfer
+  station → transfer-map mode); ⇧-click two genres to compare via
+  Yen-k shortest paths over the layout graph; drag a node; pan/zoom;
+  quit and relaunch — positions, community ids, strand colours, and
+  TF-IDF labels all preserved across the relaunch.
+
+### Commits on `feature/genre-metro-map` (chronological)
+
+```
+14adb6b  Plan: genre-metro-map (successor to genre-graph display layer)
+2ebe223  Phase 1 — substrate
+c161497  Phase 1 GATE — candidate filter + typography + Toms'-Laws α/β/γ
+11034dd  Phase 2 — transferness + click-to-evidence
+c96db7c  Phase 2 GATE — substrate widening + rank classifier
+3eb41fa  Phase 3 — algorithmic strands + materialised song_genre
+810b5ad  Phase 3 GATE — "stop compacting" reset
+2984d16  Phase 4 — obstacle-aware A* routing + corridor bundling
+3506004  Phase 4 REDO — fix strand-through-label rendering
+d0acd69  Phase 4 GATE — parallel routing + verifier extraction + plan honesty
+2fdc663  Phase 5 — evidence + discovery UX
+4d27094  Phase 5 GATE — visual walkthrough + 4 firming fixes
+0ba904d  Phase 6 — persistence + incremental updates
+127d103  Phase 6 GATE — toms-laws A+B+C + skill verdicts
+```
+
+### What each phase delivered (one-liner each — see `plans/genre-metro-map.md` for the full per-phase resolution)
+
+- **Phase 1.** `v7.genreMap` schema; pure pipeline (mutual-kNN ∪ MST ∪
+  inter-community bridges + Louvain at γ=0.4/1.0/1.8 + label-rectangle
+  constrained force layout); `Show Genre Map…` sibling action alongside
+  (not replacing) the v6 panel.
+- **Phase 2.** Transferness (Brandes betweenness + neighbour-community
+  entropy + cross-community fraction + generic-giant dampening); 3 node
+  kinds with glyph + border differentiation; click → side panel with
+  inputs + evidence edges. Gate widened the substrate (admit heaviest
+  inter-community edge per pair) and added the rank-classifier fallback
+  to surface 4 transfer stations on the live library.
+- **Phase 3.** Algorithmic metro strands (per-community MST heavy paths
+  + cross-community bridges + member-Jaccard cull + TF-IDF labels);
+  materialised `song_genre` collapses evidence-on-demand latency 6–8 s
+  → <100 ms; strand_count fed back into transferness. Gate ("stop
+  compacting" reset) wired the standing user directive: deleted the
+  compaction polish pass, widened the layout hard (world 5000×5000,
+  idealEdgeLength 700), replaced fit-to-view-on-appear with
+  identity-scale-centred-on-heaviest-community, Cmd-+/-/0/9 zoom
+  shortcuts. Fixed token-soup strand labels ("Alternative · Bristol ·
+  Britpop · Electronic" → "Alternative Bristol").
+- **Phase 4.** Obstacle-aware A* routing + corridor bundling + crossing
+  minimisation on a background actor; layoutRevision-keyed cache.
+  Initial ship shipped a visible defect (`smoothPolyline` corner-
+  midpoint replacement cut diagonals through labels A* had detoured);
+  REDO landed the fix (keep corner + fillet pair, `labelPadding` 8 →
+  12 pt). Gate enforced per-strand screenshot evidence + landed
+  parallel `routeConcurrent` (perf 1789 ms → 1267 ms median; 200 ms
+  target re-classed to Phase 5/6 polish) + extracted the DEBUG
+  verifier into its own file.
+- **Phase 5.** Evidence + discovery UX. Hover, click ordinary, click
+  junction, click transfer station (→ transfer-map mode pan/zoom), ⇧-
+  click compare (Yen-k paths + shared artists/albums/tracks).
+  Right-docked 340pt inspector with ⌘⌥I toggle (native `.inspector()`
+  deferred until a top-level `WindowGroup` move). Gate walkthrough
+  caught 4 real defects (compare-mode gesture leak, NSEvent races,
+  transfer-map hardcoded 900×600 viewport, inspector-collapse
+  non-persistence) — all fixed.
+- **Phase 6.** Persistence + incremental updates. `v9.genreMapState`
+  migration; pure `GenreMapPersistence` (community Jaccard ≥ 0.5 ⇒
+  reuse predecessor id; strand-matcher honesty after gate ⇒
+  member-only Jaccard ≥ 0.5); stability force `μ·(prev−curr)` on
+  existing nodes only; `runMapRebuildIfEnabled` consolidation. Gate
+  applied toms-laws A+B+C (dead `stockPalette` deletion, honest
+  `matchStrandsByMembers` API, `lastError` cleared at success site).
+
+### Standing user directives (encoded — every future agent must respect)
+
+1. **"Scrolling is fine."** The map need not fit on one screen. Default
+   presentation is one neighbourhood at identity zoom; the user pans
+   to discover the rest. Memorialised at
+   `~/.claude/projects/-Users-agentzero-codebase-djroomba/memory/genre-metro-map-scrolling-fine.md`.
+2. **"We CANNOT reasonably visualize the entire genre space in one
+   screen, so don't try."** Hardened restatement after the Phase 3
+   ship still tried to fit. Resulted in the Phase 3 gate's "stop
+   compacting" reset.
+
+### Phase 7 — intentionally deferred
+
+Five `DJROOMBA PATCH`es in `Vendor/ForceGraph/` are correct upstream
+improvements to `tqbf/fdg`; the spec's order is 4 → 1 → 5 → 2 → 3
+(plan lines 379–430). Vendor retirement additionally depends on the v6
+`genre_graph` panel's retirement (post-merge cleanup), so deferring
+the upstream PRs costs the project nothing today.
+
+### Carry-forwards (in `DESIGN-TODO.md`)
+
+- Disk-backed routing cache (would close cold-launch recompute —
+  Phase 6 persistence makes routing byte-identical across re-launch).
+- ⇧-click compare discoverability (transient hint when one genre
+  selected and another is hovered).
+- `NSEvent.modifierFlags` → SwiftUI `.modifierKeyAlternate(.shift)`
+  (awaits macOS 15 minimum).
+- Tooltip clipping at canvas right edge (single-line fix).
+- Genre Map sheet → top-level `WindowGroup` (unlocks native
+  `.inspector()` and persistent pan/zoom).
+- v6 `genre_graph` panel retirement (blocks vendor retirement).
+- 200 ms routing-recompute budget (current real-library median
+  ~1.27 s on the background actor; main thread stays responsive).
+
+---
+
 ## 2026-05-21 — ✅ Genre Metro Map — Phase 6 GATE — toms-laws A+B+C + skill verdicts + drift spot-check (`feature/genre-metro-map`)
 
 Phase 6 gate. PR #5 stays open; **NOT merged.** Three 1-file
