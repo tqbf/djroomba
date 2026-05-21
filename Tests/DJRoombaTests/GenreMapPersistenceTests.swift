@@ -88,50 +88,21 @@ struct GenreMapPersistenceTests {
   @Test
   func `strand grow by 2 members reuses id when member jaccard stays high`() {
     // Before: strand spans 8 members. After: same 8 + 2 new ⇒ Jaccard 8/10
-    // = 0.8. Path stays similar (one segment rerouted, ~80% of consecutive
-    // pairs preserved). Composite > 0.5 ⇒ reuse.
-    let newPath = ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
-    let oldPath = ["A", "B", "C", "D", "E", "F", "G", "H"]
-    let newStrands = [
-      (
-        id: 5,
-        members: Set(newPath),
-        pathPairs: GenreMapPersistence.consecutivePairs(newPath),
-      )
-    ]
-    let oldStrands = [
-      (
-        id: "old-7",
-        members: Set(oldPath),
-        pathPairs: GenreMapPersistence.consecutivePairs(oldPath),
-      )
-    ]
-    let matched = GenreMapPersistence.matchStrands(
-      newStrands: newStrands,
-      oldStrands: oldStrands,
+    // = 0.8 ⇒ reuse.
+    let newMembers: Set = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+    let oldMembers: Set = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    let matched = GenreMapPersistence.matchStrandsByMembers(
+      newStrands: [(id: 5, members: newMembers)],
+      oldStrands: [(id: "old-7", members: oldMembers)],
     )
     #expect(matched[5] == "old-7", "the modest grow should preserve the id")
   }
 
   @Test
   func `strand completely re routed below threshold mints new`() {
-    let newStrands = [
-      (
-        id: 1,
-        members: Set(["A", "B", "C"]),
-        pathPairs: GenreMapPersistence.consecutivePairs(["A", "B", "C"]),
-      )
-    ]
-    let oldStrands = [
-      (
-        id: "old",
-        members: Set(["X", "Y", "Z"]),
-        pathPairs: GenreMapPersistence.consecutivePairs(["X", "Y", "Z"]),
-      )
-    ]
-    let matched = GenreMapPersistence.matchStrands(
-      newStrands: newStrands,
-      oldStrands: oldStrands,
+    let matched = GenreMapPersistence.matchStrandsByMembers(
+      newStrands: [(id: 1, members: Set(["A", "B", "C"]))],
+      oldStrands: [(id: "old", members: Set(["X", "Y", "Z"]))],
     )
     #expect(matched.isEmpty, "fully disjoint strand must mint a new id")
   }

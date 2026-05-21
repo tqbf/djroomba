@@ -570,13 +570,9 @@ enum GenreMapBuilder {
     }
     // The "old strand member set" for matching is the union of every
     // genre that recorded this strand id in its persisted `strand_ids`.
-    // The "path pairs" are NOT persisted in v9 (paths are large and
-    // re-derived on every rebuild) — so we fall back to member-Jaccard
-    // alone for matching at this scale. The composite score reduces
-    // to `0.6 · member-Jaccard` when path pairs are unknown; the
-    // threshold 0.5 is therefore tighter (matches require a ~85 %
-    // member overlap). That is the conservative direction; the spec
-    // tolerates "below threshold → mint a new id".
+    // Path pairs are NOT persisted in v9 (paths are large and re-derived
+    // on every rebuild), so matching is member-Jaccard only — see
+    // `GenreMapPersistence.matchStrandsByMembers` for the rationale.
     var oldMembers = [String: Set<String>]()
     for (genre, strandIDs) in previousState.strandIDsByGenre {
       for id in strandIDs {
@@ -584,20 +580,12 @@ enum GenreMapBuilder {
       }
     }
     let oldEntries = previousState.strandRowByID.keys.map { strandID in
-      (
-        id: strandID,
-        members: oldMembers[strandID] ?? [],
-        pathPairs: Set<GenreMapPersistence.PathPair>(),
-      )
+      (id: strandID, members: oldMembers[strandID] ?? [])
     }
     let newEntries = strands.map { strand in
-      (
-        id: strand.id,
-        members: Set(strand.memberGenres),
-        pathPairs: GenreMapPersistence.consecutivePairs(strand.pathStations),
-      )
+      (id: strand.id, members: Set(strand.memberGenres))
     }
-    return GenreMapPersistence.matchStrands(
+    return GenreMapPersistence.matchStrandsByMembers(
       newStrands: newEntries,
       oldStrands: oldEntries,
     )
@@ -605,7 +593,8 @@ enum GenreMapBuilder {
 
   /// Apply the matching: every matched strand inherits the
   /// predecessor's persisted `colourID` (recovered from the saved
-  /// palette index — see `stockPalette` ↔ renderer palette mapping).
+  /// palette index — the renderer's `StrandSpline.colourAt` palette is
+  /// the source of truth for the actual hues).
   /// Branches continue to mirror their parent's colour.
   static func applyStrandMatching(
     strands: [GenreMapStrandInference.Strand],

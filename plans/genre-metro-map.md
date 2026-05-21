@@ -545,6 +545,30 @@ Make every relationship explainable. This is where the map becomes a
 
 ### Phase 6 — Persistence and incremental updates
 
+> **Phase 6 gate (2026-05-21).** toms-laws A+B+C landed; PR #5 stays
+> open (NOT merged). (A) deleted `GenreMapPersistence.stockPalette` +
+> `defaultColour(forStrandID:)` — the renderer's
+> `StrandSpline.colourAt` palette was the actual source of truth.
+> (B) renamed `matchStrands` → `matchStrandsByMembers`, dropped the
+> `pathPairs` parameter + `PathPair` struct + `consecutivePairs` +
+> the `strandMemberWeight` / `strandPathWeight` constants — the
+> composite was always degenerate at this scale (paths aren't
+> persisted) and the docstring promised math the only caller never
+> fed. (C) clear `lastError = nil` at the success site in
+> `GenreMapService.build` so a persistence-write failure on one run
+> can't shadow a clean subsequent build; +2 tests pinning the
+> invariant. Total tests **355/53 → 357/54** green. swiftui-pro
+> verdict: no Phase-6-introduced view-render regression
+> (`layoutRevision` is read in the builder only; the panel never
+> binds the field). macos-design verdict on "should the sheet
+> remember pan/zoom": **defer** — sheets reset; if persistent atlas
+> state is wanted, the correct idiom is to promote the Genre Map to
+> a top-level `WindowGroup` (logged in `DESIGN-TODO.md`).
+> Live-verified on the real 115-genre library: before-Re-Analyze
+> and after-Re-Analyze screenshots saved to
+> `/tmp/phase6-gate-{before,after}-reanalyze.png`; strand colours +
+> topology counts preserved across the rebuild. **GO for Phase 7.**
+
 > **Phase 6 ship (2026-05-21).** Landed as planned. New
 > `v9.genreMapState` migration (two additive tables —
 > `genre_map_state` keyed by genre, `genre_map_strand` keyed by
@@ -601,8 +625,14 @@ The map must feel like the user's stable personal atlas.
 2. **Match new communities to old.** Jaccard over member sets;
    threshold (`0.5`?) preserves the **community id, anchor, colour and
    placename**. Below threshold, mint a new id.
-3. **Match new strands to old.** Member-Jaccard + path-similarity
-   composite. Preserve strand colour + label tokens for high matches.
+3. **Match new strands to old.** Member-set Jaccard ≥ 0.5 ⇒ reuse the
+   predecessor strand id + colour + label tokens. (Originally specced
+   as a `0.6·member + 0.4·path` composite, but path pairs aren't
+   persisted in v9 — paths re-derive every rebuild — so the path
+   channel had nothing to compose against. The Phase-6-gate toms-laws
+   B pass renamed the function to `matchStrandsByMembers` and removed
+   the dead path-pair argument; the implementation always was
+   member-only.)
 4. **Incremental layout.** Initialise positions from
    `genre_map_state.x/y`; add a stability force
    `μ · (previous − current)` only on the *existing* nodes; let new

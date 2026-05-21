@@ -261,3 +261,26 @@ deferred here.
   cosmetic edge case, not worth a layout refactor.
 - **Depends on:** none.
 - **Effort:** XS.
+
+### Phase-6-gate carry-forward — Genre Map: sheet → top-level window?
+
+- **What:** "Show Genre Map…" currently presents as a sheet that
+  reopens centred on the heaviest community each time. macos-design
+  Phase-6-gate consult: a sheet is a *modal task surface*, not an
+  atlas. If the user wants persistent pan/zoom across opens (so the
+  map feels like Maps.app's main window, where state survives), the
+  correct Mac idiom is to promote Genre Map to a top-level
+  `WindowGroup`, not to add `@AppStorage` to a sheet. Adding state
+  persistence inside a sheet would be the wrong idiom — sheets are
+  meant to reset.
+- **Law(s):** macos-design (don't bolt window-level state onto a
+  sheet); HIG (sheets are transient, windows are documents).
+- **Pays its freight (falsifiable):** the Genre Map becomes openable
+  as a real macOS window with its own toolbar and state, separable
+  from the main window. The Show Genre Map menu item moves to a
+  `Window` command. Pan/zoom + selection survive close/reopen
+  naturally because the WindowGroup re-uses its scene.
+- **Veto condition:** if it turns out users mostly open the map for
+  spot inspection and dismiss within seconds, the sheet is correct
+  and persistence is over-engineering — keep as is.
+- **Depends on:** none. **Effort:** M.

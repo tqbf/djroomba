@@ -5,6 +5,149 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — ✅ Genre Metro Map — Phase 6 GATE — toms-laws A+B+C + skill verdicts + drift spot-check (`feature/genre-metro-map`)
+
+Phase 6 gate. PR #5 stays open; **NOT merged.** Three 1-file
+toms-laws phases (A/B/C) applied; swiftui-pro / macos-design
+consults closed out; live drift spot-check verified Phase 6
+persistence on the real 115-genre library.
+
+### A+B+C applied — symbol-by-symbol
+
+- **A — Delete dead palette in `GenreMapPersistence`.** Removed
+  `static let stockPalette: [UInt32]` (12-colour table, lines
+  117–133) and `static func defaultColour(forStrandID:) -> Int64`
+  (lines 271–281) — both unused. The renderer's
+  `StrandSpline.colourAt` palette was the actual source of truth;
+  the persistence module's parallel palette was dead weight
+  pretending to be canonical. Cross-file comment in
+  `GenreMapBuilder.swift` (~line 608) that referenced
+  `stockPalette` rewritten to point at the renderer. Verified
+  zero hits in `DJRoomba/` + `Tests/`.
+
+- **B — Honest strand-matcher signature.** Renamed
+  `GenreMapPersistence.matchStrands(newStrands:oldStrands:)` →
+  `matchStrandsByMembers(newStrands:oldStrands:)`. Dropped the
+  `pathPairs: Set<PathPair>` element of both tuple parameters.
+  Deleted: `struct PathPair`, `static let strandMemberWeight`,
+  `static let strandPathWeight`, `static func
+  consecutivePairs(_:) -> Set<PathPair>`. Updated the matcher
+  docstring + the `GenreMapPersistedStrandRow` docstring +
+  `GenreMapBuilder.matchStrandsToPrevious` so the stated policy
+  matches the implemented `member-Jaccard ≥ 0.5` threshold (the
+  pre-fix code claimed a `0.6·member + 0.4·path` composite the
+  only caller never had paths to feed — so the composite always
+  collapsed to `0.6·memberJaccard`, and the stated 0.5 threshold
+  required ~85% member overlap, not the documented 50%; that was
+  the dishonesty). 9 fixture tests in
+  `GenreMapPersistenceTests.swift` updated — 2 strand-matching
+  tests rewritten against the new signature, the 7 community /
+  codec / seed / stability tests unchanged. Verified zero hits
+  for `PathPair`.
+
+- **C — Don't shadow build errors with persistence-write errors.**
+  Added `lastError = nil` at the success site in
+  `GenreMapService.build` (after the persistence write succeeds,
+  before the surrounding `do` exits). The pre-fix code only
+  cleared `lastError` at the *start* of `build()`, so a stale
+  error written by the `load()` path or by a prior persistence
+  failure could survive across a successful subsequent build and
+  surface in the fail-soft UI chip. One-line semantic fix; +2
+  unit tests in `GenreMapServiceErrorClearingTests.swift` pin
+  the post-condition (successful build leaves `lastError` nil at
+  the success site; the second build on the same store still
+  nil).
+
+### Skill verdicts
+
+- **swiftui-pro:** clean — no Phase-6-introduced view regression.
+  Confirmed: `GenreMapPanel.swift` has zero `model.layoutRevision`
+  references (the revision is a builder/router contract only);
+  the panel observes `service.model` + `service.isAnalyzing` and
+  nothing else new from Phase 6. The new
+  `lastPersistedReadSeconds` / `lastPersistedWriteSeconds`
+  fields are diagnostic-only and not read by any view. No fix.
+
+- **macos-design:** carry-forward, not applied. Question was
+  "should the Genre Map sheet remember last pan/zoom across
+  opens?" Skill verdict: sheets are modal task surfaces — Mac
+  idiom is to reset to a sensible default each open (here:
+  heaviest-community centre, Phase-3 default). Persistent
+  pan/zoom + selection is a *window-level* affordance; if we
+  want that, the correct change is to promote Genre Map to a
+  top-level `WindowGroup`, not to bolt `@AppStorage` onto a
+  sheet. Logged as a Phase-6-gate carry-forward in
+  `DESIGN-TODO.md`. **No 1-file `@AppStorage` change applied.**
+
+- **typography-designer:** N/A skipped — Phase 6 added no new
+  type surface.
+
+### Live computer-use drift spot-check
+
+Workstation unlocked → DJRoomba foregrounded → Playback › Show
+Genre Map…
+
+1. Default-centre screenshot:
+   `/tmp/phase6-gate-before-reanalyze.png`. Visible: International
+   junction (red), Electro/Classics, College Rock, Alt/Worldy,
+   CCM, strand pill row Alternative Bristol / Folk 60s / Rap
+   Soul / Dance Electro. Topology line: 115 / 117 / 43.
+2. Click Re-Analyze. Wait for completion (~3–4 s on this
+   build).
+3. Default-centre screenshot (same fixed-100% zoom):
+   `/tmp/phase6-gate-after-reanalyze.png`. Default centre
+   re-resolves to the heaviest community (Phase-3 gate
+   behaviour — small weight shifts can pick a sibling
+   community), visibly recentring slightly; **the strand pill
+   row is byte-identical** (same 4 strand names + 4 colours);
+   **topology counts unchanged** (115 / 117 / 43); the pills
+   that appear in both views ("Alt/Worldy", "CCM") sit in the
+   same world positions. Community hull tints unchanged.
+
+Drift verdict: clean. Phase 6 persistence is preserving
+positions / community ids / strand colours across the rebuild
+as designed. The view-centre re-anchor is *expected* default-
+centre behaviour from Phase 3, not a Phase 6 regression.
+
+### Tests + build
+
+- Tests before: 355 / 53. Tests after: **357 / 54** (+1 new
+  suite `GenreMapServiceErrorClearingTests` × 2 tests).
+- `make check`: clean (debug build).
+- `swift test`: 357/54 all green.
+- `make build`: signed bundle produced.
+- `swiftformat --lint` on the 5 touched files: clean (formatter
+  applied + verified).
+- `swiftlint --strict` on the 5 touched files: clean.
+
+### Files touched
+
+- `DJRoomba/Music/GenreMap/GenreMapPersistence.swift` — A + B
+  deletions, B rename, docstring honesty pass.
+- `DJRoomba/Music/GenreMap/GenreMapBuilder.swift` — B
+  call-site update (drop `pathPairs:` arg, drop
+  `consecutivePairs(...)` call, simplify tuple shape) + A
+  comment rewrite.
+- `DJRoomba/Music/GenreMap/GenreMapService.swift` — C
+  one-line clear at the success site.
+- `Tests/DJRoombaTests/GenreMapPersistenceTests.swift` — B
+  test rewrites.
+- `Tests/DJRoombaTests/GenreMapServiceErrorClearingTests.swift`
+  — new file pinning C.
+- `plans/genre-metro-map.md` — Phase-6-gate note above the
+  Phase-6 ship note; matcher-policy clarification in success
+  criteria.
+- `DESIGN-TODO.md` — Phase-6-gate carry-forward (sheet vs
+  WindowGroup) added.
+
+### GO / NO-GO
+
+**GO for Phase 7.** A + B + C are all subtractive or
+clarifying; the substrate is honest. Skill verdicts are
+clean / deferred-with-rationale. Drift spot-check confirms
+Phase 6 persistence works on the real library. PR #5 ready
+for review; do not merge.
+
 ## 2026-05-21 — ✅ Genre Metro Map — Phase 6 — persistence + incremental updates (`feature/genre-metro-map`)
 
 Phase 6 lands. Re-imports + relaunches preserve positions, community

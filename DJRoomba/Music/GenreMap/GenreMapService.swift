@@ -145,6 +145,13 @@ final class GenreMapService {
           strands: result.strandRows,
         )
         lastPersistedWriteSeconds = Date.now.timeIntervalSince(writeStart)
+        // Phase 6 gate (toms-laws C): clear stale `lastError` at the
+        // success site. The build's `do` clears it on entry, but the
+        // persistence-write `catch` set its own non-throwing error
+        // after that — without this line, a successful subsequent
+        // build would still surface a previous run's persistence
+        // error in the fail-soft chip.
+        lastError = nil
       } catch {
         lastError = "Persisted-state write failed: \(error.localizedDescription)"
       }
