@@ -104,9 +104,17 @@ struct GenreMapRebuildTests {
     let evidence = try await store.genreMapEvidence()
     let row = evidence.first { $0.genreA == "Pop" && $0.genreB == "Rock" }
     // Pop and Rock share no songs/artists/albums, so the structural
-    // channels are all 0. The playlist channel weight = 1/1 = 1.0, ×0.05
-    // = 0.05. But: support floor (shared_* sum < 2) drops the row.
-    #expect(row == nil, "no structural shares ⇒ support floor drops it")
+    // channels are all 0. The playlist channel normalised weight is
+    // 1.0 (single shared playlist, max in the graph), well above the
+    // Phase-1-gate-revised `pl >= 0.10` clause, so the row IS kept.
+    // (Pre-gate this row was dropped by `(a_n + b_n + t_n) >= 2`; the
+    // gate review found that the strict structural floor was leaving
+    // small genres as Louvain singletons on the real library, so the
+    // floor was loosened to `>= 1 OR pl >= 0.10`.)
+    #expect(row != nil, "playlist channel ≥0.10 lets the row through")
+    let totalWeight = row?.totalWeight ?? 0
+    #expect(abs(totalWeight - 0.05) < 1e-9,
+            "composite = 0.05 · 1.0 (playlist-only) = 0.05")
   }
 
   /// One shared track total (across artist/album/track channels combined)
@@ -128,10 +136,13 @@ struct GenreMapRebuildTests {
     #expect(evidence.first?.sharedTrackCount == 1)
   }
 
-  /// Two genres whose only structural shared count is one artist (zero
-  /// album, zero track) ⇒ sum = 1 < 2 ⇒ dropped.
+  /// Phase-1 gate revision: a pair with ANY structural overlap (one
+  /// shared artist suffices) clears the new `>= 1` support floor. The
+  /// previous behaviour (`>= 2`) was too strict — small genres routinely
+  /// share exactly one artist with their nearest neighbour, and the
+  /// stricter floor was leaving them as Louvain singletons.
   @Test
-  func `support floor drops single artist only edges`() async throws {
+  func `support floor keeps single artist only edges after gate revision`() async throws {
     let store = try TestSupport.freshStore()
     // Same artist, DIFFERENT album titles, DIFFERENT songs.
     try await store.upsertSongs([
@@ -140,9 +151,30 @@ struct GenreMapRebuildTests {
     ])
     _ = try await store.rebuildGenreMap()
     let evidence = try await store.genreMapEvidence()
+    let row = evidence.first { $0.genreA == "Pop" && $0.genreB == "Rock" }
+    #expect(row != nil, "1 shared artist clears the >= 1 floor")
+    #expect(row?.sharedArtistCount == 1)
+    #expect(row?.sharedAlbumCount == 0)
+    #expect(row?.sharedTrackCount == 0)
+  }
+
+  /// Pure-noise pairs (no structural overlap AND no meaningful playlist
+  /// co-occurrence) must still be dropped — the gate revision moved the
+  /// floor, it didn't remove it.
+  @Test
+  func `support floor still drops pairs with zero support across all channels`() async throws {
+    let store = try TestSupport.freshStore()
+    // Two genres with completely disjoint artists/albums/songs and no
+    // playlist co-occurrence.
+    try await store.upsertSongs([
+      Self.song("p1", artist: "P-Artist", album: "P-Album", genres: ["Pop"]),
+      Self.song("r1", artist: "R-Artist", album: "R-Album", genres: ["Rock"]),
+    ])
+    _ = try await store.rebuildGenreMap()
+    let evidence = try await store.genreMapEvidence()
     #expect(
       evidence.first { $0.genreA == "Pop" && $0.genreB == "Rock" } == nil,
-      "1 shared artist + 0 shared album + 0 shared track = below floor",
+      "0 structural + 0 playlist = no row",
     )
   }
 

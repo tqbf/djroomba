@@ -176,12 +176,20 @@ extension LibraryStore {
              GROUP BY a.genre, b.genre
           ),
           -- Union of every canonical pair that has at least one channel.
+          -- Phase-1-gate revision: include the v6 playlist channel as
+          -- a fourth source so playlist-only pairs (no structural
+          -- overlap but real shared-playlist co-occurrence) can enter
+          -- the candidate pool. The composite-weight + per-node top-N
+          -- filters in the Builder still gate which of them survive.
           pairs(genre_a, genre_b) AS (
             SELECT genre_a, genre_b FROM inter_artist
             UNION
             SELECT genre_a, genre_b FROM inter_album
             UNION
             SELECT genre_a, genre_b FROM inter_track
+            UNION
+            SELECT genre_a, genre_b FROM genre_edge
+             WHERE genre_a < genre_b
           ),
           -- v6 playlist channel: canonicalise `genre_edge` to `a < b`, and
           -- normalise its weight to [0,1] by the max in the analysed graph.
@@ -245,10 +253,21 @@ extension LibraryStore {
                a_n, b_n, t_n,
                0.45 * a_j + 0.35 * b_j + 0.15 * t_j + 0.05 * pl
           FROM composed
-         -- Support floor: drop pairs lacking ≥2 shared things across all
-         -- three structural channels combined. Pure noise filter — tiny
-         -- genres sharing one stray track no longer mint a fake edge.
-         WHERE (a_n + b_n + t_n) >= 2
+         -- Support floor (Phase 1 gate revision): a pair survives when
+         -- it has EITHER any structural overlap (one shared artist OR
+         -- album OR track is enough) OR a meaningful playlist co-
+         -- occurrence (`p_w >= 0.10` of the max-weighted v6 edge).
+         -- The original `(a_n + b_n + t_n) >= 2` floor was too strict
+         -- for a real library: many small genres share exactly one
+         -- artist/album with their nearest neighbour and were filtered
+         -- away, leaving them as Louvain singletons (93 / 115 on the
+         -- shipping data). The composite-weight floor in the Builder's
+         -- `filterCandidates` still drops absolute-noise pairs;
+         -- letting more weak structural pairs into the candidate pool
+         -- is what gives Phase 2's transferness a real graph to work
+         -- on.
+         WHERE (a_n + b_n + t_n) >= 1
+            OR pl >= 0.10
         """)
 
       return try Int.fetchOne(

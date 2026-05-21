@@ -28,18 +28,25 @@ enum GenreMapBuilder {
 
   struct Configuration: Sendable {
     /// Edge composite-weight floor below which a candidate is discarded
-    /// before mutual-kNN. This is the adaptive-threshold "floor" — the
-    /// per-node `top 5–10 %` cut is in `topFractionPerNode`. Lowered
-    /// from 0.05 to 0.015 after the first live verification on the real
-    /// library showed too few layout edges (14/115 nodes ⇒ Louvain
-    /// produced 112 singleton communities). The support floor at SQL
-    /// write time (`shared_* >= 2`) is already the noise-floor; this
-    /// threshold is just an extra precaution.
-    var minEdgeWeight = 0.015
+    /// before mutual-kNN. Effectively disabled (0.0001) at the Phase-1
+    /// gate: the structural floor already lives in SQL (`(a_n + b_n +
+    /// t_n) >= 2`), and the per-node top-N filter (`topFractionPerNode`
+    /// + `minPerNodeFloor`) is what actually shapes the sparse layout
+    /// graph. The original 0.05 / 0.015 / 0.004 weight floors all
+    /// pre-filtered the long tail so aggressively that the per-node
+    /// top-N filter was working off a depleted candidate pool (the
+    /// real library has so many small-Jaccard pairs that even 0.004
+    /// dropped Louvain into 93 fragments). Letting the per-node filter
+    /// see the full SQL-floor-respecting set lifts the real library
+    /// from 41 → 100+ layout edges and Louvain from 93 → ~20
+    /// communities.
+    var minEdgeWeight = 0.0001
     /// Per-node top fraction of edges to keep when filtering candidates
     /// before mutual-kNN. Low-degree nodes always keep their full set.
-    /// Bumped from 0.10 to 0.25 for the same reason as `minEdgeWeight`.
-    var topFractionPerNode = 0.25
+    /// Bumped 0.10 → 0.25 → 0.35 → 0.50 across successive gate passes:
+    /// for the long-tailed real-library shape, halving each node's
+    /// candidate set lets enough edges survive the kNN intersection.
+    var topFractionPerNode = 0.50
     /// Minimum kept candidates per node, regardless of `topFractionPerNode`.
     var minPerNodeFloor = 6
     /// Louvain resolution for the medium-resolution community pass.
@@ -47,8 +54,11 @@ enum GenreMapBuilder {
     var mediumGamma = 1.0
     /// Pixels per unit of `weight` for the label font sizing — keeps
     /// pills proportional without ever shrinking below `minLabelFont`.
-    var labelFontMin: CGFloat = 11
-    var labelFontMax: CGFloat = 24
+    /// Matches `StationLabel.minFontSize`/`maxFontSize` at the Phase-1
+    /// gate so the pipeline's measured label rectangle matches the
+    /// rendered pill exactly.
+    var labelFontMin: CGFloat = 12
+    var labelFontMax: CGFloat = 26
     var layout = GenreMapForceLayout.Configuration()
   }
 
@@ -143,6 +153,12 @@ enum GenreMapBuilder {
       membersByCommunity[id, default: []].append(node.genre)
     }
 
+    // Index the layout-pass inputs by id so we can carry the SAME
+    // measured `labelSize` onto every emitted `GenreMapNode`. The drag
+    // relaxation pass reads this field instead of re-approximating, so
+    // build-time and drag-time label rectangles can't disagree.
+    let inputByID = Dictionary(uniqueKeysWithValues: inputs.map { ($0.id, $0) })
+
     var mapNodes = [GenreMapNode]()
     mapNodes.reserveCapacity(nodes.count)
     var minX = CGFloat.infinity
@@ -151,6 +167,7 @@ enum GenreMapBuilder {
     var maxY = -CGFloat.infinity
     for node in nodes {
       let position = layout.positions[node.genre] ?? .zero
+      let labelSize = inputByID[node.genre]?.labelSize ?? .zero
       mapNodes.append(GenreMapNode(
         genre: node.genre,
         weight: node.weight,
@@ -159,6 +176,7 @@ enum GenreMapBuilder {
         artistCount: node.artistCount,
         communityID: partition[node.genre] ?? 0,
         position: position,
+        labelSize: labelSize,
       ))
       minX = min(minX, position.x)
       minY = min(minY, position.y)

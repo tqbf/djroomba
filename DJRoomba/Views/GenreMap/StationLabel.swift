@@ -15,9 +15,13 @@ struct StationLabel: View {
   // MARK: Internal
 
   /// Font size for `weight`. Public so the layout pipeline can read the
-  /// SAME numbers for its label-rectangle repulsion.
-  static let minFontSize: CGFloat = 11
-  static let maxFontSize: CGFloat = 22
+  /// SAME numbers for its label-rectangle repulsion. Range widened
+  /// 11→22 ⇒ 12→26 at the Phase-1 gate per typography-designer: a 2×
+  /// span over a long-tailed ~115-genre distribution wasn't enough
+  /// visual altitude for the giants vs the medium band; 12pt is the
+  /// Apple-readable floor for ambient label text.
+  static let minFontSize: CGFloat = 12
+  static let maxFontSize: CGFloat = 26
 
   var node: GenreMapNode
   var community: GenreMapCommunity?
@@ -64,12 +68,17 @@ struct StationLabel: View {
   }
 
   /// Bigger genres get a heavier weight (typography-designer: visual
-  /// hierarchy expressed in size + weight, not size alone).
+  /// hierarchy expressed in size + weight, not size alone). Four tiers
+  /// (regular → medium → semibold → bold) at the Phase-1 gate per the
+  /// typography-designer review: the top ~5 % of giants need to read as
+  /// "a different class of label" (continent-rank), not as slightly
+  /// thicker peers.
   private var weightForFont: Font.Weight {
     switch node.weight {
-    case ..<0.25: .regular
-    case ..<0.6: .medium
-    default: .semibold
+    case ..<0.20: .regular
+    case ..<0.55: .medium
+    case ..<0.80: .semibold
+    default: .bold
     }
   }
 }

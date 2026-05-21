@@ -116,10 +116,11 @@ final class GenreMapService {
       GenreMapForceLayout.InputNode(
         id: node.genre,
         weight: node.weight,
-        labelSize: CGSize(
-          width: max(48, CGFloat(node.weight) * 80 + 48),
-          height: 24,
-        ),
+        // Use the SAME label rectangle the layout pass measured (cached
+        // on the node by `GenreMapBuilder.build`). Previously this path
+        // re-approximated a different size, which let drag re-overlap
+        // labels the layout had already separated.
+        labelSize: node.labelSize,
         communityID: node.communityID,
       )
     }

@@ -71,3 +71,62 @@ respected, **don't do it** — reverting/declining is the correct outcome.
   rejected, and documented with rationale in
   `plans/memory-and-laziness.md` (Phase C). Settled — single-writer makes
   its only unique benefit moot.
+
+## Phase D — Genre Metro Map: extract `GenreMapPanel` subviews to their own files
+
+- **What:** `GenreMapPanel` is ~400 LOC with `header`/`footer`/`content`/
+  `emptyState`/`mapBody`/`hullsCanvas`/`edgesCanvas`/`labelsLayer` all as
+  computed `some View` properties. Extract each into its own `View`
+  struct in its own file (project convention: one type per file; swiftui-
+  pro: strongly prefer over computed-property splits).
+- **Law(s):** 4 (head-juggling) + project convention.
+- **Pays its freight (falsifiable):** longest file in
+  `DJRoomba/Views/GenreMap/` drops from ~400 → ~150 LOC; future Phase
+  2/3/5 edits touch one focused file per UI concern.
+- **Risk:** medium — Canvas redraw scope is per-View, so extraction can
+  shift perf either way; measure under drag before and after.
+- **Veto condition:** if extraction visibly drops drag-frame perf or
+  forces escaping-closure ceremony to pass `transform`/`model` around,
+  STOP — the current shape is fine, this is preference not a bug.
+- **Depends on:** none. **Effort:** M.
+- **Verify:** screenshot diffing identical pre/post; drag at default
+  zoom feels the same; new files compile with no `swiftui-pro` flags.
+
+## Phase E — Genre Metro Map: consolidate the v6/v7 trigger funnel (Phase-6 work)
+
+- **What:** Today `MusicController.reanalyzeGenreGraphIfEnabled()` fires
+  both `rebuildGenreGraph` and `rebuildGenreMap` in sequence (the latter
+  reads the former's `genre_edge`). Phase 6 of `plans/genre-metro-map.md`
+  consolidates: one shared `runMapRebuildIfEnabled()` funnel, retiring
+  the separate v6 `analyzeGenreGraph` keyboard shortcut + menu item once
+  the metro view supersedes the genre-graph panel.
+- **Law(s):** 10 (temporal coupling — 2 modules in concert per analyse).
+- **Pays its freight (falsifiable):** trigger sites call ONE method;
+  `MusicController.analyzeGenreGraph` + `analyzeGenreMap` collapse to
+  one (or the v6 path is retired entirely).
+- **Risk:** medium — touches every trigger point + the menu + the
+  preference key.
+- **Veto condition:** if Phase 5 hover-evidence still needs the v6
+  panel as a standalone surface, hold.
+- **Depends on:** Phase 6 of `plans/genre-metro-map.md` (the master
+  plan), and ideally Phase 5 landed first.
+- **Effort:** M.
+- **Verify:** grep shows zero direct calls to `analyzeGenreGraph`
+  outside the funnel; the v6 menu item is removed; existing test
+  suite green.
+
+## Phase F — Genre Metro Map: cache scroll-wheel + ⌘=/⌘-/⌘0 zoom shortcuts
+
+- **What:** The current zoom surface is a footer stepper + pinch
+  gesture. Native macOS map UX adds `⌘=` / `⌘-` / `⌘0` (Fit) keyboard
+  shortcuts and scroll-wheel zoom-around-cursor. macos-design called
+  these out at the Phase 1 gate.
+- **Law(s):** macos-design idiom alignment (not a Thomas-Law cleanup).
+- **Pays its freight (falsifiable):** three shortcuts wired; a
+  scroll-wheel gesture on the map body zooms toward the cursor
+  position; the existing pinch+stepper paths still work.
+- **Risk:** low.
+- **Depends on:** none.
+- **Effort:** S.
+- **Verify:** ⌘=/⌘-/⌘0 work in the panel; scroll-wheel zooms; no
+  regression on pinch or stepper.

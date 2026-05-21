@@ -44,6 +44,13 @@ struct GenreMapNode: Equatable, Sendable, Identifiable {
   /// World-space layout position. Mutated by `GenreMapBuilder.layout` and
   /// the drag interaction; never persisted in Phase 1.
   var position: CGPoint
+  /// Cached label rectangle size (world units, including pill padding)
+  /// from the `measureLabel` closure the builder consumed at build time.
+  /// Carried on the node so the drag-relaxation pass uses the SAME
+  /// rectangle the layout pass used — the original Phase-1 ship had
+  /// drag re-approximate a different size, which let drag re-overlap
+  /// labels the layout had separated.
+  var labelSize: CGSize
 
   var id: String {
     genre

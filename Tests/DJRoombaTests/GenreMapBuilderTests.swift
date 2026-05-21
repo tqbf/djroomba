@@ -136,6 +136,78 @@ struct GenreMapBuilderTests {
     }
   }
 
+  /// Phase-1 gate regression pin: with the **default** `Configuration`,
+  /// a synthetic library shaped like the real one (115 genres + a long-
+  /// tail Jaccard distribution skewing toward small composites) must
+  /// surface enough layout edges that Louvain doesn't fragment into
+  /// near-singletons. The original Phase-1 defaults produced 41 layout
+  /// edges / 93 communities on the real library — the gate review
+  /// dropped the floor to recover ~120–180 edges and ≤25 communities.
+  /// This test pins the FILTER pre-flight specifically, so a future
+  /// regression on the threshold gets caught before live verification.
+  @Test
+  func `default candidate-filter floor lets a real-library-shaped graph through`() {
+    let genreCount = 115
+    let nodes = (0 ..< genreCount).map { index in
+      GenreNode(
+        genre: String(format: "G%03d", index),
+        trackCount: 50 + index,
+        albumCount: 10 + index / 2,
+        artistCount: 5 + index / 3,
+        weight: 0.05 + 0.9 * (Double(index) / Double(genreCount - 1)),
+      )
+    }
+    // Build a synthetic candidate set roughly matching the real
+    // library: each node connects to ~10 random partners with a
+    // composite total weight drawn from a long-tailed range (most
+    // small, a few large). Determinism via a fixed-seed PRNG so the
+    // test never flakes.
+    var rng = SplitMix64(seed: 0xCAFE_F00D_DEAD_BEEF)
+    var seen = Set<String>()
+    var evidence = [GenreEdgeEvidence]()
+    for index in 0 ..< genreCount {
+      let neighbourCount = 10
+      for _ in 0 ..< neighbourCount {
+        let other = Int(rng.next() % UInt64(genreCount))
+        guard other != index else { continue }
+        let lhs = String(format: "G%03d", min(index, other))
+        let rhs = String(format: "G%03d", max(index, other))
+        let key = "\(lhs)|\(rhs)"
+        guard !seen.contains(key) else { continue }
+        seen.insert(key)
+        // Composite drawn from `[0.002, 0.4]` skewed toward the low end
+        // — same shape as the real `genre_edge_evidence.total_weight`
+        // histogram.
+        let u = rng.nextUnitFraction()
+        let weight = 0.002 + 0.4 * pow(u, 3)
+        evidence.append(GenreEdgeEvidence(
+          genreA: lhs,
+          genreB: rhs,
+          artistOverlapJaccard: weight * 0.5,
+          albumOverlapJaccard: weight * 0.4,
+          trackOverlapJaccard: weight * 0.2,
+          playlistCooccurWeight: weight * 0.1,
+          sharedArtistCount: 2,
+          sharedAlbumCount: 1,
+          sharedTrackCount: 1,
+          totalWeight: weight,
+        ))
+      }
+    }
+    let configuration = GenreMapBuilder.Configuration()
+    let filtered = GenreMapBuilder.filterCandidates(
+      evidence: evidence,
+      nodeNames: Set(nodes.map(\.genre)),
+      configuration: configuration,
+    )
+    // Floor: 120 edges. This is the "Phase 2 has a real substrate to
+    // stand on" bar — Louvain on a 115-node graph with ~120+ edges
+    // converges into ≤25 communities, not into 90+ singletons. Lower
+    // this number and the fragmentation defect comes back.
+    #expect(filtered.count >= 120,
+            "candidate filter too aggressive: only \(filtered.count) edges survived (need ≥120)")
+  }
+
   @Test
   func `candidate filter respects minimum edge weight`() {
     let nodes = (0 ..< 4).map { index in
