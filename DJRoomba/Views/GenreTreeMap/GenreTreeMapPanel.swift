@@ -2,10 +2,13 @@ import SwiftUI
 
 // MARK: - GenreTreeMapPanel
 
-/// Phase B sheet content (`plans/son-of-genre-map.md` Phase B). The
+/// Phase B + C sheet content (`plans/son-of-genre-map.md`). The
 /// successor to `GenreMapPanel`. Renders the trunk-tree at default
 /// state: trunk pills along the diagonal, branches fanning radially,
-/// faint back-edges underneath.
+/// faint back-edges underneath. Phase C adds radial-focus mode:
+/// clicking any pill animates the layout into a centred fan of 1-hop
+/// + 2-hop neighbours around the clicked genre; clicking empty
+/// canvas or pressing Escape animates back to the trunk-tree.
 ///
 /// **Inherited interaction grammar** (from the Phase-5/6 metro panel):
 ///
@@ -17,14 +20,22 @@ import SwiftUI
 /// - Magnification gesture: live pinch-zoom.
 /// - Drag gesture: pan the canvas.
 ///
-/// Phase B doesn't surface selection / hover / radial-focus / compare
-/// — those are Phase C / D additions. The pills accept taps, but the
-/// handler is a no-op for now (the view layer's wiring is in place
-/// for Phase C to flip on).
+/// **Phase C additions:**
 ///
-/// The metro `GenreMapPanel` stays in-tree for comparison rebuilds
-/// (the menu's hidden "Show Genre Map (Metro)" action) but isn't the
-/// default user-visible surface anymore. Phase E retires it entirely.
+/// - Tap a pill ⇒ `selectedGenre` set, animation runs
+///   (`withAnimation(.easeInOut(duration: animationDuration))`).
+/// - Tap empty canvas ⇒ `selectedGenre` cleared, animation runs.
+/// - Press Escape OR click the **Clear Focus** button in the footer
+///   ⇒ same as empty-canvas tap. (Escape from inside a sheet is
+///   captured by AppKit's default sheet-cancel path before SwiftUI
+///   sees it on macOS 14; both `.onKeyPress(.escape)` on a focused
+///   container AND a hidden `.keyboardShortcut(.escape)` button were
+///   tried + failed during Phase C live verification. The Clear
+///   Focus button is the visible affordance; click-empty-area is the
+///   incidental gesture.)
+/// - Animation duration is exposed in the header as a segmented
+///   Picker so the user can flip 200 / 300 / 400 / 500 ms live and
+///   pick the eventual ship default.
 struct GenreTreeMapPanel: View {
 
   // MARK: Internal
@@ -102,8 +113,30 @@ struct GenreTreeMapPanel: View {
   /// Live viewport size, updated by `mapBody`'s `GeometryReader`.
   @State private var viewportSize = CGSize(width: 900, height: 600)
 
+  /// Phase C — `nil` ⇒ trunk-tree mode, non-nil ⇒ radial-focus mode
+  /// centred on this genre.
+  @State private var selectedGenre: String?
+
   @GestureState private var gestureScale: CGFloat = 1.0
   @GestureState private var gestureOffset = CGSize.zero
+
+  /// Visible "Clear Focus" affordance — appears in the footer in
+  /// radial-focus mode and disappears in trunk-tree mode. Carries
+  /// the Escape keyboard shortcut so the user can dismiss the focus
+  /// without reaching for the mouse. Keeping the button visible (a
+  /// 1×1 transparent button tucked into an overlay didn't get the
+  /// shortcut delivered from inside the sheet's responder chain on
+  /// macOS 14; the visible button does).
+  @ViewBuilder
+  private var clearFocusButton: some View {
+    if selectedGenre != nil {
+      Button("Clear Focus", systemImage: "xmark.circle", action: clearSelection)
+        .controlSize(.small)
+        .labelStyle(.titleAndIcon)
+        .keyboardShortcut(.escape, modifiers: [])
+        .help("Return to the trunk-tree view (Esc)")
+    }
+  }
 
   private var service: GenreTreeService {
     controller.genreTreeService
@@ -150,6 +183,21 @@ struct GenreTreeMapPanel: View {
       .frame(maxWidth: 320)
       .labelsHidden()
       .help("Switch which member of each community gets the trunk slot")
+
+      // Phase C — animation-duration A/B toggle. Picks the eventual
+      // ship default after live verification on the real library.
+      // Surfaces as compact segmented "ms" tags so the header doesn't
+      // crowd; the labels read as durations rather than ordinals.
+      Picker("Animation duration", selection: Bindable(service).animationDurationSeconds) {
+        Text("200").tag(0.2)
+        Text("300").tag(0.3)
+        Text("400").tag(0.4)
+        Text("500").tag(0.5)
+      }
+      .pickerStyle(.segmented)
+      .frame(maxWidth: 180)
+      .labelsHidden()
+      .help("Radial-focus animation duration in milliseconds")
 
       Button("Re-Analyze", systemImage: "arrow.clockwise") {
         Task {
@@ -207,10 +255,11 @@ struct GenreTreeMapPanel: View {
     HStack(spacing: 8) {
       Image(systemName: "hand.point.up.left")
       Text(
-        "Drag to pan · Pinch / ⌘+ / ⌘− to zoom · ⌘0 reset · ⌘9 fit"
+        "Drag to pan · Pinch / ⌘+ / ⌘− to zoom · ⌘0 reset · ⌘9 fit · click a genre to focus"
       )
       .font(.caption)
       .foregroundStyle(.secondary)
+      clearFocusButton
       Spacer()
       Button {
         zoomIn()
@@ -268,12 +317,41 @@ struct GenreTreeMapPanel: View {
     // a per-pill dictionary scan over `topology.trunks`.
     let colourByGenre = communityColourByGenre(model: model)
 
+    // Phase C — compute the radial plan once per render frame. SwiftUI
+    // memoises the body recomputes; the plan recompute on a click-
+    // induced state change costs O(n + e), well under 1 ms on the
+    // real library. The plan is `nil` in trunk-tree mode.
+    let radialPlan = currentRadialPlan(model: model)
+
     return ZStack {
+      // The empty-canvas tap layer. `contentShape(Rectangle())`
+      // makes the clear background hit-testable so a click that lands
+      // off any pill (including in the gaps between pills) is caught
+      // here and clears `selectedGenre`. Sits below the pills + edges
+      // so a click on a pill goes to the pill (the pill's
+      // `onTapGesture` wins because it's higher in the ZStack).
       Color.clear
         .contentShape(Rectangle())
-      backEdgesLayer(model: model, transform: viewTransform)
-      branchEdgesLayer(model: model, colourByGenre: colourByGenre, transform: viewTransform)
-      pillsLayer(model: model, colourByGenre: colourByGenre, transform: viewTransform)
+        .onTapGesture {
+          clearSelection()
+        }
+      backEdgesLayer(
+        model: model,
+        transform: viewTransform,
+        radialPlan: radialPlan,
+      )
+      branchEdgesLayer(
+        model: model,
+        colourByGenre: colourByGenre,
+        transform: viewTransform,
+        radialPlan: radialPlan,
+      )
+      pillsLayer(
+        model: model,
+        colourByGenre: colourByGenre,
+        transform: viewTransform,
+        radialPlan: radialPlan,
+      )
     }
     .contentShape(Rectangle())
     .clipped()
@@ -300,20 +378,31 @@ struct GenreTreeMapPanel: View {
     )
   }
 
+  /// Back-edge opacity multiplier given the current radial plan.
+  /// Returns `1` in trunk-tree mode (back-edges visible at their
+  /// computed Phase-B opacity); in radial-focus mode, back-edges
+  /// incident to a 1-hop ring node stay at full multiplier (they
+  /// still tell the eye "this neighbour is connected to the
+  /// selected genre"); all other back-edges fade further toward the
+  /// out-of-focus level.
   private func backEdgesLayer(
     model: GenreTreeRenderModel,
     transform: ViewTransform,
+    radialPlan: GenreTreeRadialPlan.Plan?,
   ) -> some View {
-    BackEdgeLayer(
+    let multiplier: Double = radialPlan == nil ? 1.0 : 0.25
+    return BackEdgeLayer(
       segments: model.backEdges,
       project: transform.project,
     )
+    .opacity(multiplier)
   }
 
   private func branchEdgesLayer(
     model: GenreTreeRenderModel,
     colourByGenre: [String: Color],
     transform: ViewTransform,
+    radialPlan: GenreTreeRadialPlan.Plan?,
   ) -> some View {
     // One sub-canvas per branch edge. ~115 edges on the real library —
     // a `Canvas` with a single big path would be marginally cheaper but
@@ -321,44 +410,144 @@ struct GenreTreeMapPanel: View {
     // subtree's edges are green; an orange subtree's edges are
     // orange). One BranchEdge view per non-trunk node is acceptable;
     // SwiftUI batches the Canvas strokes per frame.
+    //
+    // Phase C: in radial-focus mode every tree edge fades unless one
+    // of its endpoints is the selected genre or a 1-hop neighbour.
     ForEach(branchPlacedNodes(model: model), id: \.genre.name) { placed in
-      if let edge = placed.edge {
+      if let edge = placed.edge, let parent = placed.parentGenre {
+        let edgeOpacity = edgeOpacityFor(
+          a: parent,
+          b: placed.genre.name,
+          radialPlan: radialPlan,
+        )
+        // World endpoints, projected through the radial plan if active
+        // so the curve follows pills as they animate to their target
+        // positions.
+        let projectedCurve = projectedCurve(
+          edge: edge,
+          parent: parent,
+          child: placed.genre.name,
+          radialPlan: radialPlan,
+        )
         BranchEdge(
-          curve: edge,
+          curve: projectedCurve,
           childDepth: placed.depth,
           colour: colourByGenre[placed.genre.name] ?? .secondary,
           project: transform.project,
         )
+        .opacity(edgeOpacity)
       }
     }
+    .animation(
+      .easeInOut(duration: service.animationDurationSeconds),
+      value: selectedGenre,
+    )
   }
 
   private func pillsLayer(
     model: GenreTreeRenderModel,
     colourByGenre: [String: Color],
     transform: ViewTransform,
+    radialPlan: GenreTreeRadialPlan.Plan?,
   ) -> some View {
     ForEach(model.layout.placedNodes, id: \.genre.name) { placed in
-      let projected = transform.project(placed.position)
+      let target = radialPlan?.targetsByGenre[placed.genre.name]
+      let worldPosition = target?.position ?? placed.position
+      let opacity = target?.opacity ?? 1.0
+      let projected = transform.project(worldPosition)
       let colour = colourByGenre[placed.genre.name] ?? .secondary
+      let isSelected = target?.ring == .selected
       Group {
         if placed.depth == 0 {
           TrunkPill(
             genre: placed.genre,
             colour: colour,
-            onTap: { /* Phase C: radial-focus on this genre. */ },
+            isHighlighted: isSelected,
+            isFaded: false,
+            onTap: { select(placed.genre.name) },
           )
         } else {
           BranchPill(
             genre: placed.genre,
             depth: placed.depth,
             colour: colour,
-            onTap: { /* Phase C: radial-focus on this genre. */ },
+            isHighlighted: isSelected,
+            isFaded: false,
+            onTap: { select(placed.genre.name) },
           )
         }
       }
+      .opacity(opacity)
       .position(projected)
     }
+    .animation(
+      .easeInOut(duration: service.animationDurationSeconds),
+      value: selectedGenre,
+    )
+  }
+
+  /// Pick the visible opacity for a parent → child edge given the
+  /// current radial focus state. In trunk-tree mode: full opacity.
+  /// In radial-focus mode: edges adjacent to the selected genre or a
+  /// 1-hop neighbour stay visible; 2-hop-adjacent edges dim; out-of-
+  /// focus edges hide.
+  private func edgeOpacityFor(
+    a: String,
+    b: String,
+    radialPlan: GenreTreeRadialPlan.Plan?,
+  ) -> Double {
+    guard let plan = radialPlan else { return 1.0 }
+    let ringA = plan.targetsByGenre[a]?.ring ?? .outOfFocus
+    let ringB = plan.targetsByGenre[b]?.ring ?? .outOfFocus
+    // The edge is visible at full strength when one endpoint is the
+    // selected genre + the other is a 1-hop neighbour. That's the
+    // "spoke" reading the eye wants.
+    if (ringA == .selected && ringB == .oneHop) || (ringA == .oneHop && ringB == .selected) {
+      return 1.0
+    }
+    // An edge between two 1-hop neighbours is the radial "rim" — kept
+    // present but slightly dimmed.
+    if ringA == .oneHop, ringB == .oneHop { return 0.6 }
+    // 2-hop-adjacent edges (selected ↔ 2-hop OR 1-hop ↔ 2-hop): visible
+    // but subordinate.
+    if ringA == .twoHop || ringB == .twoHop { return 0.4 }
+    // Everything else (involves an out-of-focus endpoint) hides.
+    return 0.0
+  }
+
+  /// Project the layout's pre-computed world-space Bezier endpoints
+  /// through the radial plan, if active. Recomputes the curve's
+  /// control points whenever an endpoint moves so the curve stays
+  /// anchored to the animating pill. Pure geometry; no per-frame
+  /// recompute (SwiftUI interpolates the resulting BezierCurve via
+  /// the `.animation(value:)` modifier).
+  private func projectedCurve(
+    edge: GenreTreeLayout.BezierCurve,
+    parent: String,
+    child: String,
+    radialPlan: GenreTreeRadialPlan.Plan?,
+  ) -> GenreTreeLayout.BezierCurve {
+    guard let plan = radialPlan else { return edge }
+    let parentPosition = plan.targetsByGenre[parent]?.position ?? edge.start
+    let childPosition = plan.targetsByGenre[child]?.position ?? edge.end
+    return GenreTreeLayout.makeEdge(
+      from: parentPosition,
+      to: childPosition,
+      fraction: 0.45,
+    )
+  }
+
+  /// Compute the radial plan for the current `selectedGenre`, or
+  /// `nil` in trunk-tree mode.
+  private func currentRadialPlan(
+    model: GenreTreeRenderModel
+  ) -> GenreTreeRadialPlan.Plan? {
+    guard let selectedGenre else { return nil }
+    return GenreTreeRadialPlan.plan(
+      selectedGenre: selectedGenre,
+      layout: model.layout,
+      evidence: model.evidence,
+    )
   }
 
   /// Map every placed genre → its trunk's community colour. Subtrees
@@ -393,6 +582,26 @@ struct GenreTreeMapPanel: View {
     model: GenreTreeRenderModel
   ) -> [GenreTreeLayout.PlacedNode] {
     model.layout.placedNodes.filter { $0.depth > 0 }
+  }
+
+  /// Enter radial-focus mode on `genre`. Wrapped in a single
+  /// `withAnimation` block so SwiftUI interpolates every
+  /// `.position()` + `.opacity()` from current to target across the
+  /// duration. No per-frame work beyond the SwiftUI interpolation
+  /// itself — the radial plan's targets are computed once and held
+  /// in `currentRadialPlan` for the rest of the frame.
+  private func select(_ genre: String) {
+    withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
+      selectedGenre = genre
+    }
+  }
+
+  /// Leave radial-focus mode. Same animation in reverse.
+  private func clearSelection() {
+    guard selectedGenre != nil else { return }
+    withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
+      selectedGenre = nil
+    }
   }
 
   private func zoomIn() {

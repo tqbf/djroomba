@@ -55,6 +55,14 @@ final class GenreTreeService {
   /// (panel shows an empty state with an Analyze CTA).
   private(set) var renderModel: GenreTreeRenderModel?
 
+  /// Phase C radial-focus animation duration (seconds). Defaults to
+  /// `0.3` per the plan; surfaced as a segmented Picker in the panel
+  /// header so the user can live-flip between `0.2 / 0.3 / 0.4 / 0.5`
+  /// during the visual A/B pass and pick the eventual ship default.
+  /// Does NOT trigger a rebuild (animation timing is view-layer state
+  /// only) — observed by the view layer directly.
+  var animationDurationSeconds = 0.3
+
   /// User-flipped trunk-selection metric. Bound through `Bindable` in
   /// the Debug menu; `didSet` re-runs the pipeline so the flip is
   /// visible immediately without a re-import / re-analyze.
@@ -93,6 +101,7 @@ final class GenreTreeService {
       topology: topology,
       layout: layout,
       backEdges: backEdges,
+      evidence: evidence,
     )
   }
 
@@ -224,4 +233,10 @@ struct GenreTreeRenderModel: Equatable, Sendable {
   var topology: GenreTreeModel
   var layout: GenreTreeLayout.Output
   var backEdges: [BackEdgeLayer.BackEdgeSegment]
+  /// The full multi-channel edge list (`genre_edge_evidence`). Phase
+  /// C's `GenreTreeRadialPlan` reads this on click to enumerate
+  /// 1-hop / 2-hop neighbours — including the cross-community
+  /// bridges Phase A's MST dropped. Carried on the render model so a
+  /// click doesn't hit SQLite.
+  var evidence: [GenreEdgeEvidence]
 }

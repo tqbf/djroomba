@@ -5,6 +5,205 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — Son of Genre Map — Phase C: Radial focus + animated transition
+
+**Branch `feature/genre-tree-map`.** Phase C of
+`plans/son-of-genre-map.md` adds the radial-focus interaction: click
+any pill ⇒ the layout animates the clicked genre to the centre with
+its 1-hop neighbours on an inner ring + 2-hop neighbours on an outer
+ring; click empty canvas or hit the new **Clear Focus** footer button
+⇒ animates back to the trunk-tree. Single-`withAnimation` block; no
+per-frame recompute; target positions held in a pure plan struct.
+
+### What landed
+
+One new pure-logic file:
+
+- **`DJRoomba/Music/GenreTreeMap/GenreTreeRadialPlan.swift`** —
+  Computes per-genre `(targetPosition, targetOpacity, ring)` given a
+  selected genre + the trunk-tree's `GenreTreeLayout.Output` + the
+  full `genre_edge_evidence` list. Pure `nonisolated static`,
+  deterministic, fixture-tested. **r1 = 280, r2 = 520** (the plan's
+  starting point — half + full of Phase B's `depth1Radius = 520`).
+  **Opacity schedule**: selected 1.0, 1-hop 1.0, 2-hop 0.55,
+  out-of-focus 0.06. Out-of-focus positions are **left at their
+  trunk-tree placement** (only opacity changes) so the back-edge web
+  underneath stays in registration — no invisible shuffle of ~75
+  pills sideways. Positions clamped inside `worldBounds` with a
+  40 pt inset so a corner-of-canvas selection's 2-hop ring doesn't
+  fan off the renderable world.
+
+Service additions:
+
+- **`GenreTreeService.animationDurationSeconds`** — bound to the
+  panel's segmented `Picker`; persists for the session, NOT through
+  Persistence (Phase E concern). No `didSet` rebuild (animation
+  timing is view-layer state only).
+- **`GenreTreeRenderModel.evidence`** — the full multi-channel edge
+  list is now carried on the render model. The radial plan reads
+  this on click without a SQL hit; ~117 rows on the real library.
+
+Panel additions:
+
+- **Tap a pill** ⇒ `selectedGenre = pill.name` wrapped in
+  `withAnimation(.easeInOut(duration: service.animationDurationSeconds))`.
+  Pills + edges + opacities interpolate to their radial-plan targets
+  in the same block; SwiftUI handles per-frame interpolation on
+  `.position()` + `.opacity()`. The plan is computed exactly once per
+  click — `currentRadialPlan(model:)` runs at body composition time,
+  not per-frame.
+- **Tap empty canvas** ⇒ `selectedGenre = nil`. A `Color.clear`
+  background with `.contentShape(Rectangle())` + an `.onTapGesture`
+  swallows clicks that miss any pill. Pills' `onTapGesture` wins
+  because they're higher in the ZStack.
+- **Clear Focus footer button** — visible only in radial-focus mode
+  (`if selectedGenre != nil`). Carries `.keyboardShortcut(.escape,
+  modifiers: [])`. The visible affordance is the primary route; the
+  shortcut is on the button so it stays in scope while focus is
+  active.
+- **Animation duration picker** (header, segmented: 200 / 300 / 400
+  / 500 ms) — the plan's "I'll know when I see it" deferral surfaced
+  as a live A/B switch. The user picks the eventual ship default
+  after the visual pass; for now ships at **300 ms** per the plan.
+- **Edge visibility** in radial-focus mode:
+  - `selected ↔ 1-hop`: full opacity (the spoke read).
+  - `1-hop ↔ 1-hop`: 0.6 (the rim — present but subordinate).
+  - any endpoint on 2-hop: 0.4.
+  - any out-of-focus endpoint: 0.0 (hidden).
+  - back-edges as a layer multiply by 0.25 in radial mode.
+- **Parent → child branch curves** re-project through the radial
+  plan via `GenreTreeLayout.makeEdge(from:to:fraction:)` so each
+  curve follows its endpoints as they animate. Pure geometry; no
+  per-frame recompute (SwiftUI interpolates the resulting
+  `BezierCurve` across the duration).
+
+### Tests
+
+New `Tests/DJRoombaTests/GenreTreeRadialPlanTests.swift` — **12 new
+tests** in one new suite. Covers:
+
+- 1-hop neighbours land on the inner ring (radius r1 = 280).
+- 2-hop neighbours land on the outer ring (radius r2 = 520).
+- Out-of-focus genres keep their existing trunk-tree position
+  (no invisible shuffle of ~75 pills sideways).
+- Opacity schedule: 1.0 / 1.0 / 0.55 / 0.06 per ring.
+- Selected genre sits at its existing trunk-tree position
+  (centre = selected's `placedNode.position`).
+- Unknown selection ⇒ `nil` plan (view layer treats as
+  "stay in trunk-tree mode").
+- A 1-hop neighbour cannot also appear in the 2-hop set
+  (closest ring wins on ambiguity).
+- Ring slots are evenly spaced (angular separation = 2π / n).
+- Heaviest 1-hop neighbour lands at the starting angle (12 o'clock).
+- Positions clamped inside `worldBounds` with the configured inset.
+- Plan covers every layout node (no genre missing from the targets).
+- Plan deterministic across identical inputs.
+
+### Live verification (real 84-genre / 180-back-edge library)
+
+The signed `build/DJRoomba.app` driven via computer-use:
+
+- **Trunk-tree default** (`/tmp/phase-c-1-trunk-default.png`):
+  identity-scale centred on Pop/Rock, 7 trunks along the diagonal,
+  faint back-edges visible. Phase B baseline intact.
+- **Focus on Pop/Rock** (`/tmp/phase-c-2-focus-poprock.png`): the
+  300 ms animation completes; Pop/Rock anchored at its existing
+  centre, 1-hop neighbours fan around it at full opacity
+  (Alternative top, Adult Contemporary upper-right, Rock left, Disco
+  upper-right, R&B/Soul lower-left, Music right, Pop lower-left,
+  Contemporary Celtic lower-right). Out-of-focus genres faded to
+  6 %; back-edge web dims to 25 % of its Phase B intensity. Edges to
+  1-hop neighbours visible at full opacity.
+- **Return via Clear Focus**
+  (`/tmp/phase-c-3-return-via-clearfocus.png`): footer button click
+  triggers reverse animation; layout returns to the trunk-tree
+  default.
+- **Focus on R&B/Soul at fit-scale**
+  (`/tmp/phase-c-4-focus-rbsoul.png`): at Cmd-9 fit, clicking
+  R&B/Soul (a depth-0 trunk, purple) brings up Funk / Soul / Rap &
+  Hip-Hop / Motown / Alt-Lounge / Pop/Rock / Gospel as 1-hop
+  neighbours. The fit-scale rendering packs the radial fan tightly
+  (Phase B's documented "labels don't scale with viewport"
+  trade-off) but the topology read is correct.
+- **Return via empty-area click**
+  (`/tmp/phase-c-5-return-via-emptyclick.png`): clicking off any pill
+  triggers the reverse animation. Same destination as the Clear
+  Focus button.
+- **500 ms animation toggle**
+  (`/tmp/phase-c-6-focus-tribute-500ms.png`): segmented Picker
+  flips live; subsequent clicks animate at 500 ms instead of 300 ms.
+  Felt longer/smoother, but 300 ms is the plan's default and feels
+  responsive.
+- **Metric live-flip**: Centrality picker switch re-runs the trunk
+  selection and shows "Industrial" trunk at the diagonal centre
+  instead of "Pop/Rock" (Phase B's live A/B confirmed unbroken).
+
+### Decisions documented
+
+- **r1 = 280, r2 = 520** ship as the Phase C defaults. Half + full
+  of Phase B's `depth1Radius = 520`. After live walkthrough no
+  adjustment needed — neighbours read clearly at identity zoom and
+  the canvas inset clamp prevents off-edge fan.
+- **Opacity schedule 1.0 / 1.0 / 0.55 / 0.06** — selected and 1-hop
+  visually equivalent (the 1-hop ring is the answer to "what's
+  adjacent to this"); 2-hop ring deliberately dimmer (0.55) so the
+  closest neighbours read first; out-of-focus at 0.06 (the back-edge
+  band — the eye knows there's more without crowding).
+- **Animation duration default 300 ms easeInOut** per the plan; the
+  segmented Picker in the header lets the user live-flip and pick
+  the eventual ship default. The user has not yet picked; 300 ms
+  feels responsive without flinging.
+- **Edge fading scheme** — spoke (selected ↔ 1-hop) at 1.0, rim
+  (1-hop ↔ 1-hop) at 0.6, 2-hop incidents at 0.4, out-of-focus
+  endpoints hide entirely, back-edge layer multiplies by 0.25.
+  Reads as "I see what's adjacent without the topology fighting it."
+
+### UI issues observed (carry-forward)
+
+- **Escape does NOT clear the focus from inside the SwiftUI sheet on
+  macOS 14.** Both `.onKeyPress(.escape)` on a `.focusable()` root +
+  `.focused` `@FocusState` AND a hidden / overlay
+  `.keyboardShortcut(.escape, modifiers: [])` button were tried; the
+  sheet's responder chain absorbs the key event before SwiftUI's
+  shortcut delivery. The visible **Clear Focus** footer button is
+  the primary affordance; the click-empty-canvas gesture is the
+  incidental. The Clear Focus button carries the Escape shortcut
+  declaratively for the day SwiftUI's sheet handling changes (the
+  shortcut is harmless if it never fires). This DOES regress one
+  spec criterion ("Press Escape ⇒ clear selection") — replaced with
+  visible button + canvas gesture per macos-design "always give the
+  user a visible affordance for any keyboard action" guidance.
+- **Header subtitle wraps at minWidth**: the new 200/300/400/500
+  picker eats horizontal space and the "7 trunks · 84 genres · 180
+  back-edges" subtitle vertically wraps at the sheet's `minWidth =
+  720`. Acceptable — the sheet's `idealWidth = 1140` is the natural
+  size and the wrap doesn't happen there; widening reflows clean.
+- **Fit-scale radial focus packs neighbours tightly** — same Phase B
+  trade-off ("labels don't scale with viewport"). Acceptable per the
+  standing "scrolling is fine" directive; the daily-driver view is
+  identity-zoom + panning, the radial focus reads fine there.
+
+### Acceptance
+
+- **`swift test`: 394 / 57 green** (was 382 / 56 ⇒ +12 tests, +1 suite).
+- `make check` clean (compiles debug).
+- `make build` clean (signed `build/DJRoomba.app` produced).
+- `swiftformat --lint` clean on all new + modified files.
+- `swiftlint --strict` clean on all new + modified files.
+
+### Files added / modified
+
+- **NEW** `DJRoomba/Music/GenreTreeMap/GenreTreeRadialPlan.swift`
+- **NEW** `Tests/DJRoombaTests/GenreTreeRadialPlanTests.swift`
+- **MOD** `DJRoomba/Music/GenreTreeMap/GenreTreeService.swift`
+  (+ `animationDurationSeconds` ivar, + `evidence` on
+  `GenreTreeRenderModel`)
+- **MOD** `DJRoomba/Views/GenreTreeMap/GenreTreeMapPanel.swift`
+  (selection state, animations, clear-focus button, duration picker,
+  edge visibility in radial mode, projected-curve recompute)
+
+**GO for Phase D.**
+
 ## 2026-05-21 — Son of Genre Map — Phase B: Geometric layout + trunk-tree view
 
 **Branch `feature/genre-tree-map`.** Phase B of `plans/son-of-genre-map.md`
