@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import os
 
 // MARK: - GenreMapRoutingActor
 
@@ -69,7 +70,38 @@ actor GenreMapRoutingActor {
     if cachedRevision == snapshot.layoutRevision, let cached = cachedResult {
       return cached
     }
+    // Phase-4-gate (2026-05-21): instrument the routing pass with an
+    // `os_signpost` + a `Logger.debug` stderr line so the perf gate
+    // can pin the real-library drag-release-rebuild cost. The
+    // signpost interval brackets the whole route pass; the debug log
+    // emits one line per rebuild with the strand count + node count
+    // + elapsed ms — searchable in Console.app under subsystem
+    // `org.sockpuppet.djroomba`, category `GenreMapRouting`, and
+    // visible on stderr while running the unsigned dev build.
+    let signpostID = OSSignpostID(log: Self.signpostLog)
+    os_signpost(
+      .begin,
+      log: Self.signpostLog,
+      name: "GenreMapRouting.route",
+      signpostID: signpostID,
+      "revision=%{public}d strands=%{public}d nodes=%{public}d",
+      snapshot.layoutRevision, snapshot.strands.count, snapshot.nodes.count,
+    )
     let started = Date()
+    defer {
+      let elapsedMs = Date().timeIntervalSince(started) * 1000
+      os_signpost(
+        .end,
+        log: Self.signpostLog,
+        name: "GenreMapRouting.route",
+        signpostID: signpostID,
+        "elapsed=%{public}.2fms",
+        elapsedMs,
+      )
+      Self.logger.debug(
+        "[GenreMapRouting] route revision=\(snapshot.layoutRevision, privacy: .public) strands=\(snapshot.strands.count, privacy: .public) nodes=\(snapshot.nodes.count, privacy: .public) elapsed=\(elapsedMs, privacy: .public)ms",
+      )
+    }
 
     // Build the obstacle context inputs.
     let labels = snapshot.nodes.map { node -> GenreMapRouting.LabelObstacle in
@@ -175,6 +207,19 @@ actor GenreMapRoutingActor {
   }
 
   // MARK: Private
+
+  /// Unified-logging handles for the Phase-4-gate perf instrumentation.
+  /// Subsystem is the app's bundle id so `log show` / Console.app
+  /// filter cleanly; category lets future routing-related signposts
+  /// share one channel.
+  private static let logger = Logger(
+    subsystem: "org.sockpuppet.djroomba",
+    category: "GenreMapRouting",
+  )
+  private static let signpostLog = OSLog(
+    subsystem: "org.sockpuppet.djroomba",
+    category: "GenreMapRouting",
+  )
 
   private var cachedRevision: Int?
   private var cachedResult: Result?

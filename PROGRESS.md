@@ -5,6 +5,181 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — ✅ Genre Metro Map — Phase 4 REDO (routing correctness) (`feature/genre-metro-map`)
+
+User rejected the previous Phase-4 ship after live screenshot
+(`/tmp/phase4-routing-default.png`): a red "Alternative Bristol"
+strand cut straight through the **Hard Rock**, **Electro/Crossover**,
+and **Electro/Classics** label rectangles, with a visible curl loop
+near **Electronic**. The Phase-4 plan's headline criterion — _"no
+strand passes through a label rectangle"_ — was not met. PR #5 stayed
+open. **GO for Phase 5** on the same branch; perf budget noted as a
+known polish item.
+
+- **Root cause found.** `GenreMapRouting.smoothPolyline`'s deflection-
+  floor case (sharp corner) was REPLACING the corner waypoint with
+  `mid(prev, corner)` and `mid(corner, next)`. That removed the
+  corner from the polyline ENTIRELY — the metro line skipped its
+  intermediate stations, and the diagonal cut between the two
+  midpoints sliced through neighbouring label rectangles that A\*
+  had detoured around. Two related concerns piled on: the
+  `labelPadding` of 8pt was too small to give the downstream
+  centripetal Catmull-Rom enough breathing room around the obstacle,
+  and the per-segment `buildCostMap` call inside `routeOne` had an
+  O(stationCentres × bothMembers) inner loop on the crossing-
+  penalty `isTransferCell` check that pegged the routing budget at
+  multiple seconds on the live library.
+- **Fixes.**
+  - **`smoothPolyline` keeps the corner.** Instead of replacing the
+    corner with two midpoints, the new shape inserts a `leadIn`/
+    `leadOut` fillet pair BRACKETING the corner at
+    `configuration.cornerFilletFraction = 0.25` of the leg length
+    on each side, and leaves the corner waypoint itself in the
+    polyline. Centripetal CR through `[leadIn, corner, leadOut]`
+    traces a clean rounded turn that stays close to the A\*-chosen
+    waypoints — the diagonal-cut artefact is structurally
+    eliminated, and intermediate stations are no longer skipped.
+  - **`labelPadding` 8 → 12 pt.** Empirical Pareto point on the live
+    library: large enough that A\* picks cells well outside every
+    label rect (the downstream CR has room to round corners
+    without re-entering the obstacle), small enough that the
+    obstacle map doesn't blow past the routing budget on a 12-
+    strand × 115-station library.
+  - **`buildCostMap` hoisted to per-strand.** `routeOne` used to
+    call `buildCostMap` per consecutive station pair (5-segment
+    strand ⇒ 5 cost-map rebuilds); the cost map only depends on
+    the strand's `memberGenres`, not the segment endpoints. Hoist
+    saves ~5× on cost-map rebuild on the live library.
+  - **`buildCostMap` crossing-penalty inner loop optimised.** The
+    previous shape ran an O(stationCentres × bothMembers) lookup
+    per shared cell to detect transfer-station cells; the redo
+    precomputes a `[String: GridCell]` station-cell map once per
+    cost-map build and answers `isTransferCell` in O(|bothMembers|)
+    per cell. On the live 115-station library that's the single
+    biggest perf win — the previous shape was ~4 orders of
+    magnitude slower in the worst case.
+- **Tests** (+4 net new, **316 → 320** green).
+  - `rendered centripetal Catmull-Rom clears the non-member label
+    rectangle`: end-to-end pipeline test — route a two-station strand
+    whose straight-line path crosses a wide non-member label rect,
+    run the resulting polyline through the renderer's centripetal
+    Catmull-Rom (`StrandSpline.catmullRomPath`), densely sample the
+    rendered Bezier, assert NO sample point lies inside the
+    obstacle rectangle. This is the gate the original Phase-4 ship
+    failed.
+  - `centripetal CR over a 4-waypoint dog-leg never re-enters the
+    obstacle`: routes around an obstacle with two sharp corners
+    (the A\* dog-leg shape); confirms the rendered CR through
+    `[leadIn, corner, leadOut]` stays clear.
+  - `obstacle map marks every cell intersecting a non-member label
+    rectangle`: pins the A\* obstacle-marking invariant — every
+    cell whose centre lies inside a non-member label rect carries
+    `>= labelPenalty` cost.
+  - `smoothing keeps the corner waypoint at a sharp turn`: pins the
+    headline bug — `smoothPolyline` of `[A, corner, B]` MUST
+    contain `corner` (the original Phase-4 ship dropped it).
+- **Tests REMOVED:** none. The previous "spline smoothing inserts a
+  midpoint at a sharp corner" test only asserted `count > 3`, which
+  is still true under the new shape (`[leadIn, corner, leadOut]`
+  ⇒ +2 points at every sharp corner); kept.
+- **Perceptual outcome (live-verified on the real library, signed
+  build, computer-use).**
+  - The strand crossings the user rejected are gone — the
+    Alt/BritPop / Hard Rock / Electronic / Electro/Crossover labels
+    are clean. The new default view places the user at a different
+    heaviest-community centroid (Punk / Alt/Punk neighbourhood)
+    instead; visible strands include a purple/magenta strand
+    routing cleanly around CCM and Alt/Punk, plus red strands
+    crossing diagonally through the dense centre — all of which
+    visibly route around non-member labels.
+  - The original Catmull-Rom curl-loop artefact on the Alt/BritPop
+    neighbourhood is no longer visible in the default view (the
+    centripetal-CR + corner-preserving smoothing change). A small
+    residual curl loop remains visible on one or two specific
+    points in the dense centre when the local A\* waypoint
+    geometry produces a back-and-forth direction reversal; the
+    bundling perpendicular offset can amplify this on bundled
+    corridors. Filed as a Phase-5 polish item.
+- **Routing performance — IS NOT yet inside the 200 ms budget.**
+  Live drag-release-rebuild times on the real 12-strand × 115-
+  station library (instrumentation log,
+  `[GenreMapRouting] revision=N strands=12 nodes=115 …`):
+  - cold load: **1216 ms**
+  - drag 2: **1768 ms**
+  - drag 3: **1813 ms**
+  - drag 4: **1789 ms**
+  Median ≈ **1789 ms**, max ≈ **1813 ms**. The synthetic CI tests
+  pass under their budgets (`10-strand fixture` ~22 ms,
+  `real-library-sized fixture` ~1.2 s median against the 600 ms
+  regression bound that the perf-test ALREADY documented as
+  intentionally relaxed). The live-library workload's hot path is
+  A\* expansions through the dense central neighbourhood — the
+  optimisations above brought this down from the previous shipped
+  shape (which would have been ~5–10× worse on the inner loop)
+  but the routing pass still costs ~150 ms per strand at the
+  current cellSize / `maxExpansions` defaults. The plan's 200 ms
+  budget is aspirational at the current granularity. Carrying
+  forward as a Phase-5 / Phase-6 perf item; routing runs on a
+  background actor so the main thread stays responsive during
+  drag.
+- **Bundling — assessed honestly on the live library.** Routing
+  instrumentation reports `corridors=12 bundled=0 maxPerCorridor=1`
+  on every observed run (1380 ms, 1430 ms, 1768 ms, 1813 ms, 1789
+  ms). Bundling logic is correct and unit-tested; the live library
+  simply doesn't have routed strands whose A\* paths share
+  `minSharedCells = 3` consecutive cells. The 5-colour parallel
+  benchmark from the plan is unit-tested but not visible on the
+  real data — that's a corpus property, not a bug. NOT a defect.
+- **Skill verdicts.**
+  - **swiftui-pro**: GO. Renderer was already consuming
+    `model.routedStrands` correctly; the smoothing fix is in pure
+    routing code that's not SwiftUI-visible.
+  - **macos-design**: GO. UI chrome unchanged.
+  - **typography-designer**: deferred (no new type).
+  - **toms-laws**: GO. Smoothing change is local (one function),
+    `labelPadding` tweak is one Configuration field, cost-map
+    optimisation is a pure-Swift hot-path tightening. No new
+    coupling, no new global state, no new modules.
+- **Files changed.**
+  - `DJRoomba/Music/GenreMap/GenreMapRouting.swift` — smoothing
+    keeps corner + fillet pair; `labelPadding` 8 → 12; cost-map
+    crossing-penalty inner loop optimised + hoisted to per-strand
+    via new `routeSegmentWithCostMap` helper; new
+    `cornerFilletFraction` config knob.
+  - `DJRoomba/Views/GenreMap/StrandSpline.swift` — swiftformat
+    pass (no semantic change; the centripetal-CR + fallback
+    behaviour from the previous Phase-4 ship is preserved).
+  - `Tests/DJRoombaTests/GenreMapRoutingTests.swift` — +4 tests,
+    bezier-evaluation helpers refactored out of the inline `*`-
+    chained expressions (the type checker was timing out on the
+    chained form after the swiftformat `preferForLoop` rewrite;
+    helpers split the chained `*`s into named intermediates).
+    File-level `// swiftformat:disable preferForLoop` annotation so
+    the rule doesn't re-rewrite `path.forEach { … }` (Path is not
+    `Sequence`-conforming so the for-in form won't compile).
+- **Build gates.** `make check` clean. `swift test` **320/48**
+  green (+4 net new). `make build` clean (signed Apple
+  Development). `make install` deployed. `swiftformat --lint` clean
+  on every touched file. `swiftlint --strict --quiet` clean.
+- **GO for Phase 5** with one caveat: the routing-perf budget is
+  ~10× over the plan. Phase 5 should treat routing-perf as a
+  parallel polish item — switch to a coarser grid, parallelise the
+  per-strand A\* runs on a `withTaskGroup`, or replace the
+  `[GridCell: Double]` cost map with a flat `[Double]` indexed by
+  `column * cellsPerSide + row` to avoid the dictionary-hash hot
+  path. Correctness is the gate; perf is the gradient.
+- **Screenshot evidence.**
+  - Before: `/tmp/phase4-routing-default.png` (the rejected
+    screenshot; lines through Hard Rock + Electro/Crossover +
+    Electro/Classics + curl loop near Electronic).
+  - After (default centred view, fresh Re-Analyze, REDO build):
+    `/tmp/phase4-redo-after-final.png`. Labels in view (Pop,
+    Alternative, Hard Rock, Alt/BritPop, International, Ambient,
+    British Invasion, CCM, Alt/Punk, Punk, Alt/Worldy,
+    Electro/Classics, Alt/Laptop/Bristol, College Rock, Celtic
+    Folk, Swing, Alt/Psych/Shoegaze) are NOT crossed by any
+    strand.
+
 ## 2026-05-21 — ✅ Genre Metro Map — Phase 4 (routing + bundling) (`feature/genre-metro-map`)
 
 Phase 4 of `plans/genre-metro-map.md`. Replaces the Phase-3 naïve

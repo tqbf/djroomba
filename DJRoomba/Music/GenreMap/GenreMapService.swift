@@ -296,6 +296,18 @@ final class GenreMapService {
     lastRoutingCrossingCount = result.crossingCount
     lastRoutingTransferCrossingCount = result.transferCrossingCount
     isRouting = false
+    #if DEBUG
+    // Phase-4-gate (2026-05-21): visible-on-stderr perf line, paired
+    // with the routing actor's `os_signpost` so the gate can record
+    // the median + max drag-release-rebuild ms on the real library
+    // without needing `log show` / Console.app.
+    let ms = result.elapsedSeconds * 1000
+    let nodeCount = current.nodes.count
+    let strandCount = current.strands.count
+    FileHandle.standardError.write(Data(
+      "[GenreMapRouting] revision=\(result.layoutRevision) strands=\(strandCount) nodes=\(nodeCount) corridors=\(result.corridorCount) bundled=\(result.bundledCorridorCount) maxPerCorridor=\(result.maxStrandsPerCorridor) crossings=\(result.crossingCount)/\(result.transferCrossingCount)xfer elapsed=\(String(format: "%.2f", ms))ms\n".utf8
+    ))
+    #endif
   }
 
   /// Build a snapshot of the data `GenreMapRouting` needs to recompute.

@@ -346,6 +346,39 @@ labels anywhere.**
 
 ### Phase 4 — Routing and bundling
 
+> **Phase-4 REDO (2026-05-21).** The first Phase-4 ship failed the
+> plan's headline criterion — _"labels readable; no strand passes
+> through a label rectangle"_ — on live screenshot. Root cause: the
+> spline-relaxation pass's deflection-floor case REPLACED sharp-
+> corner waypoints with two midpoints, removing the corner from the
+> polyline; the diagonal cut between the midpoints sliced through
+> neighbouring labels that A\* had detoured around. Fix: `smoothPolyline`
+> KEEPS the corner and inserts a `leadIn`/`leadOut` fillet pair
+> BRACKETING it at `cornerFilletFraction = 0.25`; centripetal CR
+> through `[leadIn, corner, leadOut]` rounds the corner cleanly.
+> Secondary fixes: `labelPadding` 8 → **12 pt** (more breathing room
+> around each label rect for the downstream CR), `buildCostMap` cost-
+> map crossing-penalty hot path tightened with a precomputed
+> `[String: GridCell]` station-cell map (O(stationCentres ×
+> bothMembers) → O(|bothMembers|)), and `buildCostMap` hoisted out of
+> the per-segment loop in `routeOne` to a per-strand `routeSegmentWith
+> CostMap` helper. +4 tests = **316/47 → 320/48** green; the headline
+> `rendered centripetal Catmull-Rom clears the non-member label
+> rectangle` test pins the invariant the original ship violated.
+> Live-verified: the rejected screenshot's strand-through-Hard-Rock
+> case is structurally gone. Curl loops remain on a small subset of
+> dense-centre waypoints (the centripetal CR + bundling perpendicular
+> offset can amplify back-and-forth direction reversals); filed as a
+> Phase-5 polish item. **Routing-perf is currently ~1.2–1.8 s on the
+> live 12-strand × 115-station library — well over the plan's 200 ms
+> budget.** The synthetic CI fixtures pass; the live workload's A\*
+> expansions through the dense central neighbourhood dominate the
+> wall time. The plan's 200 ms target is aspirational at the current
+> grid granularity; carry forward as a Phase-5 / Phase-6 perf item
+> (coarser grid, parallel per-strand routing, flat-array cost map).
+> Routing runs on a background actor so the main thread stays
+> responsive. **GO for Phase 5.**
+
 > **Phase-4 ship (2026-05-21).** Landed as planned. New pure modules
 > `GenreMapRouting.swift` (obstacle map + 8-way A\* on a 100×100
 > coarse grid over the 5000-side world; cost terms: label rectangle

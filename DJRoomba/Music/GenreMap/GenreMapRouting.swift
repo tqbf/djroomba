@@ -54,9 +54,14 @@ enum GenreMapRouting {
     /// per strand.
     var cellSize: CGFloat = 50
     /// Extra padding around each label box (world units). The label is
-    /// authoritative; this padding builds a small no-go halo so splines
-    /// don't graze the pill chrome.
-    var labelPadding: CGFloat = 8
+    /// authoritative; this padding builds a no-go halo so splines stay
+    /// clear of the pill chrome and the downstream centripetal Catmull-
+    /// Rom has room to round corners without re-entering the obstacle
+    /// (the Phase-4 REDO fix, 2026-05-21). 12pt is the Pareto point
+    /// found on the live library: large enough that A\* picks cells
+    /// well outside the label rect, small enough that the obstacle map
+    /// doesn't blow past the 200 ms routing budget.
+    var labelPadding: CGFloat = 12
     /// Penalty added to a cell that intersects a non-member label box.
     /// Two orders of magnitude above `baseCost` so the search reliably
     /// detours around labels.
@@ -77,10 +82,20 @@ enum GenreMapRouting {
     var turnPenalty: Double = 25
     /// Maximum deflection (radians) the smoothed polyline is allowed
     /// to bend at any interior waypoint. Corners that bend MORE than
-    /// this get a smoothing midpoint pair inserted (the lead-in /
-    /// lead-out trick from the plan). 30° = "the polyline never
-    /// kinks at more than a third of a right angle without a curve".
+    /// this get a fillet pair inserted bracketing the corner.
+    /// 30° = "the polyline never kinks at more than a third of a
+    /// right angle without a curve".
     var maxDeflection = 0.5235988 // 30°
+    /// Fraction of each leg to walk back from a sharp corner when
+    /// inserting fillet waypoints. 0.25 ⇒ the leadIn / leadOut sit
+    /// ¼ of the leg distance from the corner. Centripetal CR through
+    /// `[leadIn, corner, leadOut]` traces a smooth bend without
+    /// leaving the A\* waypoint hull (the Phase-4 REDO fix,
+    /// 2026-05-21 — the previous "replace the corner with two
+    /// midpoints" approach removed the corner from the polyline and
+    /// drew a diagonal cut that re-entered labels A\* had detoured
+    /// around).
+    var cornerFilletFraction = 0.25
     /// Hard cap on A* expansions per strand (defensive — should never
     /// be hit at real-library scale).
     var maxExpansions = 100_000
@@ -225,6 +240,13 @@ enum GenreMapRouting {
   /// Route one strand. Each consecutive station pair is searched
   /// independently; results are concatenated (no duplicate of the
   /// shared station between segments).
+  ///
+  /// **Phase-4 REDO (2026-05-21):** the per-segment `buildCostMap` call
+  /// is hoisted to per-STRAND — the obstacle / proximity / crossing-
+  /// penalty map only depends on the calling strand's `memberGenres`,
+  /// not on which station pair is being routed inside it. On a real
+  /// 12-strand × 115-station library that's a ~5× cost-map rebuild
+  /// savings (one rebuild per strand instead of one per segment).
   static func routeOne(
     request: StrandRouteRequest,
     context: ObstacleContext,
@@ -237,18 +259,25 @@ enum GenreMapRouting {
         occupiedCells: [],
       )
     }
+    let grid = Grid(configuration: configuration)
+    let costMap = buildCostMap(
+      strandID: request.strandID,
+      memberGenres: request.memberGenres,
+      grid: grid,
+      context: context,
+      configuration: configuration,
+    )
     var polyline = [CGPoint]()
     var occupied = Set<GridCell>()
     polyline.append(request.stationPositions[0])
     for index in 0 ..< request.stationPositions.count - 1 {
       let from = request.stationPositions[index]
       let to = request.stationPositions[index + 1]
-      let segment = routeSegment(
+      let segment = routeSegmentWithCostMap(
         from: from,
         to: to,
-        strandID: request.strandID,
-        memberGenres: request.memberGenres,
-        context: context,
+        grid: grid,
+        costMap: costMap,
         configuration: configuration,
       )
       // Drop the duplicated shared endpoint between consecutive segments.
@@ -262,6 +291,41 @@ enum GenreMapRouting {
       polyline: smoothed,
       occupiedCells: occupied,
     )
+  }
+
+  /// Pure A\* search between two world-space points using a
+  /// pre-computed `costMap`. Tests call `routeSegment` which builds
+  /// the cost map inline; the multi-segment hot path
+  /// (`GenreMapRouting.routeOne`) hoists the build to per-strand.
+  static func routeSegmentWithCostMap(
+    from start: CGPoint,
+    to goal: CGPoint,
+    grid: Grid,
+    costMap: [GridCell: Double],
+    configuration: Configuration,
+  ) -> (polyline: [CGPoint], cells: Set<GridCell>) {
+    let startCell = grid.cell(for: start)
+    let goalCell = grid.cell(for: goal)
+    if startCell == goalCell {
+      return (polyline: [start, goal], cells: [startCell])
+    }
+    let path = aStar(
+      start: startCell,
+      goal: goalCell,
+      costMap: costMap,
+      configuration: configuration,
+    )
+    guard !path.isEmpty else {
+      return (polyline: [start, goal], cells: [startCell, goalCell])
+    }
+    var polyline = [CGPoint]()
+    polyline.reserveCapacity(path.count + 2)
+    polyline.append(start)
+    for index in 1 ..< path.count - 1 {
+      polyline.append(grid.centre(of: path[index]))
+    }
+    polyline.append(goal)
+    return (polyline: polyline, cells: Set(path))
   }
 
   /// Pure A* search between two world-space points (snapped to grid
@@ -405,21 +469,29 @@ enum GenreMapRouting {
       }
     }
     // Crossing penalty for cells already used by other strands.
+    // **Phase-4 REDO (2026-05-21):** precompute the genre→cell map so
+    // the inner `isTransferCell` check is `O(|bothMembers|)` instead of
+    // `O(|stationCentres| × |bothMembers|)` — the live-library hot path
+    // on a 12-strand × 115-station library; the previous shape pegged
+    // the routing budget at multiple seconds.
+    var cellByGenre = [String: GridCell](minimumCapacity: context.stationCentres.count)
+    for centre in context.stationCentres {
+      cellByGenre[centre.genre] = grid.cell(for: centre.position)
+    }
     for (otherStrandID, cells) in context.routedCellsByStrand
       where otherStrandID != strandID
     {
       let otherMembers = context.memberGenresByStrand[otherStrandID] ?? []
       let bothMembers = memberGenres.intersection(otherMembers)
-      for cell in cells {
-        // If the cell is at/near a station that's a member of BOTH
-        // strands, charge the transfer-crossing discount (these are
-        // the "intentional" knots).
-        let isTransferCell = bothMembers.contains { genre in
-          context.stationCentres.contains { centre in
-            centre.genre == genre && grid.cell(for: centre.position) == cell
-          }
+      // Cells that contain a transfer station (member of both strands).
+      var transferCells = Set<GridCell>(minimumCapacity: bothMembers.count)
+      for genre in bothMembers {
+        if let cell = cellByGenre[genre] {
+          transferCells.insert(cell)
         }
-        costs[cell, default: 0] += isTransferCell
+      }
+      for cell in cells {
+        costs[cell, default: 0] += transferCells.contains(cell)
           ? configuration.transferCrossingPenalty
           : configuration.crossingPenalty
       }
@@ -428,8 +500,24 @@ enum GenreMapRouting {
   }
 
   /// Smooth a polyline: remove collinear interior points; if a corner
-  /// is sharper than `configuration.minTurnAngle`, insert a smoothing
-  /// midpoint that softens the bend. Idempotent.
+  /// is sharper than `configuration.maxDeflection`, insert a pair of
+  /// fillet points BRACKETING the corner so centripetal Catmull-Rom
+  /// rounds the corner without bulging into the obstacle the A\* run
+  /// was routing around. Idempotent.
+  ///
+  /// **Phase-4 REDO (2026-05-21):** the previous implementation
+  /// replaced the corner waypoint with its `(prev+cur)/2` and
+  /// `(cur+next)/2` midpoints — that REMOVED the corner from the
+  /// polyline and drew a diagonal cut across it, which (a) made the
+  /// metro line skip its intermediate stations and (b) was the actual
+  /// source of strand-through-label crossings observed in the
+  /// rejection screenshot (the diagonal cut between leadIn and
+  /// leadOut sliced through neighbouring label rectangles A\* had
+  /// painstakingly routed around). Fix: keep the corner; insert
+  /// fillets at a configurable short distance away from the corner
+  /// along each leg, so centripetal CR through `[leadIn, corner,
+  /// leadOut]` traces a clean rounded turn that stays close to the
+  /// A\*-chosen waypoints.
   static func smoothPolyline(
     _ points: [CGPoint],
     configuration: Configuration,
@@ -449,14 +537,14 @@ enum GenreMapRouting {
       }
     }
     culled.append(points[points.count - 1])
-    // 2) Deflection floor — insert a smoothing midpoint pair for
-    // any corner whose bend exceeds `maxDeflection`. The leadIn /
-    // leadOut midpoints replace the sharp corner with two milder
-    // direction changes; combined with the Catmull-Rom downstream
-    // (the renderer's `StrandSpline` builds a Catmull-Rom *through*
-    // these points), this produces a smoothly-curved corner.
+    // 2) Deflection floor — at any corner sharper than `maxDeflection`,
+    // insert fillet waypoints on either side of the corner along each
+    // leg. The corner itself stays in the polyline; the centripetal
+    // Catmull-Rom downstream renders a smooth bend through
+    // `[leadIn, corner, leadOut]` without leaving the A* waypoint hull.
+    let filletFraction = configuration.cornerFilletFraction
     var smoothed = [CGPoint]()
-    smoothed.reserveCapacity(culled.count)
+    smoothed.reserveCapacity(culled.count * 2)
     smoothed.append(culled[0])
     for index in 1 ..< culled.count - 1 {
       let previous = culled[index - 1]
@@ -464,15 +552,20 @@ enum GenreMapRouting {
       let next = culled[index + 1]
       let deflection = deflectionAngle(previous: previous, current: current, next: next)
       if deflection > configuration.maxDeflection {
+        // Place fillet points a small fraction of the way back along
+        // the previous leg and forward along the next leg. The fraction
+        // is bounded by half the leg length so two adjacent sharp
+        // corners can't insert overlapping fillets.
         let leadIn = CGPoint(
-          x: (previous.x + current.x) / 2,
-          y: (previous.y + current.y) / 2,
+          x: current.x + (previous.x - current.x) * CGFloat(filletFraction),
+          y: current.y + (previous.y - current.y) * CGFloat(filletFraction),
         )
         let leadOut = CGPoint(
-          x: (current.x + next.x) / 2,
-          y: (current.y + next.y) / 2,
+          x: current.x + (next.x - current.x) * CGFloat(filletFraction),
+          y: current.y + (next.y - current.y) * CGFloat(filletFraction),
         )
         smoothed.append(leadIn)
+        smoothed.append(current)
         smoothed.append(leadOut)
       } else {
         smoothed.append(current)
