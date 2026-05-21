@@ -1522,7 +1522,11 @@ struct LibraryStore: Sendable {
   /// ceiling regardless of import size.
   private static let sqliteVariableLimit = 999
 
-  private let database: AppDatabase
+  /// `internal` (not `private`) so cross-file `LibraryStore+…` extensions
+  /// can drive the same `DatabaseQueue` (e.g. `LibraryStore+GenreMap`).
+  /// Otherwise unchanged — the queue itself is immutable + serialized, so
+  /// widening access doesn't widen the concurrency surface.
+  let database: AppDatabase
 
   /// Upsert-or-insert `song_stat` for `songID`, incrementing the single
   /// `Int` column at `counter` by one (a new row starts that counter at 1,

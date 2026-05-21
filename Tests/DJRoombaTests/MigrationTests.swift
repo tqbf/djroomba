@@ -29,6 +29,7 @@ struct MigrationTests {
       // No "v5.*" — the v5 genre import was data-only (reused the v4
       // column, no schema). The next schema change is v6.
       "v6.genreGraph",
+      "v7.genreMap",
     ])
   }
 
@@ -129,6 +130,7 @@ struct MigrationTests {
       "v3.playStatistics",
       "v4.songMetadata",
       "v6.genreGraph",
+      "v7.genreMap",
     ])
     #expect(appliedAfterSecond == appliedAfterFirst)
     #expect(songExists)
@@ -187,6 +189,9 @@ struct MigrationTests {
     "favorite_playlist",
     "recent_playlist",
     "genre_edge",
+    // v7.genreMap substrate (plans/genre-metro-map.md Phase 1)
+    "genre_node",
+    "genre_edge_evidence",
   ]
 
   /// The nine nullable "free" Apple-library metadata columns v4 adds to

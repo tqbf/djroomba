@@ -33,6 +33,7 @@ final class MusicController {
     importService = ImportService(store: safeStore)
     genreImportService = GenreImportService(store: safeStore)
     genreGraphService = GenreGraphService(store: safeStore)
+    genreMapService = GenreMapService(store: safeStore)
     catalogIngestService = CatalogIngestService(store: safeStore)
     snapshotService = SnapshotService(store: safeStore)
     resolver = PlaybackResolver()
@@ -65,6 +66,11 @@ final class MusicController {
   /// automatically after a playlist change when `autoReanalyzeGenreGraph`
   /// is on.
   let genreGraphService: GenreGraphService
+  /// Phase 1 of `plans/genre-metro-map.md` — the genre **map** substrate
+  /// (sibling, not replacement, of `genreGraphService`). Driven by the
+  /// new "Analyze (Map)" action and a `runMapRebuildIfEnabled()` hook
+  /// alongside the existing genre-graph one. Phase 6 will consolidate.
+  let genreMapService: GenreMapService
   /// `.djroomba` library snapshot export / import + revert
   /// (`plans/snapshot-export-import.md`). Non-MusicKit; the controller
   /// owns the post-op UI reload + genre reanalyze, exactly as it does for
@@ -126,6 +132,13 @@ final class MusicController {
   /// `.sheet(isPresented:)` two-way binding (the standard idiom for
   /// app-level sheet state under `@Observable`).
   var catalogSearchPresented = false
+
+  /// Phase 1 (`plans/genre-metro-map.md`) — drives the genre-map sheet's
+  /// presentation flag from `MainShellView` via `Bindable`. A sheet (not a
+  /// docked panel) for Phase 1 because the map is a sibling, exploratory
+  /// view; the existing genre-graph panel stays the always-on detail-pane
+  /// affordance. Phase 6 will rename / consolidate.
+  var genreMapSheetPresented = false
 
   /// Derived summary collections — **stored, input-driven state**, not
   /// per-`body` computed properties (Phase A spry fix; see
@@ -448,6 +461,31 @@ final class MusicController {
   /// surfaced via the service's `lastError`, never thrown.
   func analyzeGenreGraph() async {
     await runGenreAnalysis()
+  }
+
+  /// **Analyze (Map)** — Phase 1 of `plans/genre-metro-map.md`. Always
+  /// runs (the menu action's unconditional path). Sequence:
+  ///
+  /// 1. Rebuild the v6 `genre_edge` table first (the playlist channel
+  ///    of the new model reads from it; without this step the playlist
+  ///    channel is silent — still correct, but weaker).
+  /// 2. Rebuild the v7 `genre_node` + `genre_edge_evidence` substrate
+  ///    and fold it into a renderable `GenreMapModel` via
+  ///    `GenreMapBuilder` (pure, off-main pipeline). Failures are
+  ///    surfaced via `genreMapService.lastError`, never thrown.
+  func analyzeGenreMap() async {
+    await runGenreAnalysis()
+    await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel)
+  }
+
+  /// Auto-rebuild hook for the map, alongside (NOT replacing)
+  /// `reanalyzeGenreGraphIfEnabled`. Fire-and-forget on the MainActor,
+  /// gated on the same `autoReanalyzeGenreGraph` toggle as the v6 graph
+  /// (Phase 6 will split the preferences and consolidate; Phase 1 reuses
+  /// one switch for both).
+  func rebuildGenreMapIfEnabled() {
+    guard autoReanalyzeGenreGraph else { return }
+    Task { await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel) }
   }
 
   /// File ▸ Export Library Snapshot…. Build the compressed `.djroomba`
@@ -1108,6 +1146,13 @@ final class MusicController {
   private func reanalyzeGenreGraphIfEnabled() {
     guard autoReanalyzeGenreGraph else { return }
     Task { await runGenreAnalysis() }
+    // Sibling map rebuild (`plans/genre-metro-map.md` Phase 1). Same
+    // gate, same fire-and-forget posture; the two services do not depend
+    // on each other ordering (the map's playlist channel reads from
+    // `genre_edge` written by `runGenreAnalysis`, but a single rebuild
+    // pass tolerates a stale read — the next trigger picks up the fresh
+    // data). Phase 6 will rename + consolidate.
+    rebuildGenreMapIfEnabled()
   }
 
   /// The single funnel into `GenreGraphService.analyze`, shared by the

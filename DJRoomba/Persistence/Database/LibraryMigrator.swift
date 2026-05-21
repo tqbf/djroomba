@@ -346,6 +346,54 @@ enum LibraryMigrator {
       }
     }
 
+    // v7: the genre **metro map** substrate (plans/genre-metro-map.md
+    // Phase 1). TWO new tables alongside `genre_edge`, both derived /
+    // wholesale-rebuilt — the v6 `genre_edge` table + `rebuildGenreGraph`
+    // are unchanged (kept as one input *channel* of the richer model). The
+    // genre name is `TEXT` and free-form (same posture as `genre_edge` —
+    // a genre is not an entity row), so neither table has a FK; the rebuild
+    // is one CTE-driven write transaction that re-derives both tables from
+    // the live data, exactly the posture of `rebuildGenreGraph`. Purely
+    // additive — v1–v6 stay frozen and an existing DB migrates
+    // non-destructively (both tables start empty until the first map
+    // rebuild populates them).
+    //
+    // `genre_node` carries the per-genre cardinalities + normalised weight
+    // (the size input for the layout pills; computed in SQL over
+    // `song.genre_names` + artist/album distinct counts). `genre_edge_evidence`
+    // is the multi-channel edge model — three Jaccards (artist / album /
+    // track), the playlist-cooccurrence channel from `genre_edge`
+    // normalised to [0,1], and the materialised support counts (used for
+    // the support floor + the future evidence panel). Canonical `a < b`
+    // half stored once (unlike `genre_edge`'s mirrored adjacency-list
+    // posture) — the layout/render pipeline reads the whole table once and
+    // folds in memory, so mirrored rows would be redundant.
+    migrator.registerMigration("v7.genreMap") { db in
+      try db.create(table: "genre_node") { t in
+        t.primaryKey("genre", .text)
+        t.column("track_count", .integer).notNull()
+        t.column("album_count", .integer).notNull()
+        t.column("artist_count", .integer).notNull()
+        // Normalised importance in [0,1], `log`-shaped and then divided by
+        // the max raw weight across all rows in the same rebuild — see
+        // `LibraryStore+GenreMap.rebuildGenreMap`.
+        t.column("weight", .double).notNull()
+      }
+      try db.create(table: "genre_edge_evidence") { t in
+        t.column("genre_a", .text).notNull()
+        t.column("genre_b", .text).notNull()
+        t.column("artist_overlap_jaccard", .double).notNull()
+        t.column("album_overlap_jaccard", .double).notNull()
+        t.column("track_overlap_jaccard", .double).notNull()
+        t.column("playlist_cooccur_weight", .double).notNull()
+        t.column("shared_artist_count", .integer).notNull()
+        t.column("shared_album_count", .integer).notNull()
+        t.column("shared_track_count", .integer).notNull()
+        t.column("total_weight", .double).notNull()
+        t.primaryKey(["genre_a", "genre_b"])
+      }
+    }
+
     return migrator
   }
 }

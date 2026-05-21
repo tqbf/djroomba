@@ -143,6 +143,20 @@ struct PlaylistPlayerApp: App {
         }
         .keyboardShortcut("a", modifiers: [.command, .option])
 
+        // Phase 1 of `plans/genre-metro-map.md`: a SIBLING (not
+        // replacement) of the v6 Analyze action. Always runs. Phase 6
+        // will consolidate the two actions; for now they live side by
+        // side so the new map can be live-verified against the existing
+        // graph without retiring either.
+        Button("Analyze Genre Map") {
+          Task { await controller.analyzeGenreMap() }
+        }
+        .keyboardShortcut("a", modifiers: [.command, .option, .shift])
+
+        Button("Show Genre Map…") {
+          controller.genreMapSheetPresented = true
+        }
+
         // A `Toggle` in a menu is the native checkmark-menu-item idiom.
         // Bound through `Bindable` (the modern Observation binding —
         // avoids a `Binding(get:set:)`); `MusicController`'s `didSet`

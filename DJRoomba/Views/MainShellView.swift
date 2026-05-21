@@ -251,6 +251,13 @@ struct MainShellView: View {
     .sheet(isPresented: Bindable(controller).catalogSearchPresented) {
       CatalogSearchSheet(isPresented: Bindable(controller).catalogSearchPresented)
     }
+    // Phase 1 (`plans/genre-metro-map.md`) — the sibling map sheet.
+    // Reachable via the Playback ▸ Show Genre Map… menu item (the
+    // simplest live-verifiable surface; Phase 6 will rename / consolidate
+    // with the docked v6 panel).
+    .sheet(isPresented: Bindable(controller).genreMapSheetPresented) {
+      GenreMapPanel()
+    }
     // Document import/export (plans/snapshot-export-import.md). The
     // exporter's bytes are built off-main *before* its flag flips true
     // (`beginSnapshotExport`), so the document is always ready here.
