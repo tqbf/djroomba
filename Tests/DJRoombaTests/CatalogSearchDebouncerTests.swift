@@ -23,14 +23,14 @@ import Testing
 @Suite("Catalog search debouncer (Phase 2)")
 struct CatalogSearchDebouncerTests {
 
-  @Test("an empty query is always a clear")
-  func emptyQueryClears() {
+  @Test
+  func `an empty query is always a clear`() {
     #expect(
       CatalogSearchDebouncer.decision(
         for: "",
         lastFiredTerm: nil,
         elapsedSinceLastInputMS: 0,
-      ) == .clear,
+      ) == .clear
     )
     // Whitespace-only is "empty" per the trim rule.
     #expect(
@@ -38,19 +38,19 @@ struct CatalogSearchDebouncerTests {
         for: "   ",
         lastFiredTerm: "queen",
         elapsedSinceLastInputMS: 10000,
-      ) == .clear,
+      ) == .clear
     )
   }
 
-  @Test("a below-minLength query waits (does NOT clear — user is mid-type)")
-  func belowMinLengthWaits() {
+  @Test
+  func `a below-minLength query waits (does NOT clear — user is mid-type)`() {
     // Default minLength = 2.
     #expect(
       CatalogSearchDebouncer.decision(
         for: "q",
         lastFiredTerm: nil,
         elapsedSinceLastInputMS: 1000,
-      ) == .wait,
+      ) == .wait
     )
     // Explicit minLength of 3 also waits at 2 chars.
     #expect(
@@ -59,12 +59,12 @@ struct CatalogSearchDebouncerTests {
         lastFiredTerm: nil,
         elapsedSinceLastInputMS: 1000,
         minLength: 3,
-      ) == .wait,
+      ) == .wait
     )
   }
 
-  @Test("the same query as last fired waits — even after the debounce window")
-  func sameAsLastFiredWaits() {
+  @Test
+  func `the same query as last fired waits — even after the debounce window`() {
     // 10s elapsed, well past the 250 ms debounce, but the query is
     // unchanged → re-firing the same request gains nothing and burns
     // rate. Wait.
@@ -73,18 +73,18 @@ struct CatalogSearchDebouncerTests {
         for: "queen",
         lastFiredTerm: "queen",
         elapsedSinceLastInputMS: 10000,
-      ) == .wait,
+      ) == .wait
     )
   }
 
-  @Test("an above-minLength new query past the debounce fires")
-  func longEnoughPastDebounceFires() {
+  @Test
+  func `an above-minLength new query past the debounce fires`() {
     #expect(
       CatalogSearchDebouncer.decision(
         for: "queen",
         lastFiredTerm: nil,
         elapsedSinceLastInputMS: 250,
-      ) == .fire("queen"),
+      ) == .fire("queen")
     )
     // Different lastFired (the user changed the term) — also fires.
     #expect(
@@ -92,19 +92,19 @@ struct CatalogSearchDebouncerTests {
         for: "queen II",
         lastFiredTerm: "queen",
         elapsedSinceLastInputMS: 500,
-      ) == .fire("queen II"),
+      ) == .fire("queen II")
     )
   }
 
-  @Test("an above-minLength new query within the debounce window waits")
-  func longEnoughWithinDebounceWaits() {
+  @Test
+  func `an above-minLength new query within the debounce window waits`() {
     // 100 ms elapsed, default 250 ms debounce → wait.
     #expect(
       CatalogSearchDebouncer.decision(
         for: "queen",
         lastFiredTerm: nil,
         elapsedSinceLastInputMS: 100,
-      ) == .wait,
+      ) == .wait
     )
     // Even with a different lastFired, the elapsed gate holds.
     #expect(
@@ -112,19 +112,19 @@ struct CatalogSearchDebouncerTests {
         for: "queen II",
         lastFiredTerm: "queen",
         elapsedSinceLastInputMS: 249,
-      ) == .wait,
+      ) == .wait
     )
   }
 
-  @Test("leading/trailing whitespace is normalized (trimmed for fire + dedupe)")
-  func whitespaceIsTrimmed() {
+  @Test
+  func `leading/trailing whitespace is normalized (trimmed for fire + dedupe)`() {
     // Fired term is the trimmed string, not the raw input.
     #expect(
       CatalogSearchDebouncer.decision(
         for: "  queen  ",
         lastFiredTerm: nil,
         elapsedSinceLastInputMS: 500,
-      ) == .fire("queen"),
+      ) == .fire("queen")
     )
     // Whitespace-padded duplicate of lastFired still suppresses.
     #expect(
@@ -132,12 +132,12 @@ struct CatalogSearchDebouncerTests {
         for: "  queen  ",
         lastFiredTerm: "queen",
         elapsedSinceLastInputMS: 500,
-      ) == .wait,
+      ) == .wait
     )
   }
 
-  @Test("custom debounceMS / minLength values are honored")
-  func customParametersHonored() {
+  @Test
+  func `custom debounceMS / minLength values are honored`() {
     // 500 ms debounce, 3-char minimum.
     #expect(
       CatalogSearchDebouncer.decision(
@@ -146,7 +146,7 @@ struct CatalogSearchDebouncerTests {
         elapsedSinceLastInputMS: 1000,
         minLength: 3,
         debounceMS: 500,
-      ) == .wait,
+      ) == .wait
     )
     #expect(
       CatalogSearchDebouncer.decision(
@@ -155,7 +155,7 @@ struct CatalogSearchDebouncerTests {
         elapsedSinceLastInputMS: 400,
         minLength: 3,
         debounceMS: 500,
-      ) == .wait,
+      ) == .wait
     )
     #expect(
       CatalogSearchDebouncer.decision(
@@ -164,7 +164,7 @@ struct CatalogSearchDebouncerTests {
         elapsedSinceLastInputMS: 500,
         minLength: 3,
         debounceMS: 500,
-      ) == .fire("queen"),
+      ) == .fire("queen")
     )
   }
 

@@ -176,7 +176,7 @@ struct GenreMapPanel: View {
   /// by `applyTransferMapPlan` so the transfer-map zoom/centre fits the
   /// actual canvas instead of a hardcoded 900×600 (which on smaller
   /// windows pushed the centred node off-screen entirely).
-  @State private var viewportSize: CGSize = CGSize(width: 900, height: 600)
+  @State private var viewportSize = CGSize(width: 900, height: 600)
   /// Phase 5 selection. `selectedGenre` is the focused genre; in
   /// compare-mode `compareSecondGenre` is set and the inspector shows
   /// the compare card.

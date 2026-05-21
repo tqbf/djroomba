@@ -52,64 +52,6 @@ final class CatalogIngestService {
 
   // MARK: Internal
 
-  /// Land a batch of catalog `Song`s into SQLite and return their stable
-  /// `song.id`s in input order so the caller can immediately reference
-  /// them (e.g. add to an app playlist on the same turn).
-  ///
-  /// Idempotent: re-ingesting the same `MusicKit.Song` (same catalog id) is
-  /// a non-destructive UPSERT — the existing row keeps its stable `song.id`
-  /// while mutable metadata is refreshed. The composite unique key
-  /// `(music_item_id, id_namespace)` is what makes this safe.
-  ///
-  /// Tolerates an empty input (no-op, returns `[]`).
-  func ingest(_ songs: [MusicKit.Song]) async throws -> [String] {
-    guard !songs.isEmpty else { return [] }
-
-    let importedAt = Date.now
-
-    // Map MusicKit.Song → our Song record. Some catalog songs in one
-    // request may collide on `music_item_id` (catalog ids are globally
-    // stable — collisions would mean the caller passed the same song
-    // twice). De-dupe to one record per import key (first occurrence
-    // wins; they describe the same song) and preserve the caller's
-    // order separately so the returned id list matches `songs` 1:1.
-    // This mirrors `ImportService.writePlaylist`'s two-structure pattern.
-    var songsByKey = [LibraryStore.SongKey: Song]()
-    var orderedKeys = [LibraryStore.SongKey]()
-    orderedKeys.reserveCapacity(songs.count)
-    for catalogSong in songs {
-      let record = Self.song(fromCatalog: catalogSong, importedAt: importedAt)
-      let key = LibraryStore.SongKey(
-        musicItemID: record.musicItemID,
-        namespace: record.idNamespace,
-      )
-      if songsByKey[key] == nil {
-        songsByKey[key] = record
-      }
-      orderedKeys.append(key)
-    }
-
-    // 1. Batch UPSERT the unique catalog records (one chunked multi-row
-    //    statement in one transaction; dedupe on
-    //    `(music_item_id, id_namespace)`, preserving any existing stable
-    //    `song.id` — non-destructive re-ingest, the same guarantee
-    //    library import relies on).
-    try await store.upsertSongs(Array(songsByKey.values))
-
-    // 2. One batched lookup of every unique key → stored stable `song.id`
-    //    (mirrors `ImportService.writePlaylist`'s single batched read —
-    //    never a per-song N-await re-read).
-    let idByKey = try await store.songIDsByKey(
-      songsByKey.keys.map { ($0.musicItemID, $0.namespace) }
-    )
-
-    // Expand back to caller order. `compactMap` is defensive — every key
-    // present in `songsByKey` was just upserted, so the lookup is
-    // total in practice; a missing entry would mean a store-level
-    // anomaly worth dropping rather than crashing.
-    return orderedKeys.compactMap { idByKey[$0] }
-  }
-
   /// Map a MusicKit catalog `Song` to our `Song` record. Provenance fixes
   /// `idNamespace: .catalog` — period — the exact mirror of
   /// `ImportService.song(from:)`'s `.library` rule.
@@ -197,6 +139,64 @@ final class CatalogIngestService {
       workName: workName,
       movementName: movementName,
     )
+  }
+
+  /// Land a batch of catalog `Song`s into SQLite and return their stable
+  /// `song.id`s in input order so the caller can immediately reference
+  /// them (e.g. add to an app playlist on the same turn).
+  ///
+  /// Idempotent: re-ingesting the same `MusicKit.Song` (same catalog id) is
+  /// a non-destructive UPSERT — the existing row keeps its stable `song.id`
+  /// while mutable metadata is refreshed. The composite unique key
+  /// `(music_item_id, id_namespace)` is what makes this safe.
+  ///
+  /// Tolerates an empty input (no-op, returns `[]`).
+  func ingest(_ songs: [MusicKit.Song]) async throws -> [String] {
+    guard !songs.isEmpty else { return [] }
+
+    let importedAt = Date.now
+
+    // Map MusicKit.Song → our Song record. Some catalog songs in one
+    // request may collide on `music_item_id` (catalog ids are globally
+    // stable — collisions would mean the caller passed the same song
+    // twice). De-dupe to one record per import key (first occurrence
+    // wins; they describe the same song) and preserve the caller's
+    // order separately so the returned id list matches `songs` 1:1.
+    // This mirrors `ImportService.writePlaylist`'s two-structure pattern.
+    var songsByKey = [LibraryStore.SongKey: Song]()
+    var orderedKeys = [LibraryStore.SongKey]()
+    orderedKeys.reserveCapacity(songs.count)
+    for catalogSong in songs {
+      let record = Self.song(fromCatalog: catalogSong, importedAt: importedAt)
+      let key = LibraryStore.SongKey(
+        musicItemID: record.musicItemID,
+        namespace: record.idNamespace,
+      )
+      if songsByKey[key] == nil {
+        songsByKey[key] = record
+      }
+      orderedKeys.append(key)
+    }
+
+    // 1. Batch UPSERT the unique catalog records (one chunked multi-row
+    //    statement in one transaction; dedupe on
+    //    `(music_item_id, id_namespace)`, preserving any existing stable
+    //    `song.id` — non-destructive re-ingest, the same guarantee
+    //    library import relies on).
+    try await store.upsertSongs(Array(songsByKey.values))
+
+    // 2. One batched lookup of every unique key → stored stable `song.id`
+    //    (mirrors `ImportService.writePlaylist`'s single batched read —
+    //    never a per-song N-await re-read).
+    let idByKey = try await store.songIDsByKey(
+      songsByKey.keys.map { ($0.musicItemID, $0.namespace) }
+    )
+
+    // Expand back to caller order. `compactMap` is defensive — every key
+    // present in `songsByKey` was just upserted, so the lookup is
+    // total in practice; a missing entry would mean a store-level
+    // anomaly worth dropping rather than crashing.
+    return orderedKeys.compactMap { idByKey[$0] }
   }
 
   // MARK: Private

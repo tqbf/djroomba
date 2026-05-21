@@ -93,6 +93,21 @@ enum GenreMapForceLayout {
     var settleWindow = 8
     /// Seed for the deterministic initial scatter.
     var rngSeed: UInt64 = 0xD9_C1_57_2A_3C_22_77_77
+    /// Phase 6 (`plans/genre-metro-map.md`): when non-empty, the
+    /// layout pass **seeds initial positions** from these values for
+    /// every node whose `id` is a key here (overrides the random
+    /// scatter), AND applies a per-step stability force
+    /// `μ · (previousPosition − currentPosition)` on those nodes only.
+    /// Nodes absent from this map fall back to the community-anchored
+    /// scatter and are NOT stability-anchored — they settle naturally
+    /// around their neighbours. **Never reseed from random on re-
+    /// import** — the spec's headline directive.
+    var previousPositions = [String: CGPoint]()
+    /// Stability force coefficient `μ` (Phase 6 step D). Applied per
+    /// step to each node listed in `previousPositions`. Tuned so the
+    /// layout settles near the persisted positions but new nodes can
+    /// still find natural homes.
+    var stabilityForce = GenreMapPersistence.stabilityForce
   }
 
   struct InputNode: Sendable {
@@ -174,15 +189,31 @@ enum GenreMapForceLayout {
     var rng = SplitMix64(seed: configuration.rngSeed)
 
     // Initial scatter inside a circle at the community macro anchor
-    // (when known) or the origin. Scaled by `worldSide`.
+    // (when known) or the origin. Scaled by `worldSide`. **Phase 6**:
+    // when `previousPositions` carries a value for this node, override
+    // the scatter with the persisted coordinates (Phase 6 step D —
+    // "initialise force-layout positions from `(x, y)` in the table,
+    // NOT random"). Existing-node membership is also captured here so
+    // the stability-force pass can skip new nodes downstream.
     let radius = Double(configuration.worldSide) * 0.45
+    var hasPrevious = [Bool](repeating: false, count: n)
+    var previousX = [Double](repeating: 0, count: n)
+    var previousY = [Double](repeating: 0, count: n)
     for index in 0 ..< n {
-      let anchor = macroAnchorByCommunity[inputs[index].communityID]
-        ?? .zero
-      let theta = Double(rng.nextUnitFraction()) * 2 * .pi
-      let rho = sqrt(Double(rng.nextUnitFraction())) * radius * 0.12
-      positionX[index] = Double(anchor.x) + cos(theta) * rho
-      positionY[index] = Double(anchor.y) + sin(theta) * rho
+      if let persisted = configuration.previousPositions[inputs[index].id] {
+        positionX[index] = Double(persisted.x)
+        positionY[index] = Double(persisted.y)
+        previousX[index] = Double(persisted.x)
+        previousY[index] = Double(persisted.y)
+        hasPrevious[index] = true
+      } else {
+        let anchor = macroAnchorByCommunity[inputs[index].communityID]
+          ?? .zero
+        let theta = Double(rng.nextUnitFraction()) * 2 * .pi
+        let rho = sqrt(Double(rng.nextUnitFraction())) * radius * 0.12
+        positionX[index] = Double(anchor.x) + cos(theta) * rho
+        positionY[index] = Double(anchor.y) + sin(theta) * rho
+      }
     }
 
     // Per-step half-box (padded) for repulsion math.
@@ -311,6 +342,20 @@ enum GenreMapForceLayout {
         let anchor = macroAnchorByIndex[index]
         forceX[index] -= macroGravity * (positionX[index] - Double(anchor.x))
         forceY[index] -= macroGravity * (positionY[index] - Double(anchor.y))
+      }
+
+      // 4a) Stability force (Phase 6 step D): for every node whose
+      // position was persisted by a prior rebuild, add a restoring
+      // pull `μ · (previousPosition − currentPosition)`. The force
+      // applies to EXISTING nodes only — new nodes have no persisted
+      // anchor so they settle naturally around their neighbours.
+      // O(N) per step; negligible alongside the O(N²) repulsion pass.
+      if configuration.stabilityForce > 0 {
+        let mu = configuration.stabilityForce
+        for index in 0 ..< n where hasPrevious[index] {
+          forceX[index] += mu * (previousX[index] - positionX[index])
+          forceY[index] += mu * (previousY[index] - positionY[index])
+        }
       }
 
       // 5) Integrate (velocity Verlet, strongly damped) + cap velocity.

@@ -81,6 +81,12 @@ struct LibraryStore: Sendable {
   /// capping history never corrupts true play counts (Decision R5).
   static let playHistoryCap = 50_000
 
+  /// `internal` (not `private`) so cross-file `LibraryStore+…` extensions
+  /// can drive the same `DatabaseQueue` (e.g. `LibraryStore+GenreMap`).
+  /// Otherwise unchanged — the queue itself is immutable + serialized, so
+  /// widening access doesn't widen the concurrency surface.
+  let database: AppDatabase
+
   /// Insert-or-update songs in a SINGLE transaction using a real SQLite
   /// UPSERT, deduped on `(music_item_id, id_namespace)`.
   ///
@@ -1521,12 +1527,6 @@ struct LibraryStore: Sendable {
   /// chunks its rows so the bound-parameter count stays well under that
   /// ceiling regardless of import size.
   private static let sqliteVariableLimit = 999
-
-  /// `internal` (not `private`) so cross-file `LibraryStore+…` extensions
-  /// can drive the same `DatabaseQueue` (e.g. `LibraryStore+GenreMap`).
-  /// Otherwise unchanged — the queue itself is immutable + serialized, so
-  /// widening access doesn't widen the concurrency surface.
-  let database: AppDatabase
 
   /// Upsert-or-insert `song_stat` for `songID`, incrementing the single
   /// `Int` column at `counter` by one (a new row starts that counter at 1,

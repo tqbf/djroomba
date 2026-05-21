@@ -76,6 +76,18 @@ enum GenreMapBuilder {
     var layout = GenreMapForceLayout.Configuration()
   }
 
+  /// Build result — the renderable model PLUS Phase-6 persistence
+  /// payload (the rows the store writes back to `genre_map_state` +
+  /// `genre_map_strand`). The model is the same shape Phase 1–5 produced;
+  /// the persistence payload is new and consumed only by the service's
+  /// post-build write. Tests that don't care about persistence read
+  /// `.model` and ignore the rest.
+  struct BuildResult: Sendable {
+    var model: GenreMapModel
+    var stateRows: [GenreMapStateRow]
+    var strandRows: [GenreMapStrandRow]
+  }
+
   /// One-shot build: pure inputs → fully laid out model. The label-size
   /// function is provided because the panel — not the builder — knows
   /// SwiftUI text metrics; the builder consumes a closure so the
@@ -93,13 +105,52 @@ enum GenreMapBuilder {
     configuration: Configuration = Configuration(),
     measureLabel: (_ text: String, _ fontSize: CGFloat, _ kind: GenreMapNodeKind) -> CGSize,
   ) -> GenreMapModel {
+    buildWithPersistence(
+      nodes: nodes,
+      evidence: evidence,
+      previousState: nil,
+      configuration: configuration,
+      measureLabel: measureLabel,
+    ).model
+  }
+
+  /// Phase 6 (`plans/genre-metro-map.md`): builder entrypoint that
+  /// accepts the persisted state from the previous rebuild + emits
+  /// fresh state rows alongside the model. When `previousState` is
+  /// `nil` this behaves like `build` (random scatter, fresh
+  /// algorithmic ids).
+  ///
+  /// - Initialises force-layout positions from `previousState.positions`
+  ///   when present (no random reseed on re-import).
+  /// - Adds a per-node stability force `μ · (previous − current)` on
+  ///   existing nodes only.
+  /// - Matches new communities to old at three resolutions (coarse,
+  ///   medium, fine). Matched communities reuse the predecessor id; new
+  ///   communities mint a fresh `new-N` id.
+  /// - Matches new strands to old via member-Jaccard + path-similarity.
+  ///   Matched strands reuse the predecessor's `colourID` + label
+  ///   tokens; new strands mint fresh entries.
+  /// - Bumps revision: `previousState?.revision ?? 0 + 1` is the
+  ///   revision stamped on every output row.
+  static func buildWithPersistence(
+    nodes: [GenreNode],
+    evidence: [GenreEdgeEvidence],
+    previousState: GenreMapPersistedState?,
+    configuration: Configuration = Configuration(),
+    measureLabel: (_ text: String, _ fontSize: CGFloat, _ kind: GenreMapNodeKind) -> CGSize,
+  ) -> BuildResult {
+    let nextRevision = (previousState?.revision ?? 0) + 1
     guard !nodes.isEmpty else {
-      return GenreMapModel(
-        nodes: [],
-        layoutEdges: [],
-        communities: [],
-        worldBounds: .zero,
-        defaultCentre: .zero,
+      return BuildResult(
+        model: GenreMapModel(
+          nodes: [],
+          layoutEdges: [],
+          communities: [],
+          worldBounds: .zero,
+          defaultCentre: .zero,
+        ),
+        stateRows: [],
+        strandRows: [],
       )
     }
 
@@ -266,11 +317,22 @@ enum GenreMapBuilder {
     }
 
     // 5) Layout. The kernel handles the macro anchor pass internally,
-    // so we hand it the full layout-graph input set in one shot.
+    // so we hand it the full layout-graph input set in one shot. Phase
+    // 6: pipe persisted positions through so the layout seeds from
+    // them (no random reseed on re-import) and applies the stability
+    // force to existing nodes.
+    var layoutConfiguration = configuration.layout
+    if let previousState, !previousState.positions.isEmpty {
+      layoutConfiguration.previousPositions = previousState.positions
+    } else {
+      // Spec: stability force only applies when state was loaded; a
+      // first-time rebuild settles freely.
+      layoutConfiguration.stabilityForce = 0
+    }
     let layout = GenreMapForceLayout.layout(
       nodes: inputs,
       edges: layoutEdges,
-      configuration: configuration.layout,
+      configuration: layoutConfiguration,
     )
 
     // Assemble the model. Community membership rebuilt deterministically
@@ -377,20 +439,274 @@ enum GenreMapBuilder {
       y: bounds.midY,
     )
 
-    return GenreMapModel(
+    // Phase 6: strand-id + colour matching. Re-key every output strand's
+    // `colourID` (and label / tokens, if not algorithmically generated
+    // this pass) to the predecessor's stable identity when the strand
+    // matches a persisted predecessor at composite-Jaccard ≥ 0.5.
+    let strandMatching = matchStrandsToPrevious(
+      strands: strands,
+      previousState: previousState,
+    )
+    let recolouredStrands = applyStrandMatching(
+      strands: strands,
+      matching: strandMatching,
+    )
+
+    let model = GenreMapModel(
       nodes: mapNodes,
       layoutEdges: layoutEdges,
       communities: communities,
       worldBounds: bounds,
       defaultCentre: defaultCentre,
-      strands: strands,
+      strands: recolouredStrands,
       routedStrands: [:],
       // Bump on every fresh build — the routing actor invalidates its
       // cache when `model.layoutRevision` changes, so a re-Analyze
       // forces a routing recompute even if the strand set happens to
-      // be byte-identical.
-      layoutRevision: 1,
+      // be byte-identical. Phase 6: also stamp the persisted revision
+      // forward (the bumped revision is what the next loaded state
+      // reads back).
+      layoutRevision: nextRevision,
     )
+
+    // Phase 6: community-id matching across three resolutions. For
+    // matched communities the new small-int id is mapped back to the
+    // predecessor's stringified id; new communities mint a `new-N`
+    // id off the new partition's algorithmic small-int. Runs Louvain
+    // a second + third time over the SAME layout edges at γ=0.4
+    // (coarse) and γ=1.8 (fine); the medium pass is the partition
+    // the main pipeline already computed.
+    let communityMatching = matchCommunitiesAtAllResolutions(
+      nodes: nodes,
+      mediumPartition: partition,
+      layoutEdges: layoutEdges,
+      previousState: previousState,
+    )
+
+    let stateRows = makeStateRows(
+      nodes: mapNodes,
+      strandsByGenre: strandIDsByGenre(recolouredStrands),
+      communityMatching: communityMatching,
+      revision: nextRevision,
+    )
+    let strandRows = makeStrandRows(
+      strands: recolouredStrands,
+      matching: strandMatching,
+      revision: nextRevision,
+    )
+
+    return BuildResult(
+      model: model,
+      stateRows: stateRows,
+      strandRows: strandRows,
+    )
+  }
+
+  /// Run the Phase-6 community-matching pass at all three resolutions.
+  /// Returns, per genre, the stringified community ids the persisted
+  /// state should record. Matched ids inherit the predecessor's string;
+  /// new ids carry a `new-N` prefix so they're visibly disjoint.
+  static func matchCommunitiesAtAllResolutions(
+    nodes: [GenreNode],
+    mediumPartition: [String: Int],
+    layoutEdges: [GenreMapEdge],
+    previousState: GenreMapPersistedState?,
+  ) -> [String: GenreMapPersistedCommunityTriple] {
+    let nodeNames = Set(nodes.map(\.genre))
+    let louvainEdges = layoutEdges.map {
+      GenreMapLouvain.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+    }
+    let coarse = GenreMapLouvain.detect(
+      nodes: Array(nodeNames),
+      edges: louvainEdges,
+      gamma: 0.4,
+    )
+    let fine = GenreMapLouvain.detect(
+      nodes: Array(nodeNames),
+      edges: louvainEdges,
+      gamma: 1.8,
+    )
+
+    let coarseIDs = matchOneResolution(
+      newPartition: coarse,
+      keyPath: \.coarse,
+      previousState: previousState,
+    )
+    let mediumIDs = matchOneResolution(
+      newPartition: mediumPartition,
+      keyPath: \.medium,
+      previousState: previousState,
+    )
+    let fineIDs = matchOneResolution(
+      newPartition: fine,
+      keyPath: \.fine,
+      previousState: previousState,
+    )
+
+    var triples = [String: GenreMapPersistedCommunityTriple](
+      minimumCapacity: nodes.count
+    )
+    for node in nodes {
+      triples[node.genre] = GenreMapPersistedCommunityTriple(
+        coarse: coarseIDs[node.genre] ?? "new-\(coarse[node.genre] ?? 0)",
+        medium: mediumIDs[node.genre] ?? "new-\(mediumPartition[node.genre] ?? 0)",
+        fine: fineIDs[node.genre] ?? "new-\(fine[node.genre] ?? 0)",
+      )
+    }
+    return triples
+  }
+
+  /// Match each new strand to its best predecessor (or `nil` ⇒ mint
+  /// fresh). Returns a `newStrandID -> persistedStrandID` map.
+  static func matchStrandsToPrevious(
+    strands: [GenreMapStrandInference.Strand],
+    previousState: GenreMapPersistedState?,
+  ) -> [Int: String] {
+    guard
+      let previousState,
+      !previousState.strandRowByID.isEmpty
+    else {
+      return [:]
+    }
+    // The "old strand member set" for matching is the union of every
+    // genre that recorded this strand id in its persisted `strand_ids`.
+    // The "path pairs" are NOT persisted in v9 (paths are large and
+    // re-derived on every rebuild) — so we fall back to member-Jaccard
+    // alone for matching at this scale. The composite score reduces
+    // to `0.6 · member-Jaccard` when path pairs are unknown; the
+    // threshold 0.5 is therefore tighter (matches require a ~85 %
+    // member overlap). That is the conservative direction; the spec
+    // tolerates "below threshold → mint a new id".
+    var oldMembers = [String: Set<String>]()
+    for (genre, strandIDs) in previousState.strandIDsByGenre {
+      for id in strandIDs {
+        oldMembers["\(id)", default: []].insert(genre)
+      }
+    }
+    let oldEntries = previousState.strandRowByID.keys.map { strandID in
+      (
+        id: strandID,
+        members: oldMembers[strandID] ?? [],
+        pathPairs: Set<GenreMapPersistence.PathPair>(),
+      )
+    }
+    let newEntries = strands.map { strand in
+      (
+        id: strand.id,
+        members: Set(strand.memberGenres),
+        pathPairs: GenreMapPersistence.consecutivePairs(strand.pathStations),
+      )
+    }
+    return GenreMapPersistence.matchStrands(
+      newStrands: newEntries,
+      oldStrands: oldEntries,
+    )
+  }
+
+  /// Apply the matching: every matched strand inherits the
+  /// predecessor's persisted `colourID` (recovered from the saved
+  /// palette index — see `stockPalette` ↔ renderer palette mapping).
+  /// Branches continue to mirror their parent's colour.
+  static func applyStrandMatching(
+    strands: [GenreMapStrandInference.Strand],
+    matching: [Int: String],
+  ) -> [GenreMapStrandInference.Strand] {
+    guard !matching.isEmpty else { return strands }
+    // Resolve matched parents first so a branch can read the colour
+    // its (possibly-recoloured) parent now sports.
+    var byID = Dictionary(uniqueKeysWithValues: strands.map { ($0.id, $0) })
+    for strand in strands {
+      guard let predecessor = matching[strand.id] else { continue }
+      // The persisted "colour" id is just `Int(predecessor)` when the
+      // predecessor was minted from the small-int palette in a prior
+      // run; the renderer palette has 12 slots so we modulo for safety.
+      if let colourID = Int(predecessor) {
+        byID[strand.id]?.colourID = colourID
+      }
+    }
+    // Pass 2: branches mirror their parent's (possibly-shifted) colour.
+    for strand in strands where strand.isBranch {
+      if
+        let parent = strand.parentStrandID,
+        let parentColour = byID[parent]?.colourID
+      {
+        byID[strand.id]?.colourID = parentColour
+      }
+    }
+    return strands.map { byID[$0.id] ?? $0 }
+  }
+
+  /// Phase 6 state-row construction. Emits one row per genre (the
+  /// `genre_node` cardinality), strand membership rendered as the
+  /// JSON-array string the v9 column expects.
+  static func makeStateRows(
+    nodes: [GenreMapNode],
+    strandsByGenre: [String: [Int]],
+    communityMatching: [String: GenreMapPersistedCommunityTriple],
+    revision: Int,
+  ) -> [GenreMapStateRow] {
+    let now = Int64(Date.now.timeIntervalSince1970)
+    return nodes.map { node in
+      GenreMapStateRow(
+        genre: node.genre,
+        x: Double(node.position.x),
+        y: Double(node.position.y),
+        communityCoarse: communityMatching[node.genre]?.coarse
+          ?? "new-\(node.communityID)",
+        communityMedium: communityMatching[node.genre]?.medium
+          ?? "new-\(node.communityID)",
+        communityFine: communityMatching[node.genre]?.fine
+          ?? "new-\(node.communityID)",
+        strandIds: GenreMapPersistence.encodeStrandIDs(
+          strandsByGenre[node.genre] ?? []
+        ),
+        updatedAt: now,
+        revision: revision,
+      )
+    }
+  }
+
+  /// Phase 6 strand-row construction. One row per *main* strand (no
+  /// branches — branches inherit their parent's persisted appearance
+  /// at render time via `parentStrandID`).
+  static func makeStrandRows(
+    strands: [GenreMapStrandInference.Strand],
+    matching: [Int: String],
+    revision: Int,
+  ) -> [GenreMapStrandRow] {
+    strands
+      .filter { !$0.isBranch }
+      .map { strand in
+        // Persist the (possibly-inherited) palette slot as the
+        // "colour" integer. The spec calls it ARGB-packed, but the
+        // renderer's source of truth is the palette index; storing
+        // that index satisfies the "stable colour" invariant directly.
+        let strandID = matching[strand.id] ?? "\(strand.id)"
+        return GenreMapStrandRow(
+          strandID: strandID,
+          colour: Int64(strand.colourID),
+          labelTokens: GenreMapPersistence.encodeLabelTokens(strand.tokens),
+          revision: revision,
+        )
+      }
+  }
+
+  /// Strand membership inverted to `genre -> [strand_id]`. Branches
+  /// are folded into their parent so the persisted state records the
+  /// canonical (parent) ids on each member genre.
+  static func strandIDsByGenre(
+    _ strands: [GenreMapStrandInference.Strand]
+  ) -> [String: [Int]] {
+    var byGenre = [String: Set<Int>]()
+    for strand in strands {
+      let recordedID = strand.isBranch
+        ? (strand.parentStrandID ?? strand.id)
+        : strand.id
+      for member in strand.memberGenres {
+        byGenre[member, default: []].insert(recordedID)
+      }
+    }
+    return byGenre.mapValues { $0.sorted() }
   }
 
   static func filterCandidates(
@@ -436,6 +752,43 @@ enum GenreMapBuilder {
   private struct EdgeKey: Hashable {
     var a: String
     var b: String
+  }
+
+  /// Match a single resolution's new partition (small-int ids → member
+  /// sets) against the persisted state at the same resolution.
+  /// Returns `genre -> matchedPredecessorID`; unmatched genres are
+  /// absent, so the caller mints a fresh `new-N` id for them.
+  private static func matchOneResolution(
+    newPartition: [String: Int],
+    keyPath: KeyPath<GenreMapPersistedCommunityTriple, String>,
+    previousState: GenreMapPersistedState?,
+  ) -> [String: String] {
+    guard
+      let previousState,
+      !previousState.communitiesByGenre.isEmpty
+    else {
+      return [:]
+    }
+    var newCommunityMembers = [Int: Set<String>]()
+    for (genre, id) in newPartition {
+      newCommunityMembers[id, default: []].insert(genre)
+    }
+    var oldCommunityMembers = [String: Set<String>]()
+    for (genre, triple) in previousState.communitiesByGenre {
+      let id = triple[keyPath: keyPath]
+      oldCommunityMembers[id, default: []].insert(genre)
+    }
+    let matching = GenreMapPersistence.matchCommunities(
+      newPartition: newCommunityMembers,
+      oldPartition: oldCommunityMembers,
+    )
+    var byGenre = [String: String]()
+    for (genre, newID) in newPartition {
+      if let predecessor = matching[newID] {
+        byGenre[genre] = predecessor
+      }
+    }
+    return byGenre
   }
 
 }

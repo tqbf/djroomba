@@ -73,7 +73,7 @@ final class PlaybackResolver {
     /// reports a local index per swapped queue and `PlaybackService`
     /// translates local→global via `globalQueueIndex`. Empty `songs` ⇒
     /// empty `chunkBoundaries`.
-    var chunkBoundaries: [Int] = [0]
+    var chunkBoundaries = [0]
     /// Phase 4 (`plans/catalog-playlists.md`): the namespace of each chunk,
     /// parallel to `chunkBoundaries` (same count, same order). Chunks are
     /// homogeneous-namespace by construction (F1a), so one tag per chunk

@@ -545,6 +545,50 @@ Make every relationship explainable. This is where the map becomes a
 
 ### Phase 6 — Persistence and incremental updates
 
+> **Phase 6 ship (2026-05-21).** Landed as planned. New
+> `v9.genreMapState` migration (two additive tables —
+> `genre_map_state` keyed by genre, `genre_map_strand` keyed by
+> stable string strand id; v1–v8 frozen). New pure
+> `GenreMapPersistence` module: community-set Jaccard ≥ 0.5 ⇒ reuse
+> predecessor id (else mint `new-N`); strand composite `0.6·
+> member-Jaccard + 0.4·path-Jaccard(consecutive pairs)` ≥ 0.5 ⇒
+> reuse predecessor id + colour + label tokens (else mint fresh).
+> New `GenreMapBuilder.buildWithPersistence(previousState:)`
+> entrypoint folds the matching pass + emits the persistence
+> payload (`stateRows` + `strandRows`); the legacy `build` overload
+> stays for tests. `GenreMapForceLayout` gains `previousPositions` +
+> `stabilityForce` config (μ default 0.05) — existing nodes seed
+> from persisted (x, y) and feel a per-step `μ · (previous −
+> current)` restoring force; new nodes scatter as before and are
+> NOT stability-anchored. `LibraryStore+GenreMap` adds
+> `loadGenreMapState() -> GenreMapPersistedState?` (single read tx)
+> and `writeGenreMapState(states:, strands:)` (single write tx,
+> multi-row `INSERT … VALUES (…), (…)` — no row-by-row loops).
+> `GenreMapService.build` + `.load` both wire previous state
+> through; persistence-perf surfaced on
+> `lastPersistedReadSeconds` / `lastPersistedWriteSeconds`.
+> `MusicController.reanalyzeGenreGraphIfEnabled` +
+> `rebuildGenreMapIfEnabled` collapse into a single
+> `runMapRebuildIfEnabled()` funnel (UserDefaults key
+> `autoReanalyzeGenreGraph` preserved — flips both v6 graph + v7
+> map until the v6 panel retires). +17 tests = **355/53 green**.
+> `make check` / `swift test` / `make build` clean; swiftformat +
+> swiftlint --strict clean across 165 files.
+> Live-verified on the real 115-genre library: strand pill colours
+> (Alternative Bristol red / Folk 60s orange / Rap Soul yellow /
+> Dance Electro green) preserved across quit+relaunch +
+> re-analyze; community hulls in the same regions; v9 tables
+> populate 115 state rows + 12 strand rows; matched community ids
+> (e.g. Alt/BritPop and Alt/Laptop/Bristol both stay `new-5`)
+> carry through revision 1 → 2. Persistence perf: read ~3 ms /
+> write ~9 ms on 200-row fixture (spec targets <50 / <100 ms; ≥5×
+> headroom). Known limitation: Phase 4's routing-actor cache is
+> in-memory, so a fresh launch re-runs A\* (the cold ~1229 ms
+> reproduces every relaunch); the rendered layout is identical
+> but the routing-recompute latency itself isn't reduced — a
+> disk-backed routing cache is a Phase-7 / post-merge candidate.
+> **GO for Phase 7.**
+
 The map must feel like the user's stable personal atlas.
 
 1. **Persist layout state.** New table:

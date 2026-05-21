@@ -21,7 +21,7 @@ import Testing
 struct CatalogIngestMappingTests {
 
   @Test
-  func `maps every catalog field with namespace fixed to catalog`() async throws {
+  func `maps every catalog field with namespace fixed to catalog`() {
     let release = Date(timeIntervalSince1970: 1_500_000_000)
     let importedAt = Date(timeIntervalSince1970: 2_000_000_000)
 
@@ -75,7 +75,7 @@ struct CatalogIngestMappingTests {
   }
 
   @Test
-  func `isExplicit is the boolean the caller passes`() async throws {
+  func `isExplicit is the boolean the caller passes`() {
     let explicit = CatalogIngestService.song(
       fromCatalogFields: "id-explicit",
       title: "T",
@@ -118,7 +118,7 @@ struct CatalogIngestMappingTests {
   }
 
   @Test
-  func `sparse catalog song reads back with nil and empty defaults`() async throws {
+  func `sparse catalog song reads back with nil and empty defaults`() {
     // A minimum catalog payload — every optional `nil`, no genres, no
     // classical fields. The shape `Song` is happy to store as NULL/[]
     // (mirrors a sparse macOS library song; catalog usually populates
@@ -157,7 +157,7 @@ struct CatalogIngestMappingTests {
   }
 
   @Test
-  func `each call mints a fresh stable song id`() async throws {
+  func `each call mints a fresh stable song id`() {
     // The minted UUID is the app-stable `song.id`. Two consecutive calls
     // with the same MusicKit id must differ — the store's UPSERT on the
     // composite unique key is what *preserves* a stable id on conflict

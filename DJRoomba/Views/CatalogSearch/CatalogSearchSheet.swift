@@ -69,6 +69,11 @@ struct CatalogSearchSheet: View {
 
   // MARK: Private
 
+  /// Debounce window matched to the decider's default. Kept as a local
+  /// constant so the view's sleep and the decider's `debounceMS` move
+  /// together if either is tuned.
+  private static let debounceMS = 250
+
   @Environment(MusicController.self) private var controller
   @FocusState private var searchFieldFocused: Bool
 
@@ -187,11 +192,6 @@ struct CatalogSearchSheet: View {
     .background(.regularMaterial)
   }
 
-  /// Debounce window matched to the decider's default. Kept as a local
-  /// constant so the view's sleep and the decider's `debounceMS` move
-  /// together if either is tuned.
-  private static let debounceMS = 250
-
   private func runDebouncer() async {
     // `.task(id: query)` re-runs (cancelling the prior) on every keystroke
     // — that IS the cancellation source for the sleep. If we make it out
@@ -216,8 +216,10 @@ struct CatalogSearchSheet: View {
     case .clear:
       lastFiredQuery = nil
       await service.search("")
+
     case .wait:
       break
+
     case .fire(let term):
       lastFiredQuery = term
       await service.search(term)

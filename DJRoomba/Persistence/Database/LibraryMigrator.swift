@@ -416,18 +416,70 @@ enum LibraryMigrator {
       try db.create(
         index: "song_genre_genre_song_idx",
         on: "song_genre",
-        columns: ["genre", "song_id"]
+        columns: ["genre", "song_id"],
       )
       try db.create(
         index: "song_genre_genre_artist_idx",
         on: "song_genre",
-        columns: ["genre", "artist_key"]
+        columns: ["genre", "artist_key"],
       )
       try db.create(
         index: "song_genre_genre_album_idx",
         on: "song_genre",
-        columns: ["genre", "album_key"]
+        columns: ["genre", "album_key"],
       )
+    }
+
+    // v9: the genre **metro map** persistent state (`plans/genre-metro-
+    // map.md` Phase 6). Two new tables alongside the v7 substrate, both
+    // additive — v1–v8 stay frozen, and an existing DB migrates non-
+    // destructively (both tables start empty until the first Phase-6
+    // rebuild populates them). Re-imports persist enough state that the
+    // map feels like the user's stable atlas: positions, multi-resolution
+    // community ids, member strand ids, plus per-strand colour + label
+    // tokens.
+    //
+    // `genre_map_state` is keyed by genre (one row per persisted genre,
+    // matches `genre_node` cardinality). The community columns are
+    // **string** ids (not integers) because the matching pass mints
+    // fresh ids when no high-Jaccard predecessor exists; strings keep the
+    // freshly-minted ids visibly disjoint from the algorithmic small-int
+    // ids the layout pass uses inside a single rebuild. `strand_ids` is a
+    // JSON array of integer strand ids (the small-int identity the
+    // renderer uses); `revision` bumps wholesale every recompute (the
+    // builder fold the rebuild produces).
+    //
+    // `genre_map_strand` is the sibling table keyed by `strand_id`
+    // (stable across rebuilds via the Phase-6 strand-matching pass).
+    // Holds the persisted colour (`ARGB` integer, stable per strand
+    // identity) + the TF-IDF label tokens as a JSON array. The default
+    // render does not show the label; persisting the tokens means a
+    // strand's name doesn't change on every re-Analyze when its member
+    // set is unchanged.
+    //
+    // No FK on either table — same posture as `genre_node` /
+    // `genre_edge_evidence` (genres are denormalised free text, strand
+    // ids are algorithmic identifiers minted by the inference pass).
+    // The wholesale rebuild re-derives both tables in a single
+    // transaction; row-by-row consistency is structural, not enforced.
+    migrator.registerMigration("v9.genreMapState") { db in
+      try db.create(table: "genre_map_state") { t in
+        t.primaryKey("genre", .text)
+        t.column("x", .double).notNull()
+        t.column("y", .double).notNull()
+        t.column("community_coarse", .text).notNull()
+        t.column("community_medium", .text).notNull()
+        t.column("community_fine", .text).notNull()
+        t.column("strand_ids", .text).notNull()
+        t.column("updated_at", .integer).notNull()
+        t.column("revision", .integer).notNull()
+      }
+      try db.create(table: "genre_map_strand") { t in
+        t.primaryKey("strand_id", .text)
+        t.column("colour", .integer).notNull()
+        t.column("label_tokens", .text).notNull()
+        t.column("revision", .integer).notNull()
+      }
     }
 
     return migrator

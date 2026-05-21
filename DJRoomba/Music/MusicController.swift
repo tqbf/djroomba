@@ -92,11 +92,6 @@ final class MusicController {
   /// w.r.t. SQLite — ingest only happens when the user *acts on* a result.
   let catalogSearch = CatalogSearchService()
 
-  /// Phase-0 catalog access gate (`plans/catalog-playlists.md`). Internal —
-  /// views never read it; they read `catalogProbeResult`, exactly like the
-  /// genre-import notice. No store dependency, so it self-initializes.
-  private let catalogProbeService = CatalogProbeService()
-
   /// Observable mirrors of the persisted app state. SQLite is authoritative;
   /// these are refreshed from it after writes (no dual store).
   private(set) var favoriteIDs = Set<String>()
@@ -478,13 +473,26 @@ final class MusicController {
     await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel)
   }
 
-  /// Auto-rebuild hook for the map, alongside (NOT replacing)
-  /// `reanalyzeGenreGraphIfEnabled`. Fire-and-forget on the MainActor,
-  /// gated on the same `autoReanalyzeGenreGraph` toggle as the v6 graph
-  /// (Phase 6 will split the preferences and consolidate; Phase 1 reuses
-  /// one switch for both).
-  func rebuildGenreMapIfEnabled() {
+  /// Auto-rebuild hook for the map. **Phase 6 consolidation** of
+  /// `reanalyzeGenreGraphIfEnabled` + the old `rebuildGenreMapIfEnabled`
+  /// into a single funnel called from every mutation trigger
+  /// (`runImport`, `addSongs`, `removeTracks`, `setAppPlaylistTracks`,
+  /// `deleteAppPlaylist`). Fire-and-forget on the MainActor; gated on
+  /// the `autoReanalyzeGenreGraph` UserDefaults key (semantics
+  /// preserved — the key flips BOTH the v6 graph + the v7 map; the
+  /// v6 panel still consumes the v6 `genre_edge` table until a
+  /// post-merge cleanup pass retires that panel).
+  ///
+  /// Sequence: v6 `rebuildGenreGraph` first (the map's playlist channel
+  /// reads from it), then v7 `rebuildGenreMap` + the Phase-6-aware
+  /// `GenreMapBuilder.buildWithPersistence`. `GenreGraphService` /
+  /// `GenreMapService` each coalesce concurrent triggers via their
+  /// own `isAnalyzing` flag, so a burst of edits collapses into one
+  /// rebuild — the next trigger after it lands already reflects every
+  /// change in between.
+  func runMapRebuildIfEnabled() {
     guard autoReanalyzeGenreGraph else { return }
+    Task { await runGenreAnalysis() }
     Task { await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel) }
   }
 
@@ -605,14 +613,14 @@ final class MusicController {
     )
     guard started else {
       catalogProbeResult = """
-      \(probe.verdict)
+        \(probe.verdict)
 
-      ❌ Playback FAILED — ApplicationMusicPlayer did not confirm `.playing` \
-      within the bounded wait. \
-      \(playback.lastError.map { "Player error: \($0)" } ?? "No player error reported.")
+        ❌ Playback FAILED — ApplicationMusicPlayer did not confirm `.playing` \
+        within the bounded wait. \
+        \(playback.lastError.map { "Player error: \($0)" } ?? "No player error reported.")
 
-      Phase 0 SEARCH PASSED, PLAYBACK FAILED.
-      """
+        Phase 0 SEARCH PASSED, PLAYBACK FAILED.
+        """
       return
     }
     // Audible window — long enough to be obviously playing (and to capture
@@ -620,13 +628,13 @@ final class MusicController {
     try? await Task.sleep(for: .milliseconds(1500))
     playback.pause()
     catalogProbeResult = """
-    \(probe.verdict)
+      \(probe.verdict)
 
-    ✅ Playback OK — ApplicationMusicPlayer confirmed `.playing` and was \
-    paused after ~1.5 s.
+      ✅ Playback OK — ApplicationMusicPlayer confirmed `.playing` and was \
+      paused after ~1.5 s.
 
-    Phase 0 FULLY PASSED.
-    """
+      Phase 0 FULLY PASSED.
+      """
   }
 
   func isFavorite(_ summary: PlaylistSummary) -> Bool {
@@ -720,14 +728,14 @@ final class MusicController {
     }
     // Removing a playlist drops its membership → the set of genres that
     // shared it can change. Reanalyze (if enabled).
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   func addSongs(_ songIDs: [String], toAppPlaylist playlistID: String) async {
     await mutateAppPlaylist(playlistID) {
       await appPlaylistService.addSongs(songIDs, to: playlistID)
     }
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   /// Phase 2 (`plans/catalog-playlists.md`) — Add Catalog Result to App
@@ -768,7 +776,7 @@ final class MusicController {
       await mutateAppPlaylist(playlistID) {
         await appPlaylistService.addSongs([songID], to: playlistID)
       }
-      reanalyzeGenreGraphIfEnabled()
+      runMapRebuildIfEnabled()
     } catch {
       storeError = error.localizedDescription
     }
@@ -778,7 +786,7 @@ final class MusicController {
     await mutateAppPlaylist(playlistID) {
       await appPlaylistService.removeTracks(at: oneBasedPositions, from: playlistID)
     }
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   /// Persist a reordered membership for an app playlist (the full ordered
@@ -791,7 +799,7 @@ final class MusicController {
     // latter changes which songs (genres) are in the playlist, so reanalyze
     // (a pure reorder is a cheap no-op for the graph — acceptable, and not
     // worth distinguishing here).
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   /// Persist a new sidebar order for the user playlists.
@@ -947,6 +955,11 @@ final class MusicController {
     var lastRecordedQueueIndex: Int?
   }
 
+  /// Phase-0 catalog access gate (`plans/catalog-playlists.md`). Internal —
+  /// views never read it; they read `catalogProbeResult`, exactly like the
+  /// genre-import notice. No store dependency, so it self-initializes.
+  private let catalogProbeService = CatalogProbeService()
+
   /// The SQLite source of truth, and everything that reads/writes it. If
   /// the store can't be opened the app still runs (auth/empty states); the
   /// failure is surfaced via `storeError`.
@@ -1009,7 +1022,7 @@ final class MusicController {
     rebuildDerivedSummaries()
     reconcileSelectionAfterImport()
     recentlyPlayed.reload()
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   private func startAuthorizedSession() async {
@@ -1120,39 +1133,7 @@ final class MusicController {
     // and a full/first import is exactly the "new playlists added" case.
     // Reanalyze (if enabled). Runs after the genre pass so it derives from
     // the genres just (re)written, never a stale read.
-    reanalyzeGenreGraphIfEnabled()
-  }
-
-  /// Rebuild the genre graph in the background **iff** the user left
-  /// auto-reanalyze on (the default). Called after a change that can alter
-  /// which genres share a playlist: an import (new/changed playlists +
-  /// refreshed `genre_names`) or an app-playlist membership edit
-  /// (add / remove / set / delete). Deliberately NOT called for rename /
-  /// reorder-sidebar / empty-playlist *create* — none of those change any
-  /// genre↔playlist relationship, so a rebuild there is guaranteed wasted
-  /// work (a freshly created playlist has no songs, hence no genres, hence
-  /// no edges; the import path covers genuinely-new *populated* playlists).
-  ///
-  /// Fire-and-forget on the MainActor, mirroring `recordRecentlyPlayed` /
-  /// `detectAndRecordAdvance`: the graph backs no on-screen view yet, so a
-  /// moment of staleness is invisible and the rebuild must never block the
-  /// sidebar/detail refresh the caller just performed.
-  /// `GenreGraphService.analyze`'s `isAnalyzing` guard coalesces a burst of
-  /// edits into a single in-flight rebuild; because the rebuild is wholesale
-  /// (re-derived from the live data, not incremental), the next trigger
-  /// after it finishes already reflects everything that changed in between —
-  /// nothing is missed. The "Analyze Genre Graph" menu action is the
-  /// unconditional on-demand path (ignores this toggle).
-  private func reanalyzeGenreGraphIfEnabled() {
-    guard autoReanalyzeGenreGraph else { return }
-    Task { await runGenreAnalysis() }
-    // Sibling map rebuild (`plans/genre-metro-map.md` Phase 1). Same
-    // gate, same fire-and-forget posture; the two services do not depend
-    // on each other ordering (the map's playlist channel reads from
-    // `genre_edge` written by `runGenreAnalysis`, but a single rebuild
-    // pass tolerates a stale read — the next trigger picks up the fresh
-    // data). Phase 6 will rename + consolidate.
-    rebuildGenreMapIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   /// The single funnel into `GenreGraphService.analyze`, shared by the

@@ -61,6 +61,16 @@ final class GenreMapService {
   /// during the pass — no main-thread block, no spinner overlay.
   private(set) var isRouting = false
 
+  /// Phase 6 persistence instrumentation
+  /// (`plans/genre-metro-map.md` Phase 6 perf gate). Wall time of the
+  /// `loadGenreMapState` read at the start of the most recent
+  /// `build()` (target: <50 ms on a 200-genre library), and the
+  /// wholesale `writeGenreMapState` write at the end (target:
+  /// <100 ms one transaction). Both surfaced for the PROGRESS.md
+  /// gate entry and the swift-perf-bench harness.
+  private(set) var lastPersistedReadSeconds: TimeInterval = 0
+  private(set) var lastPersistedWriteSeconds: TimeInterval = 0
+
   /// System-font-ish label sizing approximation — character count × an
   /// average glyph advance for the font size, plus pill padding. Real
   /// rendering uses SwiftUI's `Text` so the label is pixel-perfect; the
@@ -105,16 +115,39 @@ final class GenreMapService {
     lastError = nil
     defer { isAnalyzing = false }
     do {
+      let readStart = Date.now
+      // Phase 6: read persisted state BEFORE the SQL rebuild so we
+      // pipe it into the builder. The v9 tables are small (one row
+      // per genre + one per main strand) — under 50 ms even on a
+      // 200-genre library.
+      let previousState = try await store.loadGenreMapState()
+      lastPersistedReadSeconds = Date.now.timeIntervalSince(readStart)
+
       _ = try await store.rebuildGenreMap()
       let nodes = try await store.genreMapNodes()
       let evidence = try await store.genreMapEvidence()
-      let built = GenreMapBuilder.build(
+      let result = GenreMapBuilder.buildWithPersistence(
         nodes: nodes,
         evidence: evidence,
+        previousState: previousState,
         measureLabel: measureLabel,
       )
-      model = built
+      model = result.model
       refreshRouting()
+
+      // Phase 6: write the fresh persisted state in one transaction.
+      // Failures here are logged but never thrown — the in-memory
+      // build is already presentable; persistence is best-effort.
+      let writeStart = Date.now
+      do {
+        try await store.writeGenreMapState(
+          states: result.stateRows,
+          strands: result.strandRows,
+        )
+        lastPersistedWriteSeconds = Date.now.timeIntervalSince(writeStart)
+      } catch {
+        lastError = "Persisted-state write failed: \(error.localizedDescription)"
+      }
     } catch {
       lastError = error.localizedDescription
     }
@@ -122,20 +155,26 @@ final class GenreMapService {
 
   /// Read a previously-rebuilt map from the store without re-running the
   /// SQL pass — the panel's `.task` calls this so a map populated in an
-  /// earlier session shows immediately.
+  /// earlier session shows immediately. Phase 6: when persisted state
+  /// is present, seed the builder with it so the rendered layout is
+  /// byte-identical to the previous session (no random reseed). When
+  /// persisted state is absent (very first launch on a v9 DB) the
+  /// builder falls back to the Phase-1 community-anchored scatter.
   func load(
     measureLabel: @Sendable @escaping (_ text: String, _ fontSize: CGFloat, _ kind: GenreMapNodeKind) -> CGSize
   ) async {
     do {
+      let previousState = try await store.loadGenreMapState()
       let nodes = try await store.genreMapNodes()
       let evidence = try await store.genreMapEvidence()
       guard !nodes.isEmpty else { return }
-      let built = GenreMapBuilder.build(
+      let result = GenreMapBuilder.buildWithPersistence(
         nodes: nodes,
         evidence: evidence,
+        previousState: previousState,
         measureLabel: measureLabel,
       )
-      model = built
+      model = result.model
       refreshRouting()
     } catch {
       lastError = error.localizedDescription

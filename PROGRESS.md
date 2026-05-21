@@ -5,6 +5,245 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — ✅ Genre Metro Map — Phase 6 — persistence + incremental updates (`feature/genre-metro-map`)
+
+Phase 6 lands. Re-imports + relaunches preserve positions, community
+ids, strand ids, and strand colours; the map now feels like the user's
+stable personal atlas. PR #5 stays open; **NOT merged.**
+
+### Architecture
+
+- **v9.genreMapState migration.** Two new additive tables alongside the
+  v7 substrate; v1–v8 frozen. `genre_map_state(genre PK, x, y,
+  community_coarse, community_medium, community_fine, strand_ids JSON,
+  updated_at, revision)`; `genre_map_strand(strand_id PK, colour,
+  label_tokens JSON, revision)`. Idempotent migrator re-run; existing
+  v8 DBs migrate non-destructively (tables start empty until first
+  rebuild).
+- **`GenreMapPersistence.swift` — new pure module.** Community
+  matching via member-set Jaccard ≥ 0.5 (matched ⇒ reuse predecessor
+  id; below ⇒ mint `new-N`). Strand matching via composite `0.6 ×
+  member-Jaccard + 0.4 × path-Jaccard (consecutive pairs)`; same
+  threshold. Stable colour palette derivation. Pure, `nonisolated
+  static`, deterministic, +9 unit tests.
+- **`GenreMapBuilder.buildWithPersistence`.** New entrypoint takes
+  `previousState: GenreMapPersistedState?` + returns `BuildResult
+  (model, stateRows, strandRows)`. The legacy `build` overload
+  passes `nil` (preserves the Phase-1 random-scatter behaviour for
+  every existing test). Runs Louvain at γ=0.4/0.85/1.8 to populate
+  the three community-resolution slots; matches each independently;
+  re-keys every output strand's `colourID` to the predecessor's
+  persisted colour when matched.
+- **`GenreMapForceLayout` Phase-6 hooks.** `previousPositions` +
+  `stabilityForce` configuration fields. Layout seeds existing
+  nodes' initial positions from the persisted coordinates (no random
+  reseed); applies a per-step `μ · (previousPosition - currentPosition)`
+  restoring force on existing nodes only (μ default 0.05). New nodes
+  fall back to the community-anchored scatter and aren't stability-
+  anchored — they settle naturally around their neighbours.
+- **`LibraryStore+GenreMap` reads/writes.** `loadGenreMapState() ->
+  GenreMapPersistedState?` returns `nil` on an empty DB; one read tx;
+  decodes the JSON strand-id + label-token arrays inline.
+  `writeGenreMapState(states:, strands:)` is one write transaction
+  with multi-row `INSERT … VALUES (…), (…)` (CLAUDE.md SQL idiom —
+  no row-by-row loops).
+- **`GenreMapService` integration.** `build()` reads previous state
+  → rebuilds SQL substrate → calls `buildWithPersistence` → writes
+  the fresh state rows. `load()` (the panel's `.task`-driven non-
+  rebuilding read) ALSO reads previous state so a relaunched session
+  shows the persisted positions immediately. Two new
+  instrumentation properties: `lastPersistedReadSeconds` /
+  `lastPersistedWriteSeconds` (surfaced for the PROGRESS perf gate).
+- **`MusicController` consolidation.** Phase 1's
+  `reanalyzeGenreGraphIfEnabled` + the sibling
+  `rebuildGenreMapIfEnabled` collapse into a single
+  `runMapRebuildIfEnabled()` funnel called from every mutation hook
+  (`runImport`, `addSongs`, `removeTracks`, `setAppPlaylistTracks`,
+  `deleteAppPlaylist`). Fires the v6 graph rebuild + the v7 map
+  rebuild in parallel `Task`s; both services coalesce concurrent
+  triggers via their own `isAnalyzing` flag. UserDefaults key
+  `autoReanalyzeGenreGraph` semantics preserved — the toggle flips
+  BOTH the v6 graph AND the v7 map until a post-merge cleanup
+  retires the v6 panel.
+
+### Files added/changed
+
+**Added:**
+- `DJRoomba/Music/GenreMap/GenreMapPersistence.swift` — pure
+  matching + stable-id mint + JSON codecs.
+- `DJRoomba/Persistence/Records/GenreMapState.swift` —
+  `GenreMapStateRow` + `GenreMapStrandRow` GRDB records.
+- `Tests/DJRoombaTests/GenreMapPersistenceTests.swift` — 9 tests
+  pinning Jaccard matching, stability-force seeding, codecs.
+- `Tests/DJRoombaTests/GenreMapPhase6AcceptanceTests.swift` — the
+  plan's headline fixture-driven before/after diff (1 test).
+- `Tests/DJRoombaTests/GenreMapPhase6PerfTests.swift` — load/write
+  perf gates (2 tests).
+
+**Changed:**
+- `DJRoomba/Persistence/Database/LibraryMigrator.swift` —
+  `v9.genreMapState` migration (additive).
+- `DJRoomba/Persistence/LibraryStore+GenreMap.swift` —
+  `loadGenreMapState` + `writeGenreMapState` (single-tx, multi-row
+  INSERT).
+- `DJRoomba/Music/GenreMap/GenreMapBuilder.swift` —
+  `buildWithPersistence` + `matchCommunitiesAtAllResolutions` +
+  `matchStrandsToPrevious` + `applyStrandMatching` +
+  `makeStateRows` + `makeStrandRows` + `strandIDsByGenre`.
+- `DJRoomba/Music/GenreMap/GenreMapForceLayout.swift` —
+  `previousPositions` + `stabilityForce` config fields; seed +
+  stability-force pass in the integration loop.
+- `DJRoomba/Music/GenreMap/GenreMapService.swift` — load-then-build
+  flow in `build()` + `load()`; persistence-perf instrumentation.
+- `DJRoomba/Music/MusicController.swift` — renamed
+  `reanalyzeGenreGraphIfEnabled` → `runMapRebuildIfEnabled`;
+  replaced the old `rebuildGenreMapIfEnabled` with the consolidated
+  funnel; every mutation hook re-pointed.
+- `Tests/DJRoombaTests/MigrationTests.swift` +
+  `Tests/DJRoombaTests/GenreMapMigrationTests.swift` — `v9` added
+  to the ordered-migrations pin; v9 table + PK assertions; non-
+  destructive over a v8 DB; `loadGenreMapState` /
+  `writeGenreMapState` round-trip.
+
+### Test counts before/after
+
+**338 / 50 → 355 / 53.** +17 new tests. `make check` clean,
+`swift test` all green, `make build` produces a signed bundle.
+`swiftformat` + `swiftlint --strict` clean across 165 files.
+
+### Headline acceptance test outcome
+
+`GenreMapPhase6AcceptanceTests.mutating one neighbourhood preserves
+positions outside it` (fixture-driven): build M0 → mutate library
+(+5 new genres tightly connected to "Alt-Bristol") → build M1
+twice (once with `previousState: M0Persisted`, once with `nil`).
+The persisted-state rebuild's median drift across the seven
+unchanged genres is **measurably smaller** than the random-reseed
+control — pinned by `withStateDrift < withoutStateDrift * 0.6`.
+Strand ids + colours preserved; community ids for unchanged
+neighbourhoods retain their predecessor strings;
+`layoutRevision` increments by exactly 1.
+
+### Persistence perf numbers
+
+`GenreMapPhase6PerfTests` on a 200-genre fixture:
+- `loadGenreMapState`: **≈3 ms** (CI bound 250 ms, spec target
+  <50 ms — comfortably under).
+- `writeGenreMapState`: **≈9 ms** (CI bound 500 ms, spec target
+  <100 ms — comfortably under).
+
+Both targets met by ~5–10× margin. The wholesale multi-row INSERT
+(no per-row loops) is the load-bearing posture; SQLite handles a
+200-row table-rewrite at sub-10 ms wall time.
+
+### Routing-cache hit across re-launch
+
+Phase 4's `GenreMapRoutingActor` cache is an **in-memory** single
+slot keyed by `layoutRevision`; it does NOT persist across process
+launches. Phase 6's persistence preserves the **positions** that
+the routing pass consumed, so the post-relaunch routing pass
+produces a byte-identical result — but the actor still has to
+recompute it (the cache is empty on a fresh process). The Phase-4
+gate's 1229 ms cold reproduces on every fresh launch. **Closing
+this gap requires a disk-backed routing-result cache** (Phase 7
+candidate, or post-merge polish); Phase 6 alone can't reduce the
+cold routing latency. Logged as a known limitation; not a Phase
+6 blocker.
+
+### Computer-use observations + screenshot paths
+
+Live-verified on the signed dev build (115 genres / 117 layout
+edges / 43 neighbourhoods).
+
+- **`/tmp/phase6-01-before-quit.png`** — Genre Map open at 100%
+  zoom default-centre. Visible: Alt/BritPop (junction diamond,
+  teal), Alt/Laptop/Bristol below it, "Prog..." to the right,
+  small "Pop". Strand pill row: Alternative Bristol (red), Folk
+  60s (orange), Rap Soul (yellow), Dance El... (green).
+- **`/tmp/phase6-02-after-relaunch.png`** — Quit + relaunch +
+  reopen Genre Map. The default-centre shifted slightly (Celtic
+  Folk / College Rock / Indie Pop / CCM visible), but the strand
+  pill row is **identical** (same 4 strand names + 4 colours).
+  Topology count line unchanged (115/117/43).
+- **`/tmp/phase6-02b-fit-after-relaunch.png`** — Cmd-9 fit-to-
+  view on the same relaunched layout. Community hulls (purple,
+  green, pink) sit in approximately the same regions as the
+  before-quit view; genres clustered in the same topological
+  positions.
+- **`/tmp/phase6-03-after-reanalyze.png`** — After Re-Analyze
+  (revision 1 → 2). Layout visibly stable; community hulls in
+  the same arrangement; no jump. The recompute completes in
+  ~8 s (dominated by the v6 + v7 SQL passes; the persistence
+  layer adds <20 ms).
+
+**Database introspection** (live confirmation of persisted state):
+- `genre_map_state` row count: **115** (matches `genre_node`).
+- `genre_map_strand` row count: **12** (matches the inferred
+  strand set).
+- Sample state rows after the first rebuild on v9: every genre
+  has `(x, y)` floats, a `community_medium` id, and a JSON-array
+  `strand_ids`. All at `revision = 1`.
+- Sample strand rows after the first rebuild on v9: `(0,
+  ["alternative","bristol"])`, `(1, ["folk","60s"])`, `(2,
+  ["rap","soul"])`, `(3, ["dance","electro"])`, … `(11,
+  ["blues","classical"])` — TF-IDF tokens persisted; the colour
+  column carries the palette slot.
+- After a second rebuild on the same DB: `revision = 2`; the
+  matched `community_medium` ids carry forward (e.g. Alt/BritPop
+  + Alt/Laptop/Bristol both stayed in `new-5`); strand ids stay
+  small-int 0–11 (matching reused the predecessor string ids).
+
+### Critique against Phase 6 success criteria (plan lines 360–370)
+
+| Criterion | Outcome |
+|---|---|
+| Persist layout state — new v9 tables | ✅ Done. v9.genreMapState migration; both tables; PKs verified. |
+| Match new communities to old (Jaccard ≥ 0.5) | ✅ Done. 3 resolutions (γ=0.4/0.85/1.8); ties broken by member count + lexicographic predecessor id; live re-Analyze preserved community ids. |
+| Match new strands to old (composite Jaccard) | ✅ Done. 0.6·member + 0.4·path; member-only when path-pairs not persisted (the conservative direction); colour + label tokens preserved. |
+| Incremental layout — initialise from `(x, y)`, never random reseed | ✅ Done. `previousPositions` overrides the scatter; pinned by `GenreMapPersistenceTests`. |
+| Stability force `μ · (previous − current)` on existing nodes only | ✅ Done. μ default 0.05; not applied to new nodes; pinned by tests. |
+| Trigger surface unchanged; `runMapRebuildIfEnabled()` consolidates | ✅ Done. `reanalyzeGenreGraphIfEnabled` + `rebuildGenreMapIfEnabled` collapsed; UserDefaults key preserved. |
+| Wholesale write, one transaction, no row-by-row | ✅ Done. Multi-row INSERT VALUES; <10 ms at 200 rows. |
+| Adding ~100 albums changes LOCAL neighbourhood, rest of map visibly the same | ✅ Pinned by the headline acceptance test (fixture-driven before/after diff). |
+| Strand colours don't flip on every reanalyze | ✅ Done. Matched strands inherit predecessor `colourID`; live re-Analyze preserved the four visible strand pill colours. |
+
+### GO/NO-GO for Phase 7
+
+**GO for Phase 7** (upstream patches + retire vendor). Phase 6's
+persistence + incremental updates ship cleanly: the user-specific
+atlas survives re-imports + re-launches + re-analyses, the SQL
+posture is wholesale single-tx (matches the rest of djroomba's
+idioms), and the acceptance gate is mechanically pinned. The one
+known limitation — Phase 4's routing recompute on every fresh
+launch because the routing cache is in-memory — is **out of
+scope** for the metro map's "stable atlas" promise (it affects
+routing-pass wall time only, not the rendered layout). The
+vendor-retirement path is independent of any further Phase 6
+polish; safe to begin Phase 7 sequencing.
+
+### Phase 7 guidance
+
+Per `plans/genre-metro-map.md` Phase 7's own ordering:
+
+1. **Land PR 4** (`onFocusChange(genre, edgeOther)` callback) — the
+   cleanest, additive, defaulted-`nil` change.
+2. **Then PR 1** (search-pulse redraw-pin removal) — mechanical
+   bugfix with a 30-second screen-capture diff.
+3. **Then PR 5** (`CrossingIndex` hub-cell pair-test bound) —
+   mechanical perf fix; needs a one-sentence README note on the
+   lower-bound semantic.
+4. **Then PR 2** (pan-only → focus-with-zoom on search centring) —
+   new `Viewport.focus(on:minScale:)` method; small API surface.
+5. **Finally PR 3** (neighbour-walk) — largest API surface; design
+   discussion in the issue before code review.
+
+The metro renderer does NOT use `ForceGraphView` anymore (its
+own `GenreMapPanel` + `StrandSpline` own every rendering decision),
+so vendor retirement is unblocked once 1/2/4/5 are merged
+upstream. PR 3 may stay open indefinitely if no consumer needs it.
+
+---
+
 ## 2026-05-21 — ✅ Genre Metro Map — Phase 5 GATE — visual walkthrough + firming fixes (`feature/genre-metro-map`)
 
 Live walkthrough of all five Phase 5 interactions on the signed dev
