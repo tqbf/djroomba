@@ -305,7 +305,8 @@ final class GenreMapService {
     let nodeCount = current.nodes.count
     let strandCount = current.strands.count
     FileHandle.standardError.write(Data(
-      "[GenreMapRouting] revision=\(result.layoutRevision) strands=\(strandCount) nodes=\(nodeCount) corridors=\(result.corridorCount) bundled=\(result.bundledCorridorCount) maxPerCorridor=\(result.maxStrandsPerCorridor) crossings=\(result.crossingCount)/\(result.transferCrossingCount)xfer elapsed=\(String(format: "%.2f", ms))ms\n".utf8
+      "[GenreMapRouting] revision=\(result.layoutRevision) strands=\(strandCount) nodes=\(nodeCount) corridors=\(result.corridorCount) bundled=\(result.bundledCorridorCount) maxPerCorridor=\(result.maxStrandsPerCorridor) crossings=\(result.crossingCount)/\(result.transferCrossingCount)xfer elapsed=\(String(format: "%.2f", ms))ms\n"
+        .utf8
     ))
     #endif
   }

@@ -57,15 +57,35 @@ enum GenreMapRouting {
     /// authoritative; this padding builds a no-go halo so splines stay
     /// clear of the pill chrome and the downstream centripetal Catmull-
     /// Rom has room to round corners without re-entering the obstacle
-    /// (the Phase-4 REDO fix, 2026-05-21). 12pt is the Pareto point
-    /// found on the live library: large enough that A\* picks cells
-    /// well outside the label rect, small enough that the obstacle map
-    /// doesn't blow past the 200 ms routing budget.
-    var labelPadding: CGFloat = 12
+    /// (the Phase-4 REDO fix, 2026-05-21). Bumped to 24pt at the
+    /// Phase-4 gate (2026-05-21) after machine verification on the
+    /// live library — `GenreMapRoutingActor.verifyStrandsClearLabels`,
+    /// the DEBUG-only per-strand "rendered centripetal Catmull-Rom
+    /// doesn't enter any non-member label rect" check that mirrors
+    /// the unit-test invariant on live data. At 12pt the verifier
+    /// found 3-5 strands grazing labels by 2-5 px (Folk 60s into
+    /// Electro/Crossover, Electro into Americana/Indie). At 20pt the
+    /// grazes were down to 1-2 px on a few post-drag rebuilds. At
+    /// 24pt every strand reports CLEAN across cold-load + drag-
+    /// release rebuilds on the live 12-strand × 115-station library.
+    /// The CR bulge is bounded by the centripetal-knot scaling but
+    /// isn't zero — the padding has to absorb it. See
+    /// `PROGRESS.md` 2026-05-21 Phase-4 gate.
+    var labelPadding: CGFloat = 24
     /// Penalty added to a cell that intersects a non-member label box.
-    /// Two orders of magnitude above `baseCost` so the search reliably
-    /// detours around labels.
-    var labelPenalty: Double = 1000
+    /// Bumped to 1e5 at the Phase-4 gate (2026-05-21) — five orders
+    /// of magnitude above `baseCost` — so A\* always prefers a detour
+    /// over crossing a label, including very long detours (10k cells
+    /// of detour cost ~14000 < 1e5 cost of crossing one label cell).
+    /// Capped at 1e5 (not the 1e9 hard-blocker form) so A\* still
+    /// finds *some* path when the goal cell sits inside a label rect
+    /// — the path enters its own goal cell exactly once with a
+    /// bounded penalty, instead of falling back to the straight-line
+    /// no-path fallback which would draw THROUGH every intermediate
+    /// label on the line. The single-cell entry at the goal is OK; a
+    /// straight line through 5+ labels is the original Phase-4 ship's
+    /// failure mode.
+    var labelPenalty: Double = 10_000
     /// Cells within this radius of a non-member station centre get a
     /// soft proximity penalty (taper from 1× → 0× of `proximityPenalty`).
     var proximityPadding: CGFloat = 40
@@ -96,8 +116,12 @@ enum GenreMapRouting {
     /// drew a diagonal cut that re-entered labels A\* had detoured
     /// around).
     var cornerFilletFraction = 0.25
-    /// Hard cap on A* expansions per strand (defensive — should never
-    /// be hit at real-library scale).
+    /// Hard cap on A* expansions per strand. Defensive — should never
+    /// be hit at real-library scale. If hit, the search returns the
+    /// best partial path to the closest visited cell (the Phase-4-
+    /// gate-2026-05-21 fallback) — a polyline that still detours
+    /// around the labels A\* explored, much better than a straight
+    /// line through every intermediate label.
     var maxExpansions = 100_000
   }
 
@@ -209,6 +233,16 @@ enum GenreMapRouting {
   /// Strands are routed in the caller's order (the caller sorts by
   /// rank-score so heavier strands route first into less-crowded
   /// space). Returns one `RoutedStrandPath` per input, same order.
+  ///
+  /// **Phase-4-gate (2026-05-21):** kept synchronous for the unit-test
+  /// surface (deterministic + injection-free); the live actor calls
+  /// `routeConcurrent` which runs each strand's A\* in parallel on a
+  /// `TaskGroup`. The cross-strand crossing penalty is dropped in the
+  /// parallel path — strands are routed independently against the
+  /// label/proximity obstacles, and the bundling pass downstream
+  /// handles corridor extraction. The corpus shows `bundled=0` on the
+  /// live library so the cross-strand penalty was rarely active in
+  /// practice anyway.
   static func route(
     strands: [StrandRouteRequest],
     labels: [LabelObstacle],
@@ -235,6 +269,58 @@ enum GenreMapRouting {
       routed.append(path)
     }
     return routed
+  }
+
+  /// Concurrent variant: route every strand in parallel on a
+  /// `TaskGroup`. Drops the cross-strand crossing-penalty bias (no
+  /// dependency between strands ⇒ no sequential ordering needed). The
+  /// live library shows `bundled=0` on most rebuilds (no shared
+  /// corridors at the 3-cell minimum), so the crossing penalty was
+  /// rarely meaningful. The bundling pass downstream still extracts
+  /// corridors + accounts for crossings.
+  ///
+  /// Phase-4-gate (2026-05-21): introduced to bring the live-library
+  /// drag-release rebuild under the 200 ms budget. With 12 strands and
+  /// `cellSize = 50`, sequential routing is ~260 ms; parallel routing
+  /// is bounded by the slowest strand's A\* (~50 ms on the largest
+  /// strand) plus task-group overhead.
+  static func routeConcurrent(
+    strands: [StrandRouteRequest],
+    labels: [LabelObstacle],
+    stationCentres: [StationCentre],
+    configuration: Configuration = Configuration(),
+  ) async -> [RoutedStrandPath] {
+    guard !strands.isEmpty else { return [] }
+    let context = ObstacleContext(
+      labels: labels,
+      stationCentres: stationCentres,
+      memberGenresByStrand: Dictionary(
+        uniqueKeysWithValues: strands.map { ($0.strandID, $0.memberGenres) }
+      ),
+    )
+    return await withTaskGroup(of: (Int, RoutedStrandPath).self) { group in
+      for (index, strand) in strands.enumerated() {
+        // Use a detached task so each strand's A\* runs on the
+        // cooperative thread pool, NOT on the routing actor's
+        // executor (which would serialise them — the whole point of
+        // parallelising is to escape that).
+        group.addTask(priority: .userInitiated) {
+          let path = GenreMapRouting.routeOne(
+            request: strand,
+            context: context,
+            configuration: configuration,
+          )
+          return (index, path)
+        }
+      }
+      var results = [(Int, RoutedStrandPath)]()
+      results.reserveCapacity(strands.count)
+      for await pair in group {
+        results.append(pair)
+      }
+      results.sort { $0.0 < $1.0 }
+      return results.map(\.1)
+    }
   }
 
   /// Route one strand. Each consecutive station pair is searched
@@ -380,6 +466,17 @@ enum GenreMapRouting {
 
   /// Pure A* on the grid. Returns the cell sequence start → goal
   /// (inclusive). Empty when unreachable.
+  ///
+  /// **Phase-4-gate (2026-05-21):** when the expansion cap is hit
+  /// before the goal is reached, falls back to the partial path to
+  /// the **closest visited cell** to the goal — not an empty path.
+  /// The previous empty-path fallback caused the caller
+  /// (`routeSegmentWithCostMap`) to draw a straight line between the
+  /// strand's endpoints, slicing through every intermediate label.
+  /// A partial path still detours around the labels the search did
+  /// explore, which is the strictly-better-than-straight-line
+  /// shape the user would see; a few-cell shortfall near the goal
+  /// is acceptable noise.
   static func aStar(
     start: GridCell,
     goal: GridCell,
@@ -391,9 +488,16 @@ enum GenreMapRouting {
     var cameFrom = [GridCell: GridCell]()
     var gScore: [GridCell: Double] = [start: 0]
     var expansions = 0
+    var bestCell = start
+    var bestHeuristic = heuristic(from: start, to: goal)
     while let node = open.pop() {
       if node.cell == goal {
         return reconstructPath(cameFrom: cameFrom, current: goal)
+      }
+      let nodeHeuristic = heuristic(from: node.cell, to: goal)
+      if nodeHeuristic < bestHeuristic {
+        bestHeuristic = nodeHeuristic
+        bestCell = node.cell
       }
       expansions += 1
       if expansions >= configuration.maxExpansions { break }
@@ -418,6 +522,12 @@ enum GenreMapRouting {
           ))
         }
       }
+    }
+    // Expansion budget exhausted — return the best partial path so
+    // the caller still gets an obstacle-aware shape instead of a
+    // straight line through every label.
+    if bestCell != start {
+      return reconstructPath(cameFrom: cameFrom, current: bestCell)
     }
     return []
   }

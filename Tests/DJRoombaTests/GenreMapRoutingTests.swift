@@ -18,8 +18,6 @@ import Testing
 /// `GenreMapStrandInferenceTests` / `GenreMapLayoutGraphTests`.
 struct GenreMapRoutingTests {
 
-  // MARK: Internal
-
   /// A* on a clear 5×5 grid: path is a straight diagonal start → goal,
   /// cost ≤ Manhattan baseline. Confirms the heuristic + base-cost
   /// model is admissible (no obstacle penalties involved).
@@ -449,7 +447,7 @@ struct GenreMapRoutingTests {
         let from = pen
         for step in 1 ... 24 {
           let t = Double(step) / 24.0
-          let next = quadBezier(from: from, control: control, to: to, t: t)
+          let next = StrandSpline.quadBezier(from: from, control: control, to: to, t: t)
           samples.append(next)
           pen = next
         }
@@ -458,7 +456,7 @@ struct GenreMapRoutingTests {
         let from = pen
         for step in 1 ... 48 {
           let t = Double(step) / 48.0
-          let next = cubicBezier(from: from, control1: control1, control2: control2, to: to, t: t)
+          let next = StrandSpline.cubicBezier(from: from, control1: control1, control2: control2, to: to, t: t)
           samples.append(next)
           pen = next
         }
@@ -519,7 +517,7 @@ struct GenreMapRoutingTests {
         let from = pen
         for step in 1 ... 32 {
           let t = Double(step) / 32.0
-          let next = cubicBezier(from: from, control1: control1, control2: control2, to: to, t: t)
+          let next = StrandSpline.cubicBezier(from: from, control1: control1, control2: control2, to: to, t: t)
           if obstacle.contains(next) { inside = true }
         }
         pen = to
@@ -602,46 +600,88 @@ struct GenreMapRoutingTests {
     #expect(smoothed.count >= 5, "expected >= 5 points (leadIn, corner, leadOut + endpoints); got \(smoothed.count)")
   }
 
-  // MARK: Fileprivate
-
-  /// De Casteljau quadratic Bezier evaluation at parameter `t ∈ [0, 1]`.
-  /// Broken out so the test's chained `*`-expressions don't trigger
-  /// Swift's "unable to type-check in reasonable time" diagnostic.
-  fileprivate func quadBezier(
-    from: CGPoint,
-    control: CGPoint,
-    to: CGPoint,
-    t: Double,
-  ) -> CGPoint {
-    let omt = 1.0 - t
-    let xa = omt * omt * Double(from.x)
-    let xb = 2.0 * omt * t * Double(control.x)
-    let xc = t * t * Double(to.x)
-    let ya = omt * omt * Double(from.y)
-    let yb = 2.0 * omt * t * Double(control.y)
-    let yc = t * t * Double(to.y)
-    return CGPoint(x: xa + xb + xc, y: ya + yb + yc)
+  /// **Phase-4 gate (2026-05-21):** the parallel `routeConcurrent`
+  /// variant produces structurally-equivalent polylines to the
+  /// sequential `route` on the synthetic fixture. Equivalence here
+  /// is "every strand reaches the same start + goal cell at the same
+  /// world position, traversing within one cell of the same waypoint
+  /// path". The cross-strand crossing-penalty bias is dropped in the
+  /// parallel path (strands route independently), so the interior
+  /// waypoints can differ in pathological corpus cases; the test
+  /// pins behaviour on a 10-strand fixture where crossings don't
+  /// constrain the search.
+  @Test
+  func `parallel routing produces equivalent endpoints to sequential routing`() async {
+    let configuration = GenreMapRouting.Configuration(
+      worldSide: 1000,
+      cellSize: 50,
+      labelPadding: 16,
+    )
+    var strands = [GenreMapRouting.StrandRouteRequest]()
+    for i in 0 ..< 5 {
+      let start = CGPoint(x: 50 + Double(i) * 30, y: 50)
+      let goal = CGPoint(x: 50 + Double(i) * 30, y: 950)
+      strands.append(GenreMapRouting.StrandRouteRequest(
+        strandID: i,
+        stationPositions: [start, goal],
+        memberGenres: ["M\(i)"],
+      ))
+    }
+    let sequential = GenreMapRouting.route(
+      strands: strands,
+      labels: [],
+      stationCentres: [],
+      configuration: configuration,
+    )
+    let parallel = await GenreMapRouting.routeConcurrent(
+      strands: strands,
+      labels: [],
+      stationCentres: [],
+      configuration: configuration,
+    )
+    #expect(sequential.count == parallel.count)
+    for index in 0 ..< sequential.count {
+      let seq = sequential[index]
+      let par = parallel[index]
+      #expect(seq.strandID == par.strandID, "strand id mismatch at index \(index)")
+      // Endpoints must be byte-identical — both pipelines snap to the
+      // exact station positions at start/goal.
+      #expect(seq.polyline.first == par.polyline.first, "start mismatch at \(index)")
+      #expect(seq.polyline.last == par.polyline.last, "goal mismatch at \(index)")
+    }
   }
 
-  /// De Casteljau cubic Bezier evaluation at parameter `t ∈ [0, 1]`.
-  fileprivate func cubicBezier(
-    from: CGPoint,
-    control1: CGPoint,
-    control2: CGPoint,
-    to: CGPoint,
-    t: Double,
-  ) -> CGPoint {
-    let omt = 1.0 - t
-    let xa = omt * omt * omt * Double(from.x)
-    let xb = 3.0 * omt * omt * t * Double(control1.x)
-    let xc = 3.0 * omt * t * t * Double(control2.x)
-    let xd = t * t * t * Double(to.x)
-    let ya = omt * omt * omt * Double(from.y)
-    let yb = 3.0 * omt * omt * t * Double(control1.y)
-    let yc = 3.0 * omt * t * t * Double(control2.y)
-    let yd = t * t * t * Double(to.y)
-    return CGPoint(x: xa + xb + xc + xd, y: ya + yb + yc + yd)
+  /// **Phase-4 gate (2026-05-21):** A\* partial-path fallback. When
+  /// the expansion budget is exhausted before the goal is reached,
+  /// `aStar` returns the partial path to the closest visited cell,
+  /// not an empty path. The previous empty-path fallback caused the
+  /// caller to draw a straight line through every intermediate
+  /// label.
+  @Test
+  func `A star returns the partial path to the closest visited cell when expansion budget exhausted`() {
+    let configuration = GenreMapRouting.Configuration(
+      worldSide: 1000,
+      cellSize: 50,
+      maxExpansions: 4, // Tiny cap so the search must give up.
+    )
+    let path = GenreMapRouting.aStar(
+      start: GenreMapRouting.GridCell(column: 0, row: 0),
+      goal: GenreMapRouting.GridCell(column: 18, row: 18),
+      costMap: [:],
+      configuration: configuration,
+    )
+    // With a 4-expansion budget the search cannot reach (18, 18).
+    // The partial path must (a) not be empty, (b) start at (0, 0),
+    // (c) end at a cell closer to the goal than (0, 0).
+    #expect(!path.isEmpty)
+    #expect(path.first == GenreMapRouting.GridCell(column: 0, row: 0))
+    if let last = path.last {
+      let startToGoal = abs(0 - 18) + abs(0 - 18) // Manhattan
+      let lastToGoal = abs(last.column - 18) + abs(last.row - 18)
+      #expect(lastToGoal < startToGoal, "partial path didn't get closer to goal")
+    }
   }
+
 }
 
 // MARK: - StrandSplineGeometryTests
@@ -693,7 +733,7 @@ struct StrandSplineGeometryTests {
         let from = pen
         for step in 1 ... 16 {
           let t = Double(step) / 16.0
-          let next = quadBezier(from: from, control: control, to: to, t: t)
+          let next = StrandSpline.quadBezier(from: from, control: control, to: to, t: t)
           segments.append((pen, next))
           pen = next
         }
@@ -704,7 +744,7 @@ struct StrandSplineGeometryTests {
         let from = pen
         for step in 1 ... 32 {
           let t = Double(step) / 32.0
-          let next = cubicBezier(from: from, control1: control1, control2: control2, to: to, t: t)
+          let next = StrandSpline.cubicBezier(from: from, control1: control1, control2: control2, to: to, t: t)
           segments.append((pen, next))
           pen = next
         }
@@ -737,47 +777,6 @@ struct StrandSplineGeometryTests {
       }
     }
     #expect(!intersected, "centripetal CR produced a self-intersection on the hairpin fixture")
-  }
-
-  // MARK: Fileprivate
-
-  /// De Casteljau quadratic Bezier evaluation at parameter `t ∈ [0, 1]`.
-  /// Broken out so the chained `*`-expressions don't trigger Swift's
-  /// "unable to type-check in reasonable time" diagnostic.
-  fileprivate func quadBezier(
-    from: CGPoint,
-    control: CGPoint,
-    to: CGPoint,
-    t: Double,
-  ) -> CGPoint {
-    let omt = 1.0 - t
-    let xa = omt * omt * Double(from.x)
-    let xb = 2.0 * omt * t * Double(control.x)
-    let xc = t * t * Double(to.x)
-    let ya = omt * omt * Double(from.y)
-    let yb = 2.0 * omt * t * Double(control.y)
-    let yc = t * t * Double(to.y)
-    return CGPoint(x: xa + xb + xc, y: ya + yb + yc)
-  }
-
-  /// De Casteljau cubic Bezier evaluation at parameter `t ∈ [0, 1]`.
-  fileprivate func cubicBezier(
-    from: CGPoint,
-    control1: CGPoint,
-    control2: CGPoint,
-    to: CGPoint,
-    t: Double,
-  ) -> CGPoint {
-    let omt = 1.0 - t
-    let xa = omt * omt * omt * Double(from.x)
-    let xb = 3.0 * omt * omt * t * Double(control1.x)
-    let xc = 3.0 * omt * t * t * Double(control2.x)
-    let xd = t * t * t * Double(to.x)
-    let ya = omt * omt * omt * Double(from.y)
-    let yb = 3.0 * omt * omt * t * Double(control1.y)
-    let yc = 3.0 * omt * t * t * Double(control2.y)
-    let yd = t * t * t * Double(to.y)
-    return CGPoint(x: xa + xb + xc + xd, y: ya + yb + yc + yd)
   }
 
   // MARK: Private

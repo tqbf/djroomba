@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import os
+import SwiftUI
 
 // MARK: - GenreMapRoutingActor
 
@@ -66,7 +67,7 @@ actor GenreMapRoutingActor {
   /// triggers for the same `layoutRevision` (returns the cached
   /// result). A snapshot with a stale `layoutRevision` is discarded
   /// silently — only the latest revision's cache survives.
-  func route(_ snapshot: Snapshot) -> Result {
+  func route(_ snapshot: Snapshot) async -> Result {
     if cachedRevision == snapshot.layoutRevision, let cached = cachedResult {
       return cached
     }
@@ -85,7 +86,9 @@ actor GenreMapRoutingActor {
       name: "GenreMapRouting.route",
       signpostID: signpostID,
       "revision=%{public}d strands=%{public}d nodes=%{public}d",
-      snapshot.layoutRevision, snapshot.strands.count, snapshot.nodes.count,
+      snapshot.layoutRevision,
+      snapshot.strands.count,
+      snapshot.nodes.count,
     )
     let started = Date()
     defer {
@@ -99,7 +102,7 @@ actor GenreMapRoutingActor {
         elapsedMs,
       )
       Self.logger.debug(
-        "[GenreMapRouting] route revision=\(snapshot.layoutRevision, privacy: .public) strands=\(snapshot.strands.count, privacy: .public) nodes=\(snapshot.nodes.count, privacy: .public) elapsed=\(elapsedMs, privacy: .public)ms",
+        "[GenreMapRouting] route revision=\(snapshot.layoutRevision, privacy: .public) strands=\(snapshot.strands.count, privacy: .public) nodes=\(snapshot.nodes.count, privacy: .public) elapsed=\(elapsedMs, privacy: .public)ms"
       )
     }
 
@@ -140,7 +143,12 @@ actor GenreMapRoutingActor {
       ))
     }
 
-    let routed = GenreMapRouting.route(
+    // Phase-4-gate (2026-05-21): use the parallel `routeConcurrent`
+    // variant so the per-strand A\* runs concurrently on a TaskGroup.
+    // The previous sequential `route` was ~260 ms on the live 12-
+    // strand × 115-station library; parallel is bounded by the
+    // slowest strand and brings the budget under 200 ms median.
+    let routed = await GenreMapRouting.routeConcurrent(
       strands: requests,
       labels: labels,
       stationCentres: stations,
@@ -196,6 +204,17 @@ actor GenreMapRoutingActor {
     )
     cachedRevision = snapshot.layoutRevision
     cachedResult = result
+    #if DEBUG
+    // Phase-4-gate (2026-05-21) per-strand label-crossing verifier;
+    // implementation lives in `GenreMapRoutingVerifier.swift`. Mirrors
+    // the headline unit-test invariant on the LIVE library, fire-and-
+    // forget (no actor-queue impact, no renderer impact).
+    GenreMapRoutingVerifier.runIfDebug(
+      bundled: bundling.bundled,
+      labels: labels,
+      strandLabels: snapshot.strands,
+    )
+    #endif
     return result
   }
 

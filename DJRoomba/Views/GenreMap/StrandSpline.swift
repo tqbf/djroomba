@@ -199,6 +199,48 @@ struct StrandSpline: View {
     )
   }
 
+  /// De Casteljau quadratic Bezier evaluation at parameter `t ∈ [0, 1]`.
+  /// Hoisted out of `Path.forEach` sample loops so its callers (the
+  /// `GenreMapRoutingVerifier` DEBUG strand verifier + the spline-
+  /// geometry / routing unit tests) share one implementation. Broken
+  /// into named intermediates so Swift's type-checker doesn't blow up
+  /// on chained `*`-expressions (`swiftformat preferForLoop` rewrite
+  /// hit this previously).
+  nonisolated static func quadBezier(
+    from p0: CGPoint,
+    control p1: CGPoint,
+    to p2: CGPoint,
+    t: Double,
+  ) -> CGPoint {
+    let oneMinusT = 1.0 - t
+    let ax = oneMinusT * oneMinusT * Double(p0.x)
+    let bx = 2 * oneMinusT * t * Double(p1.x)
+    let cx = t * t * Double(p2.x)
+    let ay = oneMinusT * oneMinusT * Double(p0.y)
+    let by = 2 * oneMinusT * t * Double(p1.y)
+    let cy = t * t * Double(p2.y)
+    return CGPoint(x: ax + bx + cx, y: ay + by + cy)
+  }
+
+  /// De Casteljau cubic Bezier evaluation at parameter `t ∈ [0, 1]`.
+  /// Same dedupe + named-intermediate rationale as `quadBezier`.
+  nonisolated static func cubicBezier(
+    from p0: CGPoint,
+    control1 p1: CGPoint,
+    control2 p2: CGPoint,
+    to p3: CGPoint,
+    t: Double,
+  ) -> CGPoint {
+    let oneMinusT = 1.0 - t
+    let m = oneMinusT * oneMinusT * oneMinusT
+    let n = 3.0 * oneMinusT * oneMinusT * t
+    let o = 3.0 * oneMinusT * t * t
+    let p = t * t * t
+    let x = m * Double(p0.x) + n * Double(p1.x) + o * Double(p2.x) + p * Double(p3.x)
+    let y = m * Double(p0.y) + n * Double(p1.y) + o * Double(p2.y) + p * Double(p3.y)
+    return CGPoint(x: x, y: y)
+  }
+
   // MARK: Private
 
   private nonisolated static func distance(_ a: CGPoint, _ b: CGPoint) -> Double {
