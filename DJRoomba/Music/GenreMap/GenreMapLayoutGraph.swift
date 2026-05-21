@@ -124,6 +124,79 @@ enum GenreMapLayoutGraph {
     }
   }
 
+  /// Admit the **heaviest inter-community edge per community pair** from
+  /// the candidate set that isn't already in `existing`. This is the
+  /// Phase-2-gate substrate widening (per `plans/genre-metro-map.md`
+  /// Phase 1 step 4's "add the strongest inter-community bridge edges"
+  /// — left as a Phase-3 carry-forward at the Phase-1 gate, executed at
+  /// the Phase-2 gate because Phase 2's transferness needs cross-
+  /// community edges to score above zero).
+  ///
+  /// On the real library the per-node mutual-kNN + MST construction
+  /// admits ~one bridge per community via the MST step, which is not
+  /// enough: a community pair with multiple heavy bridges only contributes
+  /// ONE to the layout graph, so genuine bridge nodes see only that one
+  /// edge in their neighbour-community-entropy / cross-community-fraction
+  /// inputs. By admitting the heaviest inter-community edge per
+  /// community pair, every pair of communities that touches at all
+  /// contributes its strongest crossing — which is exactly the signal
+  /// transferness wants to see.
+  ///
+  /// Pure / deterministic. Returns the bridges in canonical (a, b) order
+  /// then weight desc; the caller unions these with the existing edges.
+  static func interCommunityBridges(
+    candidates: [Candidate],
+    communityByGenre: [String: Int],
+    existing: [Candidate],
+  ) -> [Candidate] {
+    guard !candidates.isEmpty else { return [] }
+    // Index existing edges so we don't double-admit anything mutual-kNN
+    // / MST already kept.
+    var existingKeys = Set<EdgeKey>()
+    for candidate in existing {
+      existingKeys.insert(EdgeKey(a: candidate.a, b: candidate.b))
+    }
+    // Strongest crossing per ordered community pair (cA < cB). Ties
+    // broken by canonical (a, b) for determinism.
+    var bestByPair = [PairKey: Candidate]()
+    for candidate in candidates {
+      let normalised: Candidate =
+        candidate.a < candidate.b
+          ? candidate
+          : Candidate(a: candidate.b, b: candidate.a, weight: candidate.weight)
+      guard
+        let cA = communityByGenre[normalised.a],
+        let cB = communityByGenre[normalised.b],
+        cA != cB
+      else { continue }
+      let pair = PairKey(lo: min(cA, cB), hi: max(cA, cB))
+      if let current = bestByPair[pair] {
+        if candidate.weight > current.weight {
+          bestByPair[pair] = normalised
+        } else if candidate.weight == current.weight {
+          // Deterministic tie-break: prefer the canonical lexicographic edge.
+          if
+            normalised.a < current.a
+            || (normalised.a == current.a && normalised.b < current.b)
+          {
+            bestByPair[pair] = normalised
+          }
+        }
+      } else {
+        bestByPair[pair] = normalised
+      }
+    }
+    // Filter out anything mutual-kNN / MST already admitted.
+    let bridges = bestByPair.values.filter { candidate in
+      !existingKeys.contains(EdgeKey(a: candidate.a, b: candidate.b))
+    }
+    return bridges.sorted { lhs, rhs in
+      if lhs.weight != rhs.weight { return lhs.weight > rhs.weight }
+      if lhs.a != rhs.a { return lhs.a < rhs.a }
+      return lhs.b < rhs.b
+    }
+  }
+
   /// MST over canonical-half candidates. Returns the kept edges. Uses
   /// union-find; deterministic ordering = weight desc, then `(a, b)`.
   static func maximumSpanningTree(
@@ -158,6 +231,11 @@ enum GenreMapLayoutGraph {
   private struct EdgeKey: Hashable {
     var a: String
     var b: String
+  }
+
+  private struct PairKey: Hashable {
+    var lo: Int
+    var hi: Int
   }
 
 }

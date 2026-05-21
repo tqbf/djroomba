@@ -203,6 +203,31 @@ strands.
    a fake transfer station just for being big. Pin this in a unit test.
 4. **Classify** into ordinary stop / junction / transfer station at
    `0.35` / `0.65`.
+
+   > **Phase-2-gate revision (2026-05-20):** the absolute cuts assume
+   > the full five-input composite contributes (membership-entropy + the
+   > strand-count slot Phase 3 fills). Phase 2 runs with two of the five
+   > slots at zero so the composite's mathematical ceiling is **0.75**;
+   > even after the Phase-2-gate substrate widening (heaviest inter-
+   > community edge per community pair admitted on top of mutual-kNN ∪
+   > MST, +3 layout edges on the real ~115-genre library), absolute cuts
+   > at `0.35 / 0.65` land **0 junctions + 0 transfer stations**. The
+   > observed composite ceiling on the real library is ~0.22 (Alt/Indie,
+   > Hard Rock). Phase 2 therefore ships with **relative-rank
+   > classification** — top decile of non-zero composites =
+   > transferStation, top quartile = junction (`transferStationRank =
+   > 0.90`, `junctionRank = 0.75`). Pinned in
+   > `GenreMapTransfernessTests.rank classify promotes top decile to
+   > transfer and top quartile to junction`. The absolute-cut classifier
+   > stays as `GenreMapTransferness.classify(composite:)` and remains
+   > pinned at `0.35 / 0.65`; Phase 3 will revisit (probably back to
+   > absolute cuts) once the strand-count slot stabilises the composite
+   > ceiling at ~1.0. Calibration drift from absolute to relative is a
+   > spec decision and not a silent threshold tweak — it's the right
+   > robustness posture across libraries with different bridge-density
+   > profiles (a library with one giant connected blob still surfaces
+   > its strongest bridges; a library with many small islands still
+   > surfaces them in proportion).
 5. **Render the three node kinds.** Ordinary = small dot or compact
    pill; junction = pill with a tick mark; transfer station = larger
    pill with a *neutral* multi-strand marker (single colour for now —

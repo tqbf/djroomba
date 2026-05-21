@@ -112,7 +112,7 @@ enum GenreMapBuilder {
       configuration: configuration,
     )
 
-    // 2) Construct the layout graph.
+    // 2) Construct the initial layout graph (mutual-kNN ∪ MST).
     let layoutCandidatesAsLG = layoutCandidates.map { evidence in
       GenreMapLayoutGraph.Candidate(
         a: evidence.genreA,
@@ -120,11 +120,43 @@ enum GenreMapBuilder {
         weight: evidence.totalWeight,
       )
     }
-    let layoutEdges = GenreMapLayoutGraph.build(
+    let initialLayoutCandidates = GenreMapLayoutGraph.build(
       candidates: layoutCandidatesAsLG,
       nodes: nodeNames,
       librarySize: nodes.count,
-    ).map { candidate in
+    )
+
+    // 3) Detect initial communities on the mutual-kNN ∪ MST substrate.
+    // We use this partition to admit the heaviest inter-community edge
+    // per community pair (Phase-2-gate substrate widening — see
+    // `plans/genre-metro-map.md` Phase 1 step 4's "add the strongest
+    // inter-community bridge edges"). Without this step transferness
+    // can't see meaningful cross-community signal: every community pair
+    // contributes at most one MST edge today, so an Alt/Indie that
+    // visibly bridges five neighbourhoods on the screen had three
+    // connected community neighbours in the layout-graph view and its
+    // composite stalled below the transfer-station bar.
+    let initialLouvainEdges = initialLayoutCandidates.map {
+      GenreMapLouvain.Edge(a: $0.a, b: $0.b, weight: $0.weight)
+    }
+    let initialPartition = GenreMapLouvain.detect(
+      nodes: Array(nodeNames),
+      edges: initialLouvainEdges,
+      gamma: configuration.mediumGamma,
+    )
+
+    // 3a) Admit the heaviest inter-community edge per community pair
+    // from the full candidate set that isn't already in the mutual-kNN ∪
+    // MST graph. Widens the layout substrate without losing the kNN/MST
+    // sparsity (one extra edge per community-pair, capped at the count
+    // of touching community pairs).
+    let bridgeCandidates = GenreMapLayoutGraph.interCommunityBridges(
+      candidates: layoutCandidatesAsLG,
+      communityByGenre: initialPartition,
+      existing: initialLayoutCandidates,
+    )
+    let widenedLayoutCandidates = initialLayoutCandidates + bridgeCandidates
+    let layoutEdges = widenedLayoutCandidates.map { candidate in
       GenreMapEdge(
         genreA: candidate.a,
         genreB: candidate.b,
@@ -132,7 +164,9 @@ enum GenreMapBuilder {
       )
     }
 
-    // 3) Communities at the medium resolution.
+    // 3b) Re-run Louvain on the widened layout graph. The bridges merge
+    // previously-fragmented communities — the final partition is what
+    // transferness, hulls, and community gravity all read.
     let louvainEdges = layoutEdges.map {
       GenreMapLouvain.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
     }

@@ -5,6 +5,318 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-20 — ✅ Genre Metro Map — Phase 2 gate — GO for Phase 3 (`feature/genre-metro-map`)
+
+Phase 2 gate per the brief at the top of the previous Phase 2 entry.
+**Decision: GO for Phase 3.** The headline self-reported defect ("zero
+transfer stations on the live library") is **FIXED**: the live library
+now lays out as **115 genres · 117 layout edges · 43 neighbourhoods**
+with **4 transfer stations + 5 junctions + 106 ordinary**, including
+Alt/Indie as a transfer station per the plan's explicit perceptual
+success criterion. Path A (substrate widening) executed; absolute
+thresholds proved insufficient on this library's composite ceiling
+(0.75 — strand-count + membership-entropy slots zero until Phase 3);
+Path B (relative-rank classification) executed with a written plan
+update. Threshold drift fully resolved: `classify(composite:)` reverted
+to the plan's `0.35 / 0.65`; live path uses `classifyByRank` with the
+documented Phase-3-fallback rank bands `0.90 / 0.75`.
+
+- **Skill verdicts (all four, mandatory).**
+  - **`swiftui-pro`** (`GenreMapEvidencePanel.swift`, `GenreMapPanel.swift`,
+    `StationLabel.swift`).
+    - Drag-vs-tap gesture posture is correct — node drag uses
+      `simultaneousGesture(DragGesture(minimumDistance: 2))` while the
+      pill's `.onTapGesture` fires only when the drag never crosses the
+      threshold; dismiss-on-background-tap is a separate
+      `simultaneousGesture(TapGesture)` so it never races the pan.
+      **Verified**: a drag on Hard Rock (clear journey across the map)
+      did NOT open the evidence panel.
+    - `evidenceTask?.cancel()` posture is sound — cancellation on new
+      selection AND on dismiss, with `Task.isCancelled` check after the
+      await before writing UI state.
+    - View recomposition: `GenreMapPanel.body` does observation-driven
+      reads of `service.model` (Observation framework, not manual
+      `objectWillChange`). The evidence panel only renders when
+      `selectedGenre != nil`. Acceptable for n=115.
+    - Accessibility: per-kind `accessibilityLabel` ("…junction, weight
+      X" / "…transfer station, transferness X, weight X") preserved
+      from the Phase 2 ship.
+    - **Applied at the gate**: none (no blocker — the gesture posture
+      that the brief flagged as a concern is correct).
+    - **Deferred to `DESIGN-TODO.md` Phase D** (extract `body`'s
+      computed `some View` properties into separate `View` structs in
+      their own files — project convention; multi-file change, not a
+      gate fix).
+  - **`macos-design`** (the half-pane evidence panel inside the sheet).
+    - The container is still a `.sheet` and the brief was right that
+      this is a sheet-inside-a-sheet shape. **Deferred to Phase 5**
+      (the plan explicitly puts the inspector posture there) and Phase
+      6 (the WindowGroup container rehoming). Phase 3 should not
+      entrench the sheet further.
+    - The half-pane layout (`map | divider | evidence`) is the right
+      composition inside the current sheet; promotion to `.inspector()`
+      is the natural Phase 5 cleanup once the container becomes a
+      WindowGroup.
+    - **Applied at the gate**: none.
+  - **`typography-designer`** (the three node kinds on the live
+    screenshot `/tmp/genre-metro-map-phase2-altindie-junction.png`).
+    - The leading-glyph + border-weight + bg-tint differentiation
+      reads correctly — confirmed on the post-substrate-widening
+      screenshot. R&B/Soul (transferStation) shows the
+      `point.3.connected.trianglepath.dotted` glyph in the pill at
+      readable contrast; Hard Rock (junction) shows the `diamond.fill`
+      glyph (visible in the side-panel header glyph too).
+    - Junction & transfer-station legibility holds at the smallest
+      weight tier — verified Alt/Indie (transferStation) at its
+      regular-weight font (composite 0.207, weight ~0.5 ⇒ medium tier
+      font) renders the glyph + border ramp clearly.
+    - **Applied at the gate**: none.
+    - **Carry-forward** (Phase 5): hover-elevate-to-front for the
+      dense centre where glyphs can be hidden under overlapping pills;
+      same Phase-5 polish flagged at Phase 2.
+  - **`toms-laws`** (the Phase 2 diff: pure pipeline + view + store).
+    - Phased à-la-carte plan produced. Of the proposed phases, **two
+      executed at the gate** (substrate widening + relative-rank
+      classification — both are blocking, both are 1-method changes
+      with direct measurement on the real library). Three carry-
+      forwards land in `DESIGN-TODO.md`: (a) `GenreMapPanel.body`'s
+      computed `some View` extraction (Phase D — same item as the
+      Phase-1 gate's swiftui-pro), (b) the evidence-on-demand
+      materialised-view (Phase G — deferred to Phase 3 per the brief's
+      explicit "pick defer unless toms-laws flags it as a global-
+      mutable-state / DRY violation"; it does not — the materialised
+      view is a Phase-3 freight item and the JIT CTE is acceptable
+      behind the spinner for Phase 2), (c) `GenreMapBuilder.build`'s
+      growing internal step count (Phase H — would benefit from a tiny
+      `Pipeline` struct that names each step; carry-forward, not gate-
+      blocking).
+- **The composite-math investigation — Path A executed, Path B
+  layered on top.**
+  - **Path A — heaviest inter-community edge per community pair.**
+    New `GenreMapLayoutGraph.interCommunityBridges(candidates:,
+    communityByGenre:, existing:)` admits, for every community pair
+    that has any candidate crossing in the full evidence set, the
+    strongest crossing that isn't already in mutual-kNN ∪ MST. The
+    builder runs a two-pass community detection: first Louvain on
+    `mutual-kNN ∪ MST` to get the substrate communities, then bridges
+    are admitted, then Louvain re-runs on the widened graph. Pinned by
+    three new fixture tests:
+    - `inter community bridges admits the heaviest edge per community pair`
+    - `inter community bridges skips pairs already in the layout graph`
+    - `inter community bridges admits one bridge per community pair when none exists`
+    On the live library, the widening admitted **+3 layout edges**
+    (114 → 117). The substrate fix is real but the absolute number of
+    new bridges is modest — community pairs that touch at all already
+    contributed one MST crossing, and the heaviest crossing was
+    usually the MST one. Where Path A pays off is in **input quality**:
+    the cross-community fraction signal stops being binary (one edge
+    in or out) and becomes proportional.
+  - **Path B — relative-rank classification (live path).** Absolute
+    cuts at the plan's `0.35 / 0.65` on the widened layout graph still
+    land 0 transfer stations + 0 junctions on this library — the
+    composite's mathematical ceiling is **0.75** until the strand-count
+    slot lights up in Phase 3, and the observed top composite is
+    Electronic at 0.282. The plan was therefore explicitly amended
+    (`plans/genre-metro-map.md` Phase 2 step 4, "Phase-2-gate
+    revision (2026-05-20)" block) to ship Phase 2 with relative-rank
+    bands — `transferStationRank = 0.90`, `junctionRank = 0.75`
+    (top decile / top quartile of the non-zero composite distribution).
+    `GenreMapTransferness.classify(composite:)` remains pinned at the
+    plan's `0.35 / 0.65` and is the canonical absolute classifier;
+    `classifyByRank(compositeByNode:)` is the live path. Phase 3 will
+    revisit (likely back to absolute) once the strand slot stabilises
+    the composite ceiling at ~1.0. Pinned by three new fixture tests:
+    - `rank classify promotes top decile to transfer and top quartile to junction`
+    - `rank classify handles flat composite distributions deterministically`
+    - `rank classify never promotes a zero composite node`
+  - **Before / after composite for the brief's tracked names** (live
+    library, instrumented via a temporary `Documents/`-log read of
+    `GenreMapModel.nodes`, captured then removed):
+    - Alt/Indie: **0.207** ⇒ **transferStation**
+      (before Phase 2 gate: 0.21 / junction at 0.20 thresholds; under
+      reverted 0.35/0.65 thresholds without rank fallback ⇒ ordinary).
+    - Hard Rock: **0.205** ⇒ **junction**
+      (before: 0.22 / junction at 0.20 thresholds).
+    - Electronic: **0.282** ⇒ **transferStation** (top of the
+      distribution; not surfaced in the prior gate's panel sample).
+    - R&B/Soul: **0.269** ⇒ **transferStation** with dampening
+      engaged at `×0.96` (broad-but-bridging guard correctly
+      multi-community).
+    - Pop: **0.239** ⇒ **transferStation** (real bridge structure,
+      not a generic-giant slip — the dampening engages and the
+      composite still clears the top decile).
+    - **Rock**: NOT in the top 15. Generic-giant dampening engaged
+      correctly; Rock classified `ordinary` as the plan demands.
+  - **Live classification breakdown** (real names, real counts):
+    - **Transfer station (4)**: Electronic, R&B/Soul, Pop, Alt/Indie.
+    - **Junction (5)**: Hard Rock, Pop/Rock/New-Wave/80s, Soundtrack,
+      Hip-Hop/Rap, Punk.
+    - **Ordinary (106)**: everything else — including the genuine
+      giants Rock, Country, Folk, Alternative (dampening guard held).
+  - **Phase-2-gate substrate-widening invariant pinned** in the new
+    fixture tests above: every community pair with any inter-community
+    candidate above the support floor contributes its heaviest
+    crossing to the layout graph (regardless of per-node top-N).
+- **Evidence-latency: deferred to Phase 3.** Per the brief's "pick
+  defer unless `toms-laws` flags it as a global-state / DRY violation
+  that's better landed now." `toms-laws` did not flag the JIT CTE as a
+  violation — it's a single read transaction with the same posture as
+  `associatedPlaylists`, and the materialised `song_genre` view is a
+  Phase-3 freight item alongside strand inference (which also needs
+  `(genre, artist_key)` / `(genre, album_key)` indexes). Shipping the
+  view at Phase 2 would have been over-investment; the Phase-2-gate
+  carry-forward to Phase 3 lists the exact materialisation shape and
+  indexes. Phase 2 ships with the 6–8 s click-to-evidence latency
+  behind the `ProgressView` spinner — the affordance is correct, the
+  latency is a documented item to invest in alongside the table that
+  needs the same shape.
+- **Threshold-drift resolution.** The prior pass moved 0.35/0.65 ⇒
+  0.20/0.45 silently. The gate **reverts** the absolute classifier
+  thresholds to the plan's `0.35 / 0.65` (now the canonical reference
+  via `classify(composite:)`) AND introduces the rank classifier
+  `classifyByRank` for Phase 2's live path. Both branches are pinned
+  in tests; the plan is updated with the explicit one-paragraph
+  rationale (`plans/genre-metro-map.md` Phase 2 step 4).
+- **Independent computer-use UI + performance check.**
+  - `request_access DJRoomba` ✓ (full tier).
+  - `make build` + `make install` + relaunch + Playback → Analyze Genre
+    Map (⌥⇧⌘A) ran in ~10 s, then Show Genre Map…
+  - Header reads **115 genres · 117 layout edges · 43 neighbourhoods**
+    (+3 edges from the Phase-2-pre-gate 114). The bridge widening
+    landed; community count unchanged at 43 — γ=0.85 sweep is flat
+    enough on this library that the +3 bridges don't merge any of the
+    existing communities (they were already-connected via the MST).
+  - **Clicked Hard Rock** (a Junction). Side panel opened: classification
+    "Junction" + diamond glyph in the header, composite 20 %, inputs
+    19 % / 26 % / 42 % / 0 %, three connected neighbourhoods (80s/Alt-
+    Indie cluster, Adult-Contemporary/Pop-Rock cluster, Alt-BritPop
+    cluster). Strongest edges: Pop/Rock 0.022, Rock 0.021, Alternative
+    0.019, Alt/MOR/AOR 0.016, Punk 0.013 (matches Phase-2 numbers — the
+    layout edges incident to Hard Rock didn't change; only the
+    classification did).
+  - **Clicked R&B/Soul** (a Transfer station). Side panel opened with
+    the three-dot-triangle glyph in the header next to "Transfer
+    station". 27 % transferness, 61 % betweenness, 19 % neighbour
+    entropy, 25 % cross-community. **Three connected neighbourhoods**
+    (Adult-Contemporary/PopRock cluster, Alt/BritPop cluster, Alt-
+    Laptop/NYC/Blues cluster). Generic-giant dampening engaged at
+    ×0.96 — broad-but-bridging guard read correctly. Evidence-on-
+    demand loaded after ~7 s (latency unchanged from Phase 2; deferred
+    to Phase 3 per above).
+  - **Drag**: dragged Rock y Alternativo from inside the cluster to a
+    new position bottom-left of the map. Classification did NOT
+    recompute (header still 117 edges / 43 neighbourhoods after the
+    drag; the model's transferness is layout-graph-derived, not
+    position-derived, and the cached `nodeKind` field on every
+    `GenreMapNode` is untouched by `applyDrag`). No FPS drop observed
+    during the drag.
+  - **Pan + Fit**: both still work; the per-pill drag gesture and the
+    panel-background pan gesture continue to compose correctly.
+  - **Background click**: dismissed the evidence panel cleanly.
+  - **Drag → no spurious open**: confirmed (drag a node ≠ tap a node;
+    `minimumDistance: 2` on the drag gesture lets `.onTapGesture` win
+    the bare-click race; `minimumDistance: 4` on the background pan
+    gesture lets the dismiss `TapGesture` win the bare-click race).
+  - Screenshot saved to `/tmp/genre-metro-map-phase2-gate-rb-soul-transfer.png`
+    showing the R&B/Soul transfer-station panel with all four input
+    bars + the multi-dot triangle glyph + the three connected
+    neighbourhoods + dampening badge + strongest edges + evidence
+    loading state. Surfaced via `SendUserFile` (proactive).
+- **Tests + commit.**
+  - **+6 net new tests, 280/44 → 286/44 green.**
+    - `GenreMapLayoutGraphTests."inter community bridges admits the
+      heaviest edge per community pair"` — pins the per-pair invariant
+      (only the heaviest crossing is admitted, never a stronger
+      already-present one).
+    - `GenreMapLayoutGraphTests."inter community bridges skips pairs
+      already in the layout graph"` — pins the additivity guarantee.
+    - `GenreMapLayoutGraphTests."inter community bridges admits one
+      bridge per community pair when none exists"` — pins the brief's
+      "every community pair contributes its heaviest crossing if any
+      exists above the support floor" rule on a 3-community fixture.
+    - `GenreMapTransfernessTests."rank classify promotes top decile to
+      transfer and top quartile to junction"` — pins the live
+      classification path.
+    - `GenreMapTransfernessTests."rank classify handles flat composite
+      distributions deterministically"` — pins the edge case where
+      every non-zero composite is the same value.
+    - `GenreMapTransfernessTests."rank classify never promotes a zero
+      composite node"` — pins that nodes with no incident layout edges
+      stay ordinary regardless of how big the rest of the distribution
+      is.
+  - **Threshold-pin test renamed** (`classification: thresholds land
+    at junction and transferStation cuts` ⇒ `absolute classify pins
+    the plans 0_35 0_65 cuts`) and updated to read the canonical
+    `0.35 / 0.65` constants (was reading the silent-drift
+    `0.20 / 0.45`).
+  - `make check` clean. `swift test` **280/44 → 286/44** (+6 net).
+    `make build` clean (signed Apple Development). `make install`
+    deployed.
+  - `swiftformat --lint` clean on all touched files.
+    `swiftlint --strict` clean.
+- **Files touched at the gate.**
+  - `DJRoomba/Music/GenreMap/GenreMapLayoutGraph.swift` — new
+    `interCommunityBridges(candidates:, communityByGenre:, existing:)`
+    method; new `PairKey` private hashable.
+  - `DJRoomba/Music/GenreMap/GenreMapBuilder.swift` — two-pass
+    community detection (initial Louvain on mutual-kNN ∪ MST ⇒ admit
+    bridges ⇒ final Louvain on widened graph). Comment block updated.
+  - `DJRoomba/Music/GenreMap/GenreMapTransferness.swift` — new
+    `classifyByRank(compositeByNode:)` + `percentile(_:fraction:)`;
+    `score(…)` now classifies via `classifyByRank`, not the absolute
+    `classify(composite:)`. `junctionThreshold` / `transferStationThreshold`
+    reverted to the plan's `0.35 / 0.65`. New rank constants
+    `junctionRank = 0.75`, `transferStationRank = 0.90`. Doc block
+    rewritten to reflect both paths.
+  - `DJRoomba/Music/GenreMap/GenreMapModel.swift` — threshold comment
+    updated to point at `GenreMapTransfernessTests` for both
+    classifiers.
+  - `Tests/DJRoombaTests/GenreMapLayoutGraphTests.swift` — +3 tests
+    for the bridge admit.
+  - `Tests/DJRoombaTests/GenreMapTransfernessTests.swift` — existing
+    threshold test renamed + retargeted at the absolute classifier;
+    +3 tests for the rank classifier.
+  - `plans/genre-metro-map.md` — Phase 2 step 4 "Phase-2-gate revision
+    (2026-05-20)" block added documenting the absolute-vs-rank
+    decision and the calibration drift.
+- **Phase-3 carry-forward (must-read for the Phase-3 agent).**
+  - **Substrate is now correctly wide.** Phase 1 step 4's "add the
+    strongest inter-community bridge edges" item is DONE at the
+    Phase-2 gate. Phase 3 inherits a layout graph that's mutual-kNN ∪
+    MST ∪ heaviest-bridge-per-community-pair; do NOT remove this step
+    — the rank classifier reads off it.
+  - **Strand-count slot is the lever for Phase 3.** Once `strand_count`
+    fills, the composite ceiling rises toward 1.0; the rank classifier
+    will keep promoting the top decile, but the rank thresholds should
+    be revisited against the plan's absolute `0.35 / 0.65` after a
+    live verification with strands in. The expectation per the plan:
+    once strand_count contributes, the absolute classifier becomes the
+    natural fit again — flip `score(…)` back to `classify(composite:)`
+    and keep `classifyByRank` as a fallback option.
+  - **Materialise `song_genre`.** Phase 3's strand-inference reads on
+    `(genre, song_id) / (genre, artist_key) / (genre, album_key)`
+    indexes a lot; materialising the view inside the same v7 rebuild
+    SQL pass collapses both the strand-build cost AND the evidence-on-
+    demand 6–8 s latency the user sees today. Land in the same
+    `rebuildGenreMap` transaction; index on all three keys.
+  - **Communities at 43 still.** Substrate widening did NOT reduce
+    community count (the bridges admitted were between already-
+    connected communities). Phase 3's strand inference will need to
+    decide whether to: (a) treat 43 communities as a feature (lots of
+    tight strands per community) or (b) collapse community pairs that
+    share a strong bridge into one community before strand extraction.
+    The plan calls (b) "the heavy-path-per-community-pair MST" — pick
+    (b) unless live verification surfaces over-merging.
+  - **Sheet ⇒ WindowGroup.** Still a Phase-5 item; flagged again here
+    so Phase 3 doesn't entrench the sheet.
+  - **`GenreMapPanel.body` extraction.** Still in `DESIGN-TODO.md`
+    Phase D; not a Phase-3 blocker but is a project-convention drift
+    that should land before Phase 5.
+- **PR #5 unchanged on disk; commit pushed.** Per CLAUDE.md the agent
+  must never merge to `main`.
+
+---
+
 ## 2026-05-20 — ⚙️ Genre Metro Map — Phase 2 — transferness + click-to-evidence (`feature/genre-metro-map`)
 
 Phase 2 of `plans/genre-metro-map.md`: topological transferness + the

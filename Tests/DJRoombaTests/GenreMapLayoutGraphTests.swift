@@ -93,6 +93,104 @@ struct GenreMapLayoutGraphTests {
     #expect(abs(mstWeights.reduce(0, +) - 1.2) < 1e-9)
   }
 
+  /// Phase-2-gate substrate widening: every community pair that has at
+  /// least one inter-community candidate (above the support floor)
+  /// should contribute its heaviest crossing to the layout graph.
+  /// Without this, mutual-kNN ∪ MST keeps at most ONE edge per
+  /// community pair (the MST one), and transferness reads near-zero
+  /// cross-community signal even on genuine bridge nodes.
+  @Test
+  func `inter community bridges admits the heaviest edge per community pair`() {
+    // Two communities: 1 = {A, B}, 2 = {C, D}. Three crossings between
+    // them: A-C (0.30), A-D (0.50), B-C (0.20). Existing layout edges
+    // (simulating mutual-kNN ∪ MST) hold only A-C as the bridge.
+    let candidates: [GenreMapLayoutGraph.Candidate] = [
+      .init(a: "A", b: "B", weight: 0.95),
+      .init(a: "C", b: "D", weight: 0.93),
+      .init(a: "A", b: "C", weight: 0.30),
+      .init(a: "A", b: "D", weight: 0.50),
+      .init(a: "B", b: "C", weight: 0.20),
+    ]
+    let communities = ["A": 1, "B": 1, "C": 2, "D": 2]
+    let existing: [GenreMapLayoutGraph.Candidate] = [
+      .init(a: "A", b: "B", weight: 0.95),
+      .init(a: "C", b: "D", weight: 0.93),
+      .init(a: "A", b: "C", weight: 0.30),
+    ]
+    let bridges = GenreMapLayoutGraph.interCommunityBridges(
+      candidates: candidates,
+      communityByGenre: communities,
+      existing: existing,
+    )
+    // One community pair (1,2) ⇒ at most one bridge. A-C is already
+    // present; the heaviest crossing (A-D, 0.50) wins and is admitted.
+    #expect(bridges.count == 1)
+    #expect(bridges.first?.a == "A")
+    #expect(bridges.first?.b == "D")
+  }
+
+  /// When mutual-kNN ∪ MST already admits the heaviest crossing for
+  /// a community pair, no bridge is added — the function is strictly
+  /// additive on top of the existing layout edges.
+  @Test
+  func `inter community bridges skips pairs already in the layout graph`() {
+    let candidates: [GenreMapLayoutGraph.Candidate] = [
+      .init(a: "A", b: "B", weight: 0.9),
+      .init(a: "C", b: "D", weight: 0.9),
+      .init(a: "A", b: "C", weight: 0.5),
+    ]
+    let communities = ["A": 1, "B": 1, "C": 2, "D": 2]
+    let existing: [GenreMapLayoutGraph.Candidate] = [
+      .init(a: "A", b: "B", weight: 0.9),
+      .init(a: "C", b: "D", weight: 0.9),
+      .init(a: "A", b: "C", weight: 0.5),
+    ]
+    let bridges = GenreMapLayoutGraph.interCommunityBridges(
+      candidates: candidates,
+      communityByGenre: communities,
+      existing: existing,
+    )
+    #expect(bridges.isEmpty, "heaviest crossing already in existing ⇒ no bridge")
+  }
+
+  /// Three communities ⇒ up to three community pairs ⇒ up to three
+  /// bridges, regardless of per-node top-N filtering (this is the
+  /// Phase-2-gate guarantee the brief asks for).
+  @Test
+  func `inter community bridges admits one bridge per community pair when none exists`() {
+    let candidates: [GenreMapLayoutGraph.Candidate] = [
+      // Intra: each community has one internal edge so partitions are stable.
+      .init(a: "A", b: "B", weight: 0.95),
+      .init(a: "C", b: "D", weight: 0.94),
+      .init(a: "E", b: "F", weight: 0.93),
+      // Crossings, two per pair so we can pick the heaviest.
+      .init(a: "A", b: "C", weight: 0.40),
+      .init(a: "B", b: "D", weight: 0.50),
+      .init(a: "A", b: "E", weight: 0.30),
+      .init(a: "B", b: "F", weight: 0.35),
+      .init(a: "C", b: "E", weight: 0.20),
+      .init(a: "D", b: "F", weight: 0.25),
+    ]
+    let communities = ["A": 1, "B": 1, "C": 2, "D": 2, "E": 3, "F": 3]
+    // Existing layout graph has only intra-community edges — every
+    // community pair starts out unconnected.
+    let existing: [GenreMapLayoutGraph.Candidate] = [
+      .init(a: "A", b: "B", weight: 0.95),
+      .init(a: "C", b: "D", weight: 0.94),
+      .init(a: "E", b: "F", weight: 0.93),
+    ]
+    let bridges = GenreMapLayoutGraph.interCommunityBridges(
+      candidates: candidates,
+      communityByGenre: communities,
+      existing: existing,
+    )
+    #expect(bridges.count == 3, "three community pairs ⇒ three bridges")
+    let bridgeKeys = Set(bridges.map { "\($0.a)|\($0.b)" })
+    #expect(bridgeKeys.contains("B|D"), "heaviest 1↔2 crossing")
+    #expect(bridgeKeys.contains("B|F"), "heaviest 1↔3 crossing")
+    #expect(bridgeKeys.contains("D|F"), "heaviest 2↔3 crossing")
+  }
+
   @Test
   func `low degree nodes keep their edges via the per node floor`() {
     // 5 strong + 1 weak link from a degree-1 node. With kNN-4 and an

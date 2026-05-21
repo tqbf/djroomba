@@ -303,17 +303,90 @@ struct GenreMapTransfernessTests {
     #expect(dampening == 1.0)
   }
 
-  /// Phase 2 thresholds are 0.20 / 0.45 (recalibrated from the plan's
-  /// headline 0.35 / 0.65 because the strand-count slot contributes 0
-  /// until Phase 3 ⇒ the composite ceiling is 0.75 instead of 1.0).
-  /// Phase 3 will revisit upward once the strand signal lights up.
+  /// The plan's headline classification is absolute (`0.35 / 0.65`).
+  /// Phase 2 keeps `classify(composite:)` as the canonical absolute-cut
+  /// classifier for Phase 3's eventual return — once the strand-count
+  /// slot stabilises the composite ceiling, absolute cuts become the
+  /// natural fit. Phase 2's *live* classification path is
+  /// `classifyByRank` (see the next test).
   @Test
-  func `classification: thresholds land at junction and transferStation cuts`() {
+  func `absolute classify pins the plans 0_35 0_65 cuts`() {
     #expect(GenreMapTransferness.classify(composite: 0.0) == .ordinary)
     #expect(GenreMapTransferness.classify(composite: GenreMapTransferness.junctionThreshold - 0.01) == .ordinary)
     #expect(GenreMapTransferness.classify(composite: GenreMapTransferness.junctionThreshold) == .junction)
     #expect(GenreMapTransferness.classify(composite: GenreMapTransferness.transferStationThreshold - 0.01) == .junction)
     #expect(GenreMapTransferness.classify(composite: GenreMapTransferness.transferStationThreshold) == .transferStation)
     #expect(GenreMapTransferness.classify(composite: 1.0) == .transferStation)
+  }
+
+  /// Relative-rank classification (Phase 2's live path). Top decile of
+  /// non-zero composites = transferStation, top quartile = junction.
+  /// Zero-composite nodes are always ordinary.
+  @Test
+  func `rank classify promotes top decile to transfer and top quartile to junction`() {
+    // Composites 0.01, 0.02, ..., 0.20 over 20 nodes ⇒ 90th percentile
+    // ≈ 0.181, 75th ≈ 0.1525. So nodes 0.19, 0.20 land transferStation,
+    // 0.16…0.18 land junction (5 nodes total junction band, top 25%).
+    var compositeByNode = [String: Double]()
+    for index in 1 ... 20 {
+      compositeByNode["N\(index)"] = Double(index) * 0.01
+    }
+    let kindByNode = GenreMapTransferness.classifyByRank(
+      compositeByNode: compositeByNode
+    )
+    let transfers = kindByNode.filter { $0.value == .transferStation }.keys.sorted()
+    let junctions = kindByNode.filter { $0.value == .junction }.keys.sorted()
+    // Top decile of 20 non-zero ⇒ at least 2 transfer stations (allow
+    // a single off-by-one from the linear-interpolated percentile).
+    #expect(transfers.count >= 2 && transfers.count <= 3, "got \(transfers.count) transfers")
+    // Top quartile of 20 non-zero ⇒ at least 5 junction-band nodes
+    // (junction = junctionRank..transferStationRank, so junctions
+    // exclude the transferStations).
+    let totalUpperQuartile = transfers.count + junctions.count
+    #expect(totalUpperQuartile >= 5)
+    // The strongest two scores MUST land in the transferStation band.
+    #expect((kindByNode["N20"] ?? .ordinary) == .transferStation)
+    #expect((kindByNode["N19"] ?? .ordinary) == .transferStation)
+  }
+
+  /// Edge case: when every non-zero composite is the same value, rank
+  /// classification still surfaces them in the upper band — the linear
+  /// percentile interpolation makes the cuts hit that single value.
+  @Test
+  func `rank classify handles flat composite distributions deterministically`() {
+    var compositeByNode = [String: Double]()
+    for index in 0 ..< 10 {
+      compositeByNode["A\(index)"] = 0.0
+    }
+    for index in 0 ..< 5 {
+      compositeByNode["B\(index)"] = 0.3
+    }
+    let kindByNode = GenreMapTransferness.classifyByRank(
+      compositeByNode: compositeByNode
+    )
+    for index in 0 ..< 10 {
+      #expect((kindByNode["A\(index)"] ?? .junction) == .ordinary)
+    }
+    // The 5 non-zero nodes all tie at 0.3; cuts fall on that value, so
+    // every B_i is promoted. The exact split between junction and
+    // transferStation isn't fixed (the percentile lands on the same
+    // value either way) — what we pin is that none of them are ordinary.
+    for index in 0 ..< 5 {
+      #expect((kindByNode["B\(index)"] ?? .ordinary) != .ordinary)
+    }
+  }
+
+  /// Zero-composite nodes never get promoted regardless of how many
+  /// other nodes there are.
+  @Test
+  func `rank classify never promotes a zero composite node`() {
+    var compositeByNode = ["Zero": 0.0]
+    for index in 1 ... 20 {
+      compositeByNode["N\(index)"] = Double(index) * 0.01
+    }
+    let kindByNode = GenreMapTransferness.classifyByRank(
+      compositeByNode: compositeByNode
+    )
+    #expect((kindByNode["Zero"] ?? .junction) == .ordinary)
   }
 }

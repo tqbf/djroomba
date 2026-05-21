@@ -12,8 +12,9 @@ import Foundation
 ///   bridge between neighbourhoods.
 ///
 /// Thresholds (composite transferness in `[0, 1]`): `<0.35` ordinary,
-/// `<0.65` junction, `≥0.65` transfer station. Tuned to the live-library
-/// distribution; pinned in `GenreMapTransfernessTests`.
+/// `<0.65` junction, `≥0.65` transfer station. Pinned in
+/// `GenreMapTransfernessTests`; matches the plan's headline values
+/// on the back of the Phase-2-gate substrate widening (`interCommunityBridges`).
 enum GenreMapNodeKind: Int, Equatable, Sendable, CaseIterable {
   case ordinary = 0
   case junction = 1

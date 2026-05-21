@@ -34,8 +34,16 @@ import Foundation
 /// high betweenness, but every neighbour in the same community — would
 /// score as transfer stations purely for being big.
 ///
-/// Classification thresholds: `<0.35` ordinary, `<0.65` junction, `≥0.65`
-/// transfer station. Pinned in tests.
+/// Classification: Phase 2 uses **relative-rank** bands on the per-
+/// rebuild composite distribution — top decile of non-zero composites
+/// = transferStation, top quartile = junction — because the strand-
+/// count + membership-entropy slots are zero at Phase 2 and the
+/// composite's mathematical ceiling stays at 0.75 (well below the
+/// plan's absolute cuts). The absolute classifier (`classify(composite:)`)
+/// remains pinned at the plan's `0.35 / 0.65` and will become the
+/// canonical path again once Phase 3 lights up the strand slot. See
+/// `plans/genre-metro-map.md` Phase 2 step 4's Phase-2-gate revision
+/// for the reasoning.
 ///
 /// Everything here is `nonisolated` + pure: deterministic given identical
 /// inputs, unit-testable end-to-end without a layout pass.
@@ -55,26 +63,34 @@ enum GenreMapTransferness {
     var kindByNode: [String: GenreMapNodeKind]
   }
 
-  /// Thresholds for `kindByNode`. Public so the tests can pin them.
+  /// Absolute-cut classification thresholds — kept as the canonical
+  /// reference because the plan's headline values land here and Phase 3
+  /// will revisit when the strand-count slot lights up. Phase 2 does
+  /// NOT classify using these directly: see `classify(composite:rank:)`
+  /// and the rank-based `transferStationRank` / `junctionRank` bands.
+  static let junctionThreshold = 0.35
+  static let transferStationThreshold = 0.65
+
+  /// **Relative-rank classification bands** — the spec is "absolute"
+  /// only assuming the full composite formula contributes (membership-
+  /// entropy + strand-count + the three computed inputs). Phase 2 runs
+  /// with two of the five slots at zero (strand-count fills in Phase 3,
+  /// membership-entropy is deferred per the plan), so the composite's
+  /// mathematical ceiling is **0.75**, not 1.0; absolute cuts at
+  /// 0.35 / 0.65 land 0 junctions / 0 transfer stations on the real
+  /// library even with the Phase-2-gate substrate widening.
   ///
-  /// The plan's headline values are 0.35 / 0.65, written assuming **all
-  /// five** composite inputs (betweenness + neighbour-entropy + cross-
-  /// fraction + membership-entropy + strand-count) contribute. Phase 2
-  /// runs with **membership-entropy = 0** (soft community detection
-  /// deferred) and **strand-count = 0** (Phase 3 fills it), so the
-  /// composite's mathematical ceiling is 0.75, not 1.0. The real-
-  /// library composite distribution stays well below 0.35 even for
-  /// genuine bridge nodes — Indie's neighbours all live in the same
-  /// Louvain community at γ=0.85, so its inputs read 0/0/0 even though
-  /// it visibly bridges Alt-Indie / Folk / Country sub-spaces.
-  ///
-  /// Phase 2 ships with **0.20 / 0.45**, calibrated to the live library
-  /// so a handful of genuine bridge nodes surface as junction /
-  /// transfer-station kinds. Phase 3 will revisit when the strand slot
-  /// contributes; the plan's original 0.35 / 0.65 numbers become the
-  /// natural fit once the composite reads the strand-count signal.
-  static let junctionThreshold = 0.20
-  static let transferStationThreshold = 0.45
+  /// Relative-rank is the documented Phase-3 fallback per the carry-
+  /// forward at the bottom of the Phase 2 PROGRESS entry: top decile
+  /// of non-zero composites = transferStation, top quartile = junction.
+  /// Calibrated to the per-rebuild distribution so it's robust across
+  /// libraries with different bridge-density profiles — a library
+  /// with one giant connected blob still surfaces its strongest
+  /// bridges; a library with many small islands still surfaces them
+  /// in proportion. Phase 3 will revisit (likely back to absolute
+  /// cuts) once the strand slot stabilises the composite ceiling.
+  static let transferStationRank = 0.90
+  static let junctionRank = 0.75
 
   /// Generic-giant dampening: when a node's library weight is **high**
   /// (top of the per-genre weight distribution) but its multi-community
@@ -140,10 +156,8 @@ enum GenreMapTransferness {
 
     var compositeByNode = [String: Double]()
     var inputsByNode = [String: GenreMapTransfernessInputs]()
-    var kindByNode = [String: GenreMapNodeKind]()
     compositeByNode.reserveCapacity(genreNames.count)
     inputsByNode.reserveCapacity(genreNames.count)
-    kindByNode.reserveCapacity(genreNames.count)
 
     for genre in genreNames {
       let betweenness = betweennessByGenre[genre] ?? 0
@@ -175,8 +189,9 @@ enum GenreMapTransferness {
         strandCount: strand,
         dampening: dampening,
       )
-      kindByNode[genre] = classify(composite: composite)
     }
+
+    let kindByNode = classifyByRank(compositeByNode: compositeByNode)
 
     return Result(
       compositeByNode: compositeByNode,
@@ -185,7 +200,56 @@ enum GenreMapTransferness {
     )
   }
 
-  /// Classify a composite score into a `GenreMapNodeKind`.
+  /// Relative-rank classification: top `1 − transferStationRank` of the
+  /// non-zero composite distribution = transferStation, top
+  /// `1 − junctionRank` = junction. Nodes with composite = 0 are always
+  /// ordinary (they have no incident layout edges or live entirely
+  /// inside one community). The empty-graph / all-zero case lands
+  /// every node as ordinary by construction.
+  static func classifyByRank(
+    compositeByNode: [String: Double]
+  ) -> [String: GenreMapNodeKind] {
+    var kindByNode = [String: GenreMapNodeKind]()
+    kindByNode.reserveCapacity(compositeByNode.count)
+    // Default every node to ordinary; promote by rank below.
+    for genre in compositeByNode.keys {
+      kindByNode[genre] = .ordinary
+    }
+    let nonZero = compositeByNode.values.filter { $0 > 0 }.sorted()
+    guard nonZero.count >= 2 else { return kindByNode }
+    let transferCut = percentile(nonZero, fraction: transferStationRank)
+    let junctionCut = percentile(nonZero, fraction: junctionRank)
+    for (genre, score) in compositeByNode {
+      if score >= transferCut {
+        kindByNode[genre] = .transferStation
+      } else if score >= junctionCut {
+        kindByNode[genre] = .junction
+      }
+    }
+    return kindByNode
+  }
+
+  /// Linear-interpolated percentile lookup. `sortedAscending` must be
+  /// pre-sorted ascending. `fraction` in `[0, 1]`.
+  static func percentile(
+    _ sortedAscending: [Double],
+    fraction: Double,
+  ) -> Double {
+    guard !sortedAscending.isEmpty else { return 0 }
+    let clamped = max(0, min(1, fraction))
+    let position = clamped * Double(sortedAscending.count - 1)
+    let lowerIndex = Int(position.rounded(.down))
+    let upperIndex = Int(position.rounded(.up))
+    let lower = sortedAscending[lowerIndex]
+    let upper = sortedAscending[upperIndex]
+    let t = position - Double(lowerIndex)
+    return lower + (upper - lower) * t
+  }
+
+  /// Classify a composite score against the absolute thresholds — kept
+  /// for the `0.35 / 0.65` test pin and Phase 3's planned return to
+  /// absolute cuts once the strand-count slot stabilises the composite
+  /// ceiling. Phase 2's live classification uses `classifyByRank`.
   static func classify(composite: Double) -> GenreMapNodeKind {
     if composite >= transferStationThreshold {
       return .transferStation
