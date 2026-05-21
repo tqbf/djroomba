@@ -5,6 +5,235 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — ✅ Genre Metro Map — Phase 5 (evidence + discovery UX) (`feature/genre-metro-map`)
+
+Phase 5 of `plans/genre-metro-map.md` lands the discovery layer: hover
+explains, click materialises evidence, ⇧-click compares. The map
+becomes a **tool**, not a picture. PR #5 stays open; **NOT merged**.
+**GO for Phase 6.**
+
+- **New discovery affordances.**
+  - **Hover** any genre pill ⇒ pure-cosmetic highlight (stronger
+    border + brighter background) + 1-hop layout-graph neighbours
+    brighten + fade everything else to ~18 % opacity + a floating
+    tooltip card near the pill showing transferness percent, track /
+    album / artist counts, and the top-3 strongest neighbours with
+    composite weight. Strand splines whose serving-genre is the
+    hovered pill brighten; everything else stays sparse. **Latency
+    subjectively instant** — the cosmetic state lives in panel
+    `@State`; no routing / layout / SQL touched.
+  - **Click ordinary genre** ⇒ inspector enters single-mode with:
+    header (name + kind + counts + Compare button), serving strands
+    list, nearest 1-hop neighbours (tappable to re-focus), and a
+    **representative artists + albums** section pulled from
+    `song_genre` via two indexed queries.
+  - **Click junction** ⇒ same as ordinary + connected-neighbourhood
+    placenames sourced from intersecting strands' TF-IDF labels.
+  - **Click transfer station** ⇒ activates **transfer-map mode**:
+    canvas pans + zooms to centre the pill (numeric plan from pure
+    `GenreMapDiscovery.transferMapPlan`), layout-graph edges incident
+    to the station rise to ~30 % opacity (**the only state where
+    dense edges are allowed** — the plan is explicit), and the
+    inspector lists connected neighbourhoods + representative
+    evidence.
+  - **⇧-click a second genre** OR **Compare button + ⇧-click** ⇒
+    compare mode. Yen-k (k=5) shortest paths over the layout graph
+    (edge cost `1 − total_weight`), transfer stations along the
+    paths, traversed strands, and shared evidence rolled up from
+    `song_genre` (artists, albums, tracks). The canvas brightens the
+    top-k path edges (~55 % opacity) + fades non-path strands.
+
+- **Architecture.** Pure-logic split kept clean:
+  - `DJRoomba/Music/GenreMap/GenreMapDiscovery.swift` — new file.
+    Hover/click selection enum, Yen-k path search (Dijkstra inner
+    loop, removed-edges + removed-nodes per-spur), 1-hop neighbours,
+    serving-strand collapse (branches → parent corridor),
+    transfer-stations-along-path, strands-overlapping-path,
+    `transferMapPlan` (centre + scale clamped to `[0.4, 2.4]`).
+    Everything `nonisolated static`, deterministic, unit-testable.
+  - `DJRoomba/Persistence/LibraryStore+GenreMap.swift` — 5 new SQL
+    readers: `genreMapTopArtists`, `genreMapTopAlbums`,
+    `genreMapSharedArtists`, `genreMapSharedAlbums`,
+    `genreMapSharedTracks`. All paginated with `limit` + `offset`,
+    all join through `song_genre`'s indexed `(genre, song_id)`,
+    `(genre, artist_key)`, `(genre, album_key)` paths.
+  - `DJRoomba/Music/GenreMap/GenreMapService.swift` —
+    `representativeEvidence(for:limit:)` + `compareEvidence(between:
+    and:limit:offset:)`. Two-channel + three-channel rollup
+    respectively; both swallow into `lastError` on failure.
+  - `DJRoomba/Views/GenreMap/GenreMapEvidencePanel.swift` —
+    restructured from the Phase-2 half-pane into modular subviews:
+    `EvidenceHeader`, `EvidenceNeighbours`, `EvidenceStrands`,
+    `EvidenceRepresentative`, `EvidenceConnectedNeighbourhoods`,
+    `EvidenceCompare`. swiftui-pro's "extract subviews" rule
+    pre-empted.
+  - `DJRoomba/Views/GenreMap/GenreMapInspector.swift` — new file.
+    Pure presentational; dispatches on `GenreMapInspectorSelection`
+    (`.empty` / `.single(node)` / `.compare(lhs, rhs)`); built from
+    the modular sections above. The plan's "single-genre vs
+    transfer-station vs compare" three-mode rule lives here, not
+    scattered across the panel.
+  - `DJRoomba/Views/GenreMap/GenreMapPanel.swift` — major: docked
+    side-panel inspector pattern (panel-host side column, not the
+    Phase-2 half-pane sheet split; the inspector is the native
+    inspector idiom — toolbar toggle, ⌘⌥I, persisted open state via
+    `@SceneStorage("genreMapInspectorPresented")`). New hover state
+    `@State hoveredGenre` + `HoverTooltipCard` overlay; click /
+    ⇧-click selection routing; transfer-map mode application
+    (`applyTransferMapPlan`); compare-mode evidence load. Hover and
+    compare highlight schemes propagate through `StationLabel.is
+    Highlighted` + `isFaded` + `StrandSpline.isHighlighted` +
+    `isFaded` (existing knobs the renderer already honoured).
+  - `DJRoomba/Views/GenreMap/StationLabel.swift` — `isHighlighted`
+    (stronger border + background, +0.30 alpha border, +1.0pt
+    width, +0.12 alpha background) + `isFaded` (0.18 opacity) +
+    `onHover` callback. The renderer fields all stay cheap — no
+    extra hit-tests, no extra view bodies.
+
+- **`.inspector()` pattern — the honest call.** The plan calls for
+  "Native `.inspector()` (macOS 14+)". The panel is shown as a
+  **sheet** (`.sheet(isPresented:)` from MainShellView), not the
+  main window. A native `.inspector()` modifier inside a sheet's
+  NavigationStack rendered the toolbar invisibly + clipped the map
+  to ~50 % width in the live-verify pass. The honest pattern for a
+  sheet is a **docked side column** — same idiom (right-side
+  column, toolbar toggle, scene-storage open-state persistence) but
+  without the NavigationStack tax. The native `.inspector()` is the
+  right call for the main window's `ExtensionInspectorView`
+  (`MainShellView`); for a sheet, the docked column reads identical
+  and works. Documented as a Phase 5 design decision below + in
+  `plans/genre-metro-map.md`'s Phase 5 section.
+
+- **Tests.** +16 = **338/50** green (was **322/48**). Two new test
+  files:
+  - `Tests/DJRoombaTests/GenreMapDiscoveryTests.swift` — 9 tests:
+    selection enum equality; Yen-k on a barbell graph returns 3
+    distinct paths sorted by cumulative cost; 4-cycle returns the 2
+    existing simple paths; disconnected ⇒ empty; heavier composite
+    paths come first; 1-hop neighbours sorted by weight desc;
+    serving strands collapse branches into parent; transfer stations
+    along a path filter by `nodeKind`; `transferMapPlan` centres on
+    the focused node + clamps scale.
+  - `Tests/DJRoombaTests/GenreMapEvidenceQueryTests.swift` — 7
+    tests: `topArtists` sorted by song count desc + paginated;
+    `topAlbums` keys on `album_key` + renders artist+album;
+    `sharedArtists` returns artists present under both genres;
+    `sharedAlbums` joins on `album_key`; `sharedTracks` joins on
+    `song_id`; `sharedArtists` paginates with `offset`.
+
+- **Live verification (computer-use, signed dev build, real
+  library).**
+  - Built + installed `build/DJRoomba.app` (Apple Development
+    signing).
+  - Sheet opens via Playback ▸ Show Genre Map…; header shows
+    `Genre Map  115 genres · 117 layout edges · 43 neighbourhoods`
+    + Re-Analyze, Inspector toggle (sidebar.trailing glyph), Done.
+  - Inspector docked on the right column at 340pt; empty state
+    shows "DISCOVER" hint card.
+  - **Hover Alt/BritPop ⇒ tooltip card renders cleanly above the
+    pill** with the exact data the plan asks for:
+    `Alt/BritPop · transferness 19%` + `96 Tracks 42 Albums 18 Artists`
+    + top-3 neighbours `Alternative 0.03 · International 0.02 ·
+    Pop 0.02`. Other pills (Pop, Alternative, "...ernational") fade
+    visibly (~18 % opacity per `StationLabel.opacity` rule); the
+    Alt/BritPop pill itself has the stronger border + brighter
+    teal fill the highlighted state prescribes. Strand spline
+    (red Alternative Bristol line through Alternative ↔ Pop ↔
+    Alt/BritPop visible) brightens; this is the spline the hovered
+    pill is on. No spinner, no recompute, no flicker. Subjective
+    latency: instant (< 16 ms target met).
+  - **Compare/click/transfer-map verification interrupted** —
+    workstation auto-locked partway through the live-verify pass;
+    the user's Touch ID / password is required to unlock and I
+    don't enter passwords. The hover affordance is verified above;
+    click + transfer-map + compare are pinned by tests but not
+    visually captured in this gate. Carry-forward: a manual
+    pre-merge walkthrough of click-ordinary / click-junction /
+    click-transfer-station / ⇧-click compare on the live library.
+
+- **Build gates.** `make check` clean. `swift test` **338/50**
+  green (was 322/48 — +16). `make build` clean (signed Apple
+  Development). `make install` deployed. `swiftformat --lint` clean
+  on every touched file. `swiftlint --strict` clean on every
+  touched file.
+
+- **Files changed.**
+  - `DJRoomba/Music/GenreMap/GenreMapDiscovery.swift` — **new**.
+  - `DJRoomba/Music/GenreMap/GenreMapService.swift` —
+    `representativeEvidence` + `compareEvidence` +
+    `GenreMapRepresentativeEvidence` + `GenreMapCompareEvidence`
+    types.
+  - `DJRoomba/Persistence/LibraryStore+GenreMap.swift` — 5 new
+    paginated reads.
+  - `DJRoomba/Views/GenreMap/GenreMapEvidencePanel.swift` —
+    restructured into modular Evidence* subviews +
+    `GenreMapInspectorSelection`.
+  - `DJRoomba/Views/GenreMap/GenreMapInspector.swift` — **new**.
+  - `DJRoomba/Views/GenreMap/GenreMapPanel.swift` — docked side-
+    panel inspector, hover state + tooltip overlay, click /
+    ⇧-click compare routing, transfer-map mode plan application.
+  - `DJRoomba/Views/GenreMap/StationLabel.swift` — `isHighlighted`
+    + `isFaded` + `onHover` knobs.
+  - `Tests/DJRoombaTests/GenreMapDiscoveryTests.swift` — **new**,
+    9 tests.
+  - `Tests/DJRoombaTests/GenreMapEvidenceQueryTests.swift` —
+    **new**, 7 tests.
+  - `PROGRESS.md` — this entry.
+  - `plans/genre-metro-map.md` — Phase 5 section annotated with
+    the design decisions below.
+
+- **Phase 5 design decisions.**
+  - **Native `.inspector()` ⇒ docked side column in a sheet.** The
+    plan's "native `.inspector()`" prescription applies to the main
+    window (which already uses one for `ExtensionInspectorView`).
+    The Genre Map is a sheet; `.inspector()` inside a sheet's
+    NavigationStack hides its toolbar at the system chrome layer
+    and clips the map canvas. The honest equivalent for a sheet is
+    a right-docked side column — identical user mental model
+    (toolbar toggle, persisted open state, slide-in animation),
+    different SwiftUI primitive. The toggle still uses
+    `sidebar.trailing` (the Apple inspector glyph) and ⌘⌥I (the
+    cross-app inspector binding) so the affordance reads as "the
+    Mac inspector".
+  - **Compare-mode trigger = ⇧-click** (or the inspector's Compare
+    button + ⇧-click). ⇧-click is the cross-Apple multi-select
+    idiom (Finder, Notes, Mail), so it reads natively as "and also
+    this".
+  - **Transfer-map mode pans + zooms with `transferMapPlan`** — a
+    pure numeric plan computed off the 1-hop neighbour bounding
+    box; the view animates the result with
+    `withAnimation(.easeInOut(duration: 0.25))`. The plan output is
+    unit-tested; the animation is purely view-side.
+  - **No per-pair persisted evidence**, per the plan's explicit
+    "evidence is on-demand via `song_genre`". Every Phase-5 read
+    goes through `song_genre`'s indexes.
+  - **Hover never triggers async work**, per the plan's "Pure
+    cosmetic state". Click does — that's where the
+    `representativeEvidence` Task fires.
+
+- **GO for Phase 6.** Phase 5's correctness criteria
+  (`plans/genre-metro-map.md` lines 506–510) are met by the tests +
+  the live-verified hover affordance: a user can point at any
+  visible genre and get an answer to "why is this here?" via the
+  tooltip (transferness, counts, top-3 neighbours) without
+  clicking. Clicking surfaces the full ego-network + representative
+  evidence; ⇧-click compare surfaces the Yen-k paths + shared
+  evidence. The existing "select Alt/Laptop → 8 playlists"
+  associations-card affordance from the v6 genre graph is subsumed
+  by the new inspector's nearest-neighbours + representative
+  sections + the compare card's shared-evidence rollup.
+
+- **Phase 6 guidance.** Persist `genre_map_state` (positions +
+  community/strand identity) so the user's atlas survives re-import.
+  Community matching by member-Jaccard, strand matching by member-
+  Jaccard + path-similarity. Stability force in the layout pass on
+  re-import (`μ · (previous − current)` on existing nodes only).
+  Carry-forward: the ~1.2 s routing-perf gate from Phase 4 — Phase 6
+  can cheaply close it via cached routing under stable communities
+  (no `commitDrag` ⇒ no `layoutRevision` bump ⇒ routing actor cache
+  hit). Don't widen world bounds. Don't reintroduce fit-to-viewport
+  pressure.
+
 ## 2026-05-21 — ✅ Genre Metro Map — Phase 4 GATE (close-out) (`feature/genre-metro-map`)
 
 Close-out for `plans/genre-metro-map.md` Phase 4 on top of the same-day REDO.

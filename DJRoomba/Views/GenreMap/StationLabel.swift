@@ -50,9 +50,19 @@ struct StationLabel: View {
   /// multi-strand marker Phase 2 shipped — strand colours now exist.
   var strandTickColours = [Color]()
 
+  /// Phase 5 hover/discovery brightening — pure cosmetic; never
+  /// observed by the layout pipeline. Highlighted ⇒ stronger border +
+  /// background; faded ⇒ low opacity (~6 %). Default ⇒ baseline.
+  var isHighlighted = false
+  var isFaded = false
+
   /// The label is wrapped in a `Button` so accessibility + selection
   /// behaviour are native; the action is set by the parent.
   var onTap: () -> Void
+  /// Phase 5 hover affordance — fires when the cursor enters / exits
+  /// the composed pill. Pure cosmetic state owned by the parent panel
+  /// (so a hover never recomputes layout or routing).
+  var onHover: ((Bool) -> Void)?
 
   var body: some View {
     VStack(spacing: 2) {
@@ -69,6 +79,10 @@ struct StationLabel: View {
     }
     .contentShape(Rectangle())
     .onTapGesture(perform: onTap)
+    .onHover { isInside in
+      onHover?(isInside)
+    }
+    .opacity(isFaded ? 0.18 : 1.0)
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(accessibilityDescription)
     .accessibilityAddTraits(.isButton)
@@ -147,27 +161,33 @@ struct StationLabel: View {
   }
 
   private var borderOpacity: Double {
-    switch node.nodeKind {
-    case .ordinary: 0.45
-    case .junction: 0.55
-    case .transferStation: 0.85
-    }
+    let base =
+      switch node.nodeKind {
+      case .ordinary: 0.45
+      case .junction: 0.55
+      case .transferStation: 0.85
+      }
+    return isHighlighted ? min(1, base + 0.30) : base
   }
 
   private var borderWidth: CGFloat {
-    switch node.nodeKind {
-    case .ordinary,
-         .junction: 1.0
-    case .transferStation: 1.5
-    }
+    let base: CGFloat =
+      switch node.nodeKind {
+      case .ordinary,
+           .junction: 1.0
+      case .transferStation: 1.5
+      }
+    return isHighlighted ? base + 1.0 : base
   }
 
   private var backgroundOpacity: Double {
-    switch node.nodeKind {
-    case .ordinary: 0.06
-    case .junction: 0.08
-    case .transferStation: 0.12
-    }
+    let base =
+      switch node.nodeKind {
+      case .ordinary: 0.06
+      case .junction: 0.08
+      case .transferStation: 0.12
+      }
+    return isHighlighted ? base + 0.12 : base
   }
 
   private var accessibilityDescription: String {

@@ -2,28 +2,28 @@ import SwiftUI
 
 // MARK: - GenreMapPanel
 
-/// Phase 1 (`plans/genre-metro-map.md`) of the genre **metro map** — a
-/// sibling to the v6 `GenreGraphPanel`. Shown in a sheet from the
-/// Playback menu (`Show Genre Map…`). Renders geography only:
+/// Phase 1+2+3+4+5 (`plans/genre-metro-map.md`) of the genre **metro map**
+/// — a sibling to the v6 `GenreGraphPanel`. Shown in a sheet from the
+/// Playback menu (`Show Genre Map…`).
 ///
-/// - subtle community hulls
-/// - layout-graph backbone at ≤10 % opacity
-/// - station pills sized by per-genre weight
+/// Phase 5 layering on top of the Phase 1–4 substrate:
 ///
-/// No metro strands, no transferness ticks, no dense hover edges — those
-/// are Phases 2/3/5.
+/// - **Hover** a genre ⇒ pure-cosmetic highlight + neighbour brighten +
+///   serving-strand brighten + 1-hop neighbours pop, with a hover
+///   tooltip overlay near the pill. Never recomputes layout / routing.
+/// - **Click** a genre ⇒ inspector enters single-genre mode. Ordinary
+///   = ego network + representative artists/albums. Junction = above +
+///   connected-neighbourhood placenames. Transfer station = pan + zoom
+///   to centre the pill, raise the layout edges to ≤20 % (the only
+///   state where dense edges are allowed), and the inspector lists
+///   serving strands + next 3–5 stations along each.
+/// - **Shift-click** a second genre ⇒ inspector enters compare mode:
+///   Yen-k paths over the layout graph + shared evidence (artists,
+///   albums, tracks).
 ///
-/// **Performance posture** (the plan calls it out explicitly):
-/// - The constrained force pass is run **once** on rebuild and then
-///   freezes. Pan + zoom only transform the viewport; the layout doesn't
-///   re-tick on either gesture.
-/// - Drag pins the dragged node and runs the cheap neighbour-relaxation
-///   pass from `GenreMapForceLayout.relaxDragNeighbours` — bounded
-///   iterations, single-hop scope, no global resettle.
-/// - Edges + hulls are drawn via SwiftUI `Canvas` (one redraw per
-///   viewport / drag change, not many small views per frame). Station
-///   labels stay as SwiftUI views so accessibility / hit-testing / type
-///   metrics are native.
+/// The inspector is a native macOS 14 `.inspector()` column hosted by
+/// the sheet. Toolbar toggle + scene-storage persistence match the
+/// existing `MainShellView` ExtensionInspector pattern.
 struct GenreMapPanel: View {
 
   // MARK: Internal
@@ -33,30 +33,35 @@ struct GenreMapPanel: View {
       header
       Divider()
       HStack(spacing: 0) {
-        content
-        if
-          let selectedGenre, let model = service.model,
-          let node = model.nodes.first(where: { $0.genre == selectedGenre })
-        {
+        VStack(spacing: 0) {
+          content
           Divider()
-          GenreMapEvidencePanel(
-            node: node,
-            model: model,
-            hullColour: Self.communityColour(for: node.communityID),
-            evidence: evidence,
-            isLoadingEvidence: isLoadingEvidence,
-            onDismiss: dismissEvidence,
+          footer
+        }
+        if inspectorPresented {
+          Divider()
+          GenreMapInspector(
+            selection: inspectorSelection,
+            model: service.model ?? emptyModel,
+            representativeEvidence: representativeEvidence,
+            isLoadingRepresentative: isLoadingRepresentative,
+            comparePaths: comparePaths,
+            compareEvidence: compareEvidence,
+            isLoadingCompare: isLoadingCompare,
+            onSelectNeighbour: selectByName,
+            onRequestCompare: beginCompare,
+            onExitCompare: endCompare,
           )
+          .frame(width: 340)
+          .background(Color(nsColor: .windowBackgroundColor))
+          .transition(.move(edge: .trailing).combined(with: .opacity))
         }
       }
-      Divider()
-      footer
     }
+    .animation(.easeInOut(duration: 0.18), value: inspectorPresented)
     .frame(minWidth: 720, minHeight: 540)
-    .frame(idealWidth: 980, idealHeight: 720)
+    .frame(idealWidth: 1140, idealHeight: 760)
     .task {
-      // Show a previously-rebuilt map immediately, without forcing a
-      // fresh recompute.
       await controller.genreMapService.load(
         measureLabel: GenreMapService.defaultMeasureLabel
       )
@@ -128,7 +133,6 @@ struct GenreMapPanel: View {
         x: world.x * fitted.scale + fitted.translation.width,
         y: world.y * fitted.scale + fitted.translation.height,
       )
-      // Then the user transform.
       let centred = CGPoint(
         x: (scaled.x - 0) * scale + 0,
         y: (scaled.y - 0) * scale + 0,
@@ -155,52 +159,91 @@ struct GenreMapPanel: View {
     }
   }
 
+  private struct EdgeKey: Hashable {
+    var a: String
+    var b: String
+  }
+
   @Environment(MusicController.self) private var controller
   @Environment(\.dismiss) private var dismiss
 
-  /// Viewport state. `scale` < 1 ⇒ zoomed out, > 1 ⇒ zoomed in. `offset`
-  /// is the pan in screen pixels. Both are local to the panel — the
-  /// pipeline never observes them, so panning is a pure render-time
-  /// transform (no physics re-tick on pan).
   @State private var scale: CGFloat = 1.0
   @State private var offset = CGSize.zero
   @State private var dragging: DragState?
-  /// `true` once the panel has applied the per-rebuild **default
-  /// presentation** (Phase-3-gate 2026-05-20): centre on the heaviest
-  /// community at scale=1.0×, NOT fit-to-view. Reset by re-Analyze and
-  /// when the model's node count changes (a fresh rebuild). Fit-to-view
-  /// is opt-in via the Fit toolbar button / Cmd-9.
   @State private var centredOnce = false
-  /// Opt-in fit-to-view: set by the Fit toolbar button (Cmd-9). When
-  /// `true`, `baseTransform` computes a scale-and-translate that lands
-  /// every node inside the pane; when `false` (default), the transform
-  /// is identity-scale centred on `model.defaultCentre`. Reset on
-  /// re-Analyze / node-count change.
   @State private var fitRequested = false
-  /// Phase 2's click-to-evidence selection. Set by tapping a transfer-
-  /// station or junction pill (ordinary pills are no-op for now), cleared
-  /// by tapping outside the panel (background) or pressing the panel's
-  /// close button. Drag MUST NOT spuriously set this — `StationLabel`'s
-  /// `Button(action:)` only fires for a click, not a drag, so the gesture
-  /// composition below keeps the two affordances separate.
+  /// Phase 5 selection. `selectedGenre` is the focused genre; in
+  /// compare-mode `compareSecondGenre` is set and the inspector shows
+  /// the compare card.
   @State private var selectedGenre: String?
-  @State private var evidence: GenreMapEvidenceOnDemand?
-  @State private var isLoadingEvidence = false
-  @State private var evidenceTask: Task<Void, Never>?
-  /// Phase 3 strand hover (`plans/genre-metro-map.md` step 8). When set,
-  /// the corresponding strand renders opaque + member stations highlight,
-  /// every other strand fades to ~6 % opacity. Cleared on hover-exit.
-  /// The full Phase-5 discovery UX adds two-strand-compare + click-pin;
-  /// Phase 3 ships the minimal affordance for visual verification.
+  @State private var compareSecondGenre: String?
+  /// `true` while the panel is waiting for a ⇧-click to pick the
+  /// compare partner. The cursor doesn't change (avoid OS contention)
+  /// — instead the inspector header swaps to a "pick another genre"
+  /// hint.
+  @State private var comparePending = false
+  /// Phase 5 cosmetic-only hover state. Hovering a genre populates
+  /// this; never triggers an evidence load or a recompute.
+  @State private var hoveredGenre: String?
   @State private var hoveredStrandID: Int?
-  /// Gesture deltas applied during an active pinch / pan, committed back
-  /// onto `scale` / `offset` at gesture end (the standard SwiftUI
-  /// gesture composition).
+
+  /// Phase 5 evidence rollups. Loaded on demand by the panel's
+  /// `Task`s; the inspector reads.
+  @State private var representativeEvidence: GenreMapRepresentativeEvidence?
+  @State private var isLoadingRepresentative = false
+  @State private var representativeTask: Task<Void, Never>?
+  @State private var comparePaths = [GenreMapDiscovery.Path]()
+  @State private var compareEvidence: GenreMapCompareEvidence?
+  @State private var isLoadingCompare = false
+  @State private var compareTask: Task<Void, Never>?
+
+  @SceneStorage("genreMapInspectorPresented") private var inspectorPresented = true
+
   @GestureState private var gestureScale: CGFloat = 1.0
   @GestureState private var gestureOffset = CGSize.zero
 
   private var service: GenreMapService {
     controller.genreMapService
+  }
+
+  /// `true` ⇒ a transfer-station has been clicked and the canvas is
+  /// in transfer-map mode (denser edges allowed, pill centred).
+  private var transferMapMode: Bool {
+    guard
+      compareSecondGenre == nil,
+      let selectedGenre, let model = service.model,
+      let node = model.nodes.first(where: { $0.genre == selectedGenre })
+    else { return false }
+    return node.nodeKind == .transferStation
+  }
+
+  private var inspectorSelection: GenreMapInspectorSelection {
+    guard let model = service.model else { return .empty }
+    if
+      let selectedGenre, let second = compareSecondGenre,
+      let lhs = model.nodes.first(where: { $0.genre == selectedGenre }),
+      let rhs = model.nodes.first(where: { $0.genre == second })
+    {
+      return .compare(lhs, rhs)
+    }
+    if
+      let selectedGenre,
+      let node = model.nodes.first(where: { $0.genre == selectedGenre })
+    {
+      return .single(node)
+    }
+    return .empty
+  }
+
+  /// Fallback empty model so the inspector can always be present even
+  /// before the first build finishes (it shows the `.empty` state).
+  private var emptyModel: GenreMapModel {
+    GenreMapModel(
+      nodes: [],
+      layoutEdges: [],
+      communities: [],
+      worldBounds: .zero,
+    )
   }
 
   private var header: some View {
@@ -227,6 +270,14 @@ struct GenreMapPanel: View {
       }
       .labelStyle(.titleAndIcon)
       .disabled(service.isAnalyzing)
+      Button {
+        inspectorPresented.toggle()
+      } label: {
+        Label("Inspector", systemImage: "sidebar.trailing")
+      }
+      .labelStyle(.iconOnly)
+      .help("Show or hide the inspector (⌘⌥I)")
+      .keyboardShortcut("i", modifiers: [.command, .option])
       Button("Done") { dismiss() }
         .keyboardShortcut(.defaultAction)
     }
@@ -271,9 +322,11 @@ struct GenreMapPanel: View {
       strandHoverRow
       HStack {
         Image(systemName: "hand.point.up.left")
-        Text("Drag to move a genre · Pinch / ⌘+ / ⌘− to zoom · ⌘0 reset · ⌘9 fit · Hover a strand to highlight")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+        Text(
+          "Drag a genre · Click for evidence · ⇧-click to compare · Pinch / ⌘+ / ⌘− zoom · ⌘0 reset · ⌘9 fit · Hover a strand or pill"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
         Spacer()
         Button {
           zoomIn()
@@ -317,12 +370,6 @@ struct GenreMapPanel: View {
     .background(.bar)
   }
 
-  /// Phase 3 strand-hover affordance — a horizontal row of strand chips
-  /// (one per main strand; branches inherit the parent's hue and aren't
-  /// chips of their own). Hovering a chip highlights the corresponding
-  /// spline + member stations on the map. The full Phase-5 hover/click
-  /// discovery UX (compare two; pin one; rich evidence) wraps this; for
-  /// Phase 3, the chips are the minimum visual-verification affordance.
   @ViewBuilder
   private var strandHoverRow: some View {
     if
@@ -341,20 +388,32 @@ struct GenreMapPanel: View {
     }
   }
 
-  /// Cmd-+ — step zoom in. Centred about the current viewport centre.
+  /// Compute the set of layout-graph edges whose endpoints lie along
+  /// any of the compare-mode top-k paths. Returns canonical-half
+  /// `EdgeKey`s.
+  private var compareEdgeSet: Set<EdgeKey> {
+    guard !comparePaths.isEmpty else { return [] }
+    var keys = Set<EdgeKey>()
+    for path in comparePaths {
+      let stations = path.stations
+      guard stations.count >= 2 else { continue }
+      for index in 0..<(stations.count - 1) {
+        let lhs = stations[index]
+        let rhs = stations[index + 1]
+        keys.insert(EdgeKey(a: min(lhs, rhs), b: max(lhs, rhs)))
+      }
+    }
+    return keys
+  }
+
   private func zoomIn() {
     scale = clamp(scale * 1.25, min: 0.1, max: 6.0)
   }
 
-  /// Cmd-− — step zoom out. Centred about the current viewport centre.
   private func zoomOut() {
     scale = clamp(scale / 1.25, min: 0.1, max: 6.0)
   }
 
-  /// Cmd-0 — reset to the default presentation: scale 1.0× centred on
-  /// the heaviest community. Clears `fitRequested` so the base transform
-  /// re-applies the heaviest-community centring instead of staying in
-  /// the fit-to-view minimap mode.
   private func resetZoom() {
     scale = 1.0
     offset = .zero
@@ -362,15 +421,6 @@ struct GenreMapPanel: View {
     centredOnce = false
   }
 
-  /// Cmd-9 — opt-in fit-to-view. Different from `resetZoom`: this
-  /// computes the scale required to land all nodes inside the current
-  /// pane, then re-centres on the world midpoint. Kept as an opt-in
-  /// affordance per the Phase-3-gate "default is not fit-to-view"
-  /// directive; the user pans / zooms after using it.
-  ///
-  /// Resets the interactive scale / offset so the fit transform is the
-  /// only thing active — without this, a previously-panned offset
-  /// pushes the fitted minimap off-screen.
   private func fitToView() {
     guard
       let model = service.model,
@@ -421,11 +471,6 @@ struct GenreMapPanel: View {
 
   @ViewBuilder
   private func mapBody(model: GenreMapModel, in size: CGSize) -> some View {
-    // Phase-3-gate 2026-05-20 (the "stop compacting" reset): the
-    // "fitted" transform is now an **identity world→screen mapping
-    // centred on the heaviest community** by default, NOT a fit-to-
-    // viewport scale. Fit-to-view becomes opt-in via the `Fit`
-    // toolbar button (Cmd-9), which sets `fitRequested = true`.
     let fitted = baseTransform(model: model, into: size)
     let activeScale = scale * gestureScale
     let activeOffset = CGSize(
@@ -443,6 +488,7 @@ struct GenreMapPanel: View {
       edgesCanvas(model: model, transform: viewTransform)
       strandsLayer(model: model, transform: viewTransform)
       labelsLayer(model: model, transform: viewTransform)
+      hoverTooltipOverlay(model: model, transform: viewTransform)
     }
     .contentShape(Rectangle())
     .clipped()
@@ -456,9 +502,6 @@ struct GenreMapPanel: View {
         }
     )
     .simultaneousGesture(
-      // Pan only fires after a small motion threshold (4pt) so a
-      // bare click on the map can never start an empty-space pan and
-      // also can never starve a child `StationLabel`'s `.onTapGesture`.
       DragGesture(minimumDistance: 4)
         .updating($gestureOffset) { value, state, _ in
           guard dragging == nil else { return }
@@ -473,10 +516,6 @@ struct GenreMapPanel: View {
         }
     )
     .simultaneousGesture(
-      // Bare-click handler for the map background ⇒ dismiss the
-      // evidence panel. Separate from the pan DragGesture so the two
-      // never race for the same touch. Tap-gestures inside child
-      // `StationLabel`s consume the tap-up before it reaches here.
       TapGesture()
         .onEnded {
           if selectedGenre != nil { dismissEvidence() }
@@ -484,9 +523,6 @@ struct GenreMapPanel: View {
     )
     .accessibilityElement(children: .contain)
     .onAppear {
-      // First-presentation hook — `baseTransform` consults `centredOnce`
-      // / `fitRequested` to pick the transform, so this onAppear is a
-      // no-op marker; the transform self-applies on first render.
       if !centredOnce { centredOnce = true }
     }
     .onChange(of: model.nodes.count) { _, _ in
@@ -545,9 +581,16 @@ struct GenreMapPanel: View {
     .allowsHitTesting(false)
   }
 
+  /// Edges canvas. Phase 5: on a clicked transfer station the layout
+  /// edges incident to it raise to ~30 % opacity (dense edges allowed
+  /// here, per the plan — the user has explicitly asked). Compare-mode
+  /// raises the edges along the highest-weight path. Hover never
+  /// changes edge opacity (cosmetic state shouldn't move strokes).
   private func edgesCanvas(model: GenreMapModel, transform: ViewTransform) -> some View {
-    Canvas { context, _ in
-      // Lookup positions once.
+    let hoverNeighbourSet = hoverNeighbourGenreSet(model: model)
+    let transferEdgeSet = transferModeEdgeSet(model: model)
+    let compareEdgeSet = compareEdgeSet
+    return Canvas { context, _ in
       var positions = [String: CGPoint]()
       positions.reserveCapacity(model.nodes.count)
       for node in model.nodes {
@@ -561,48 +604,110 @@ struct GenreMapPanel: View {
         var path = Path()
         path.move(to: lhs)
         path.addLine(to: rhs)
-        // Layout-backbone opacity ≤10% per the spec.
-        let opacity = 0.04 + 0.06 * edge.totalWeight
+        let baseOpacity = 0.04 + 0.06 * edge.totalWeight
+        let key = EdgeKey(a: min(edge.genreA, edge.genreB), b: max(edge.genreA, edge.genreB))
+        var opacity = baseOpacity
+        var lineWidth: CGFloat = 0.8
+        if compareEdgeSet.contains(key) {
+          opacity = 0.55
+          lineWidth = 1.8
+        } else if transferEdgeSet.contains(key) {
+          opacity = 0.30
+          lineWidth = 1.2
+        } else if hoverNeighbourSet.contains(edge.genreA) || hoverNeighbourSet.contains(edge.genreB) {
+          opacity = min(0.28, baseOpacity + 0.16)
+          lineWidth = 1.1
+        }
         context.stroke(
           path,
           with: .color(.primary.opacity(opacity)),
-          lineWidth: 0.8,
+          lineWidth: lineWidth,
         )
       }
     }
     .allowsHitTesting(false)
   }
 
-  /// Phase 3 metro-strand overlay. One Catmull-Rom `StrandSpline` per
-  /// strand at low default opacity; the hovered strand (when any)
-  /// renders opaque + every other strand fades. No routing / bundling
-  /// — that's Phase 4. Splines may cross.
+  /// Transfer-station-mode edge set: every layout-edge whose endpoint
+  /// IS the selected transfer station, or whose either endpoint is a
+  /// 1-hop neighbour. The plan calls this out as the ONLY default
+  /// state where dense edges (beyond the layout backbone) are safe.
+  private func transferModeEdgeSet(model: GenreMapModel) -> Set<EdgeKey> {
+    guard transferMapMode, let selectedGenre else { return [] }
+    let edges = model.layoutEdges.map {
+      GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+    }
+    var neighbourSet: Set<String> = [selectedGenre]
+    for neighbour in GenreMapDiscovery.oneHopNeighbours(of: selectedGenre, edges: edges) {
+      neighbourSet.insert(neighbour.genre)
+    }
+    var keys = Set<EdgeKey>()
+    for edge in model.layoutEdges {
+      if edge.genreA == selectedGenre || edge.genreB == selectedGenre {
+        keys.insert(EdgeKey(a: min(edge.genreA, edge.genreB), b: max(edge.genreA, edge.genreB)))
+      } else if neighbourSet.contains(edge.genreA), neighbourSet.contains(edge.genreB) {
+        keys.insert(EdgeKey(a: min(edge.genreA, edge.genreB), b: max(edge.genreA, edge.genreB)))
+      }
+    }
+    return keys
+  }
+
+  private func hoverNeighbourGenreSet(model: GenreMapModel) -> Set<String> {
+    guard let hoveredGenre else { return [] }
+    let edges = model.layoutEdges.map {
+      GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+    }
+    var out: Set<String> = [hoveredGenre]
+    for neighbour in GenreMapDiscovery.oneHopNeighbours(of: hoveredGenre, edges: edges) {
+      out.insert(neighbour.genre)
+    }
+    return out
+  }
+
   private func strandsLayer(model: GenreMapModel, transform: ViewTransform) -> some View {
     let positionsByGenre = Dictionary(
       uniqueKeysWithValues: model.nodes.map { ($0.genre, $0.position) }
     )
+    let hoverServingStrandIDs = strandIDsForHover(model: model)
+    let compareStrandIDs: Set<Int> = {
+      guard !comparePaths.isEmpty else { return [] }
+      var ids = Set<Int>()
+      for path in comparePaths {
+        ids.formUnion(GenreMapDiscovery.strandsOverlappingPath(path: path, strands: model.strands))
+      }
+      return ids
+    }()
     return ZStack {
       ForEach(model.strands) { strand in
+        let parentID = strand.isBranch ? (strand.parentStrandID ?? strand.id) : strand.id
+        let chipHovered = hoveredStrandID == strand.id || hoveredStrandID == strand.parentStrandID
+        let pillHovered = !hoverServingStrandIDs.isEmpty
+          && hoverServingStrandIDs.contains(parentID)
+        let compareHighlight = compareStrandIDs.contains(parentID)
+        let highlighted = chipHovered || pillHovered || compareHighlight
+        let anyHover = hoveredStrandID != nil || hoveredGenre != nil
+        let faded = anyHover && !highlighted
+          || (!comparePaths.isEmpty && !compareHighlight && hoveredStrandID == nil && hoveredGenre == nil)
         StrandSpline(
           positionsByGenre: positionsByGenre,
           strand: strand,
           routed: model.routedStrands[strand.id],
           colour: Self.strandColour(for: strand.colourID),
-          isHighlighted: hoveredStrandID == strand.id
-            || hoveredStrandID == strand.parentStrandID,
-          isFaded: hoveredStrandID != nil
-            && hoveredStrandID != strand.id
-            && hoveredStrandID != strand.parentStrandID,
+          isHighlighted: highlighted,
+          isFaded: faded,
           project: transform.project,
         )
       }
     }
   }
 
-  /// Per-station strand-tick colours. Ticks render per strand serving
-  /// the station; branches share the parent strand's hue so the eye
-  /// reads the corridor, not the branch. Deduped + colour-sorted for
-  /// deterministic rendering.
+  /// Strand ids highlighted by the current hover, if any: serving
+  /// strands of `hoveredGenre`. Returns `[]` when nothing is hovered.
+  private func strandIDsForHover(model: GenreMapModel) -> Set<Int> {
+    guard let hoveredGenre else { return [] }
+    return GenreMapDiscovery.servingStrandIDs(of: hoveredGenre, strands: model.strands)
+  }
+
   private func tickColours(
     for genre: String,
     in model: GenreMapModel,
@@ -610,8 +715,6 @@ struct GenreMapPanel: View {
     var seenColourIDs = Set<Int>()
     var colours = [(colourID: Int, colour: Color)]()
     for strand in model.strands where strand.memberGenres.contains(genre) {
-      // Branches contribute the parent's colour so the eye reads the
-      // strand as one corridor, not a branched mess.
       let canonicalColourID = strand.isBranch
         ? (strand.parentStrandID ?? strand.colourID)
         : strand.colourID
@@ -623,25 +726,43 @@ struct GenreMapPanel: View {
   }
 
   private func labelsLayer(model: GenreMapModel, transform: ViewTransform) -> some View {
-    ForEach(model.nodes) { node in
+    let hoverNeighbours = hoverNeighbourGenreSet(model: model)
+    let compareGenres: Set<String> = {
+      var out = Set<String>()
+      if let selectedGenre { out.insert(selectedGenre) }
+      if let compareSecondGenre { out.insert(compareSecondGenre) }
+      for path in comparePaths { out.formUnion(path.stations) }
+      return out
+    }()
+    return ForEach(model.nodes) { node in
       let position = transform.project(node.position)
       let community = model.communities.first { $0.id == node.communityID }
       let ticks = tickColours(for: node.genre, in: model)
+      let isHovered = hoveredGenre == node.genre
+      let isFocused = selectedGenre == node.genre || compareSecondGenre == node.genre
+      let isAdjacent = hoverNeighbours.contains(node.genre)
+      let isOnComparePath = compareGenres.contains(node.genre)
+      let highlighted = isHovered || isFocused || isOnComparePath
+      let fadeFromHover = hoveredGenre != nil && !isHovered && !isAdjacent
+      let fadeFromCompare = !comparePaths.isEmpty && !isOnComparePath
+      let faded = fadeFromHover || fadeFromCompare
       StationLabel(
         node: node,
         community: community,
         hullColour: Self.communityColour(for: node.communityID),
         strandTickColours: ticks,
+        isHighlighted: highlighted,
+        isFaded: faded,
         onTap: { selectNode(node) },
+        onHover: { isInside in
+          if isInside {
+            hoveredGenre = node.genre
+          } else if hoveredGenre == node.genre {
+            hoveredGenre = nil
+          }
+        },
       )
       .position(position)
-      // Use `.simultaneousGesture` (not `.gesture`) so the
-      // `StationLabel`'s inner Button still receives plain taps — a
-      // `.gesture(DragGesture(minimumDistance: 1))` was claiming the
-      // gesture sequence and starving the Button on a no-motion click,
-      // which left the click-to-evidence affordance silent. The drag
-      // path itself is gated on a non-trivial translation (>=2pt) so a
-      // pure click never spuriously starts dragging.
       .simultaneousGesture(
         DragGesture(minimumDistance: 2)
           .onChanged { value in
@@ -652,10 +773,6 @@ struct GenreMapPanel: View {
             service.applyDrag(dragged: node.genre, to: world)
           }
           .onEnded { _ in
-            // Phase 4 (`plans/genre-metro-map.md` Phase 4, step 5):
-            // recompute routing on drag release, NOT mid-drag.
-            // `commitDrag` no-ops on sub-`geographicEpsilon` motion,
-            // so a tiny twitch never invalidates the routing cache.
             if
               let info = dragging,
               let current = service.model?.nodes.first(where: { $0.genre == info.genre })
@@ -672,21 +789,31 @@ struct GenreMapPanel: View {
     }
   }
 
-  /// **Phase-3-gate 2026-05-20 (the "stop compacting" reset).**
-  /// Compute the base world → screen affine that the interactive
-  /// `scale`/`offset` multiplies onto.
-  ///
-  /// Default posture: **identity scale** (world units == screen pixels)
-  /// with the **translation centred on `model.defaultCentre`** — the
-  /// centroid of the heaviest community. The user opens the map
-  /// looking at one recognisable neighbourhood; the rest of the world
-  /// scrolls. Pan / zoom is the interaction.
-  ///
-  /// Opt-in fit-to-view (`fitRequested == true`, set by the Fit
-  /// toolbar button / Cmd-9) computes a scale that lands every node
-  /// inside the pane with a padding inset. Used as a minimap
-  /// affordance — the user clicks Fit, sees the dense overview, then
-  /// pans / zooms back in.
+  /// Hover tooltip overlay — a small floating card near the hovered
+  /// pill summarising counts + transferness + the top-3 strongest
+  /// neighbours with their composite weight. Pure cosmetic.
+  @ViewBuilder
+  private func hoverTooltipOverlay(
+    model: GenreMapModel,
+    transform: ViewTransform,
+  ) -> some View {
+    if
+      let hoveredGenre,
+      let node = model.nodes.first(where: { $0.genre == hoveredGenre })
+    {
+      let position = transform.project(node.position)
+      let edges = model.layoutEdges.map {
+        GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+      }
+      let neighbours = Array(GenreMapDiscovery.oneHopNeighbours(of: hoveredGenre, edges: edges).prefix(3))
+      HoverTooltipCard(node: node, neighbours: neighbours)
+        .fixedSize()
+        .position(x: position.x, y: position.y - 64)
+        .allowsHitTesting(false)
+        .transition(.opacity)
+    }
+  }
+
   private func baseTransform(model: GenreMapModel, into size: CGSize) -> FitTransform {
     let bounds = model.worldBounds
     guard bounds.width > 0, bounds.height > 0, size.width > 0, size.height > 0 else {
@@ -705,7 +832,6 @@ struct GenreMapPanel: View {
       )
       return FitTransform(scale: fitScale, translation: translation)
     }
-    // Default: identity scale, centred on the heaviest community.
     let centre = model.defaultCentre
     let translation = CGSize(
       width: size.width / 2 - centre.x,
@@ -718,35 +844,203 @@ struct GenreMapPanel: View {
     Swift.min(maxValue, Swift.max(minValue, value))
   }
 
-  /// Open the evidence side panel for `node`. Ordinary stops are no-op
-  /// (Phase 5 will give them their own ego-network surface); junctions
-  /// and transfer stations both surface the evidence panel — junctions
-  /// because the inputs explain why the node is *almost* a transfer
-  /// station and that's useful debugging signal.
   private func selectNode(_ node: GenreMapNode) {
-    // Phase 2 ships with click-to-evidence enabled for every kind —
-    // ordinary stops surface the same inputs panel (transferness will
-    // simply read low), and that makes the affordance discoverable
-    // before Phase 5 promotes its full ego-network mode for ordinary
-    // genres. Phase 5 will scope this back to junction + transfer-
-    // station only, with a richer per-kind detail surface.
-    evidenceTask?.cancel()
+    if comparePending, let first = selectedGenre, first != node.genre {
+      // Second genre clicked while compare-pending — enter compare.
+      compareSecondGenre = node.genre
+      comparePending = false
+      loadCompareEvidence(from: first, to: node.genre)
+      ensureInspectorVisible()
+      return
+    }
+    if NSEvent.modifierFlags.contains(.shift), let first = selectedGenre, first != node.genre {
+      compareSecondGenre = node.genre
+      comparePending = false
+      loadCompareEvidence(from: first, to: node.genre)
+      ensureInspectorVisible()
+      return
+    }
+    // Fresh single-genre selection — clear any compare state.
+    representativeTask?.cancel()
+    compareTask?.cancel()
     selectedGenre = node.genre
-    evidence = nil
-    isLoadingEvidence = true
-    evidenceTask = Task {
-      let loaded = await service.evidenceOnDemand(for: node.genre)
+    compareSecondGenre = nil
+    comparePaths = []
+    compareEvidence = nil
+    isLoadingCompare = false
+    representativeEvidence = nil
+    isLoadingRepresentative = true
+    ensureInspectorVisible()
+    representativeTask = Task {
+      let loaded = await service.representativeEvidence(for: node.genre)
       if Task.isCancelled { return }
-      evidence = loaded
-      isLoadingEvidence = false
+      await MainActor.run {
+        representativeEvidence = loaded
+        isLoadingRepresentative = false
+      }
+    }
+    if node.nodeKind == .transferStation {
+      applyTransferMapPlan(for: node)
     }
   }
 
+  private func selectByName(_ genre: String) {
+    guard let model = service.model else { return }
+    guard let node = model.nodes.first(where: { $0.genre == genre }) else { return }
+    selectNode(node)
+  }
+
+  private func beginCompare() {
+    comparePending = true
+  }
+
+  private func endCompare() {
+    comparePending = false
+    compareSecondGenre = nil
+    comparePaths = []
+    compareEvidence = nil
+    isLoadingCompare = false
+    compareTask?.cancel()
+  }
+
+  private func loadCompareEvidence(from genreA: String, to genreB: String) {
+    guard let model = service.model else { return }
+    let edges = model.layoutEdges.map {
+      GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+    }
+    comparePaths = GenreMapDiscovery.kShortestPaths(
+      from: genreA,
+      to: genreB,
+      edges: edges,
+      k: 5,
+    )
+    compareEvidence = nil
+    isLoadingCompare = true
+    compareTask?.cancel()
+    compareTask = Task {
+      let loaded = await service.compareEvidence(between: genreA, and: genreB)
+      if Task.isCancelled { return }
+      await MainActor.run {
+        compareEvidence = loaded
+        isLoadingCompare = false
+      }
+    }
+  }
+
+  private func applyTransferMapPlan(for node: GenreMapNode) {
+    guard let model = service.model else { return }
+    let edges = model.layoutEdges.map {
+      GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+    }
+    let nodesByGenre = Dictionary(uniqueKeysWithValues: model.nodes.map { ($0.genre, $0) })
+    // Use a reasonable proxy for the canvas viewport size — the panel
+    // doesn't have the geometry here, so fall back to a representative
+    // 900×600. The pan/zoom is animated in `mapBody`'s transform, so
+    // a slightly-mismatched plan only means a slightly tighter or
+    // looser fit, not a broken render.
+    guard
+      let plan = GenreMapDiscovery.transferMapPlan(
+        centreGenre: node.genre,
+        nodesByGenre: nodesByGenre,
+        edges: edges,
+        viewport: CGSize(width: 900, height: 600),
+      )
+    else { return }
+    withAnimation(.easeInOut(duration: 0.25)) {
+      // The world→screen base transform centres on defaultCentre at
+      // identity scale; we offset by (defaultCentre − plan.centre) so
+      // the new centre lands at the viewport middle.
+      let bias = CGSize(
+        width: model.defaultCentre.x - plan.centre.x,
+        height: model.defaultCentre.y - plan.centre.y,
+      )
+      offset = bias
+      scale = plan.scale
+      fitRequested = false
+    }
+  }
+
+  private func ensureInspectorVisible() {
+    if !inspectorPresented { inspectorPresented = true }
+  }
+
   private func dismissEvidence() {
-    evidenceTask?.cancel()
-    evidenceTask = nil
+    representativeTask?.cancel()
+    compareTask?.cancel()
     selectedGenre = nil
-    evidence = nil
-    isLoadingEvidence = false
+    compareSecondGenre = nil
+    comparePending = false
+    representativeEvidence = nil
+    compareEvidence = nil
+    comparePaths = []
+    isLoadingRepresentative = false
+    isLoadingCompare = false
+  }
+
+}
+
+// MARK: - HoverTooltipCard
+
+/// Small floating card the Phase-5 hover affordance renders near the
+/// hovered pill. Counts + transferness + top-3 neighbours with their
+/// composite weight. Strictly cosmetic; never observed by the layout.
+private struct HoverTooltipCard: View {
+
+  // MARK: Internal
+
+  var node: GenreMapNode
+  var neighbours: [GenreMapDiscovery.Neighbour]
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      HStack(spacing: 6) {
+        Text(node.genre)
+          .font(.callout.weight(.semibold))
+        Text("·")
+          .foregroundStyle(.secondary)
+        Text("transferness \(Int((node.transferness * 100).rounded()))%")
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+      }
+      HStack(spacing: 8) {
+        countText("Tracks", node.trackCount)
+        countText("Albums", node.albumCount)
+        countText("Artists", node.artistCount)
+      }
+      if !neighbours.isEmpty {
+        Divider().padding(.vertical, 1)
+        VStack(alignment: .leading, spacing: 2) {
+          ForEach(neighbours, id: \.genre) { neighbour in
+            HStack(spacing: 4) {
+              Text(neighbour.genre)
+                .font(.caption)
+              Spacer()
+              Text(String(format: "%.2f", neighbour.weight))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+          }
+        }
+      }
+    }
+    .padding(8)
+    .background(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .fill(.regularMaterial)
+        .shadow(color: Color.black.opacity(0.18), radius: 6, y: 2)
+    )
+    .frame(maxWidth: 240)
+  }
+
+  // MARK: Private
+
+  private func countText(_ label: String, _ value: Int) -> some View {
+    HStack(spacing: 3) {
+      Text("\(value)")
+        .font(.caption2.weight(.semibold).monospacedDigit())
+      Text(label)
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+    }
   }
 }

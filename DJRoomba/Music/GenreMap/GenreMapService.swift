@@ -142,6 +142,67 @@ final class GenreMapService {
     }
   }
 
+  /// Phase 5: representative artists / albums for an ordinary genre's
+  /// ego-network inspector section. Reads `song_genre` via the indexed
+  /// `(genre, artist_key)` / `(genre, album_key)` joins. Returned in
+  /// a single tuple so the panel's call site is one `await`.
+  func representativeEvidence(
+    for genre: String,
+    limit: Int = 25,
+  ) async -> GenreMapRepresentativeEvidence? {
+    do {
+      let artists = try await store.genreMapTopArtists(for: genre, limit: limit)
+      let albums = try await store.genreMapTopAlbums(for: genre, limit: limit)
+      return GenreMapRepresentativeEvidence(
+        topArtists: artists,
+        topAlbums: albums,
+      )
+    } catch {
+      lastError = error.localizedDescription
+      return nil
+    }
+  }
+
+  /// Phase 5: paginated shared evidence between two genres for the
+  /// compare-mode inspector section. Three channels (artists / albums
+  /// / tracks); the same `limit`/`offset` is applied to each channel.
+  /// The caller paginates by re-calling with an incremented offset.
+  func compareEvidence(
+    between genreA: String,
+    and genreB: String,
+    limit: Int = 25,
+    offset: Int = 0,
+  ) async -> GenreMapCompareEvidence? {
+    do {
+      async let artists = store.genreMapSharedArtists(
+        between: genreA,
+        and: genreB,
+        limit: limit,
+        offset: offset,
+      )
+      async let albums = store.genreMapSharedAlbums(
+        between: genreA,
+        and: genreB,
+        limit: limit,
+        offset: offset,
+      )
+      async let tracks = store.genreMapSharedTracks(
+        between: genreA,
+        and: genreB,
+        limit: limit,
+        offset: offset,
+      )
+      return try await GenreMapCompareEvidence(
+        sharedArtists: artists,
+        sharedAlbums: albums,
+        sharedTracks: tracks,
+      )
+    } catch {
+      lastError = error.localizedDescription
+      return nil
+    }
+  }
+
   /// Evidence-on-demand for the side panel (Phase 2). Reads `selectedGenre`'s
   /// 1-hop neighbours from the current `model` and asks the store for the
   /// top shared artists / albums / tracks across them. Pure read; JIT —
@@ -331,4 +392,27 @@ final class GenreMapService {
     )
   }
 
+}
+
+// MARK: - GenreMapRepresentativeEvidence
+
+/// Phase 5 single-genre evidence — the "what does this genre look like?"
+/// payload for the inspector's ordinary-genre + transfer-station modes.
+/// Two channels, paginated independently (the panel only requests the
+/// first page by default; paging-by-scroll is a Phase-6 follow-on).
+struct GenreMapRepresentativeEvidence: Equatable, Sendable {
+  var topArtists: [GenreMapEvidenceItem]
+  var topAlbums: [GenreMapEvidenceItem]
+}
+
+// MARK: - GenreMapCompareEvidence
+
+/// Phase 5 two-genre evidence — the "why is this relationship here?"
+/// payload for the inspector's compare mode. Three channels; one
+/// pagination cursor per channel because the compare-card paginates by
+/// "Load more" per list.
+struct GenreMapCompareEvidence: Equatable, Sendable {
+  var sharedArtists: [GenreMapEvidenceItem]
+  var sharedAlbums: [GenreMapEvidenceItem]
+  var sharedTracks: [GenreMapEvidenceItem]
 }

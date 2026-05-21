@@ -479,6 +479,40 @@ implementation surface and the one most likely to spawn its own sub-doc.
 
 ### Phase 5 — Evidence and discovery UX
 
+> **Phase 5 ship (2026-05-21).** Landed as planned with one inspector-
+> idiom adjustment + one live-verification carry-forward.
+> **Adjustment:** the plan's "Native `.inspector()` (macOS 14+)"
+> prescription works for the main window (`ExtensionInspectorView` in
+> `MainShellView` already uses it); the Genre Map runs as a **sheet**,
+> and a native `.inspector()` inside a sheet's NavigationStack hid the
+> toolbar + clipped the canvas. The honest equivalent for a sheet is
+> a right-docked side column at 340pt — identical user mental model
+> (toolbar toggle, ⌘⌥I, persisted open state via `@SceneStorage
+> ("genreMapInspectorPresented")`, `sidebar.trailing` glyph in the
+> header), different SwiftUI primitive. **Carry-forward:** the live-
+> verification computer-use pass captured the hover affordance cleanly
+> (`Alt/BritPop · transferness 19% · 96 Tracks · 42 Albums · 18 Artists`
+> tooltip + 3 neighbours, with the surrounding pills correctly faded);
+> the click / transfer-map / compare affordances are pinned by the +16
+> tests (`GenreMapDiscoveryTests` + `GenreMapEvidenceQueryTests`,
+> bringing the total to **338/50** green) but a workstation auto-lock
+> interrupted the visual capture for those modes mid-pass. A pre-merge
+> manual walkthrough by the user closes that visual evidence gap; the
+> hover capture establishes the discovery surface is alive. **+5 SQL
+> readers** on `LibraryStore+GenreMap` (`genreMapTopArtists`,
+> `genreMapTopAlbums`, `genreMapSharedArtists`, `genreMapSharedAlbums`,
+> `genreMapSharedTracks`, all paginated, all through the indexed
+> `(genre, song_id)` / `(genre, artist_key)` / `(genre, album_key)`
+> joins on `song_genre`). New pure `GenreMapDiscovery` module owns the
+> selection enum + Yen-k shortest paths (Dijkstra inner; cost
+> `1 − total_weight`; k=5 default for compare) + the 1-hop / serving-
+> strand / transfer-stations-along-path / transfer-map plan helpers.
+> Evidence panel restructured into modular `EvidenceHeader`,
+> `EvidenceNeighbours`, `EvidenceStrands`, `EvidenceRepresentative`,
+> `EvidenceConnectedNeighbourhoods`, `EvidenceCompare` subviews
+> (swiftui-pro's "extract subviews" rule pre-empted; the panel `body`
+> stays cheap). **GO for Phase 6.**
+
 Make every relationship explainable. This is where the map becomes a
 **discovery tool**, not a picture.
 

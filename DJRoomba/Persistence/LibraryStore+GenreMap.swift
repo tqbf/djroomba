@@ -469,6 +469,202 @@ extension LibraryStore {
     }
   }
 
+  /// Phase 5 (`plans/genre-metro-map.md`): top representative artists
+  /// for a genre, sorted by track count desc. Reads `song_genre`
+  /// (Phase-3 materialised view) on `(genre, artist_key)` — that
+  /// composite index is the single B-tree the planner needs.
+  /// Paginated; `limit`/`offset` are clamped.
+  func genreMapTopArtists(
+    for genre: String,
+    limit: Int = 25,
+    offset: Int = 0,
+  ) async throws -> [GenreMapEvidenceItem] {
+    try await database.dbQueue.read { db in
+      try Row.fetchAll(
+        db,
+        sql: """
+          SELECT s.artist_name AS display,
+                 COUNT(DISTINCT sg.song_id) AS overlap
+            FROM song_genre sg
+            JOIN song s ON s.id = sg.song_id
+           WHERE sg.genre = ?
+             AND sg.artist_key IS NOT NULL
+           GROUP BY sg.artist_key
+           ORDER BY overlap DESC, display
+           LIMIT ? OFFSET ?
+          """,
+        arguments: [genre, max(0, limit), max(0, offset)],
+      ).map { row in
+        GenreMapEvidenceItem(
+          display: row["display"] ?? "",
+          overlapCount: row["overlap"] ?? 0,
+        )
+      }
+    }
+  }
+
+  /// Top albums for a genre, sorted by track count desc. Same posture
+  /// as `genreMapTopArtists` but joining on `album_key`.
+  func genreMapTopAlbums(
+    for genre: String,
+    limit: Int = 25,
+    offset: Int = 0,
+  ) async throws -> [GenreMapEvidenceItem] {
+    try await database.dbQueue.read { db in
+      try Row.fetchAll(
+        db,
+        sql: """
+          SELECT (COALESCE(s.artist_name, '') || ' — ' || COALESCE(s.album_title, '')) AS display,
+                 COUNT(DISTINCT sg.song_id) AS overlap
+            FROM song_genre sg
+            JOIN song s ON s.id = sg.song_id
+           WHERE sg.genre = ?
+             AND sg.album_key IS NOT NULL
+           GROUP BY sg.album_key
+           ORDER BY overlap DESC, display
+           LIMIT ? OFFSET ?
+          """,
+        arguments: [genre, max(0, limit), max(0, offset)],
+      ).map { row in
+        GenreMapEvidenceItem(
+          display: row["display"] ?? "",
+          overlapCount: row["overlap"] ?? 0,
+        )
+      }
+    }
+  }
+
+  /// Phase 5 compare-mode: shared artists between two genres,
+  /// paginated. The composite weight is the count of songs each artist
+  /// contributes to the genre-A side (display freight); the join
+  /// itself is on `artist_key`. Same B-tree shape as the existing
+  /// evidence-on-demand reads.
+  func genreMapSharedArtists(
+    between genreA: String,
+    and genreB: String,
+    limit: Int = 25,
+    offset: Int = 0,
+  ) async throws -> [GenreMapEvidenceItem] {
+    try await database.dbQueue.read { db in
+      try Row.fetchAll(
+        db,
+        sql: """
+          WITH
+            a_rows AS (
+              SELECT sg.song_id, sg.artist_key, s.artist_name AS display
+                FROM song_genre sg
+                JOIN song s ON s.id = sg.song_id
+               WHERE sg.genre = ? AND sg.artist_key IS NOT NULL
+            ),
+            b_rows AS (
+              SELECT sg.artist_key
+                FROM song_genre sg
+               WHERE sg.genre = ? AND sg.artist_key IS NOT NULL
+            )
+          SELECT a.display AS display,
+                 COUNT(DISTINCT a.song_id) AS overlap
+            FROM a_rows a
+            JOIN b_rows b ON a.artist_key = b.artist_key
+           GROUP BY a.artist_key
+           ORDER BY overlap DESC, display
+           LIMIT ? OFFSET ?
+          """,
+        arguments: [genreA, genreB, max(0, limit), max(0, offset)],
+      ).map { row in
+        GenreMapEvidenceItem(
+          display: row["display"] ?? "",
+          overlapCount: row["overlap"] ?? 0,
+        )
+      }
+    }
+  }
+
+  /// Shared albums between two genres, paginated. Join key is
+  /// `album_key` (artist‖album normalised).
+  func genreMapSharedAlbums(
+    between genreA: String,
+    and genreB: String,
+    limit: Int = 25,
+    offset: Int = 0,
+  ) async throws -> [GenreMapEvidenceItem] {
+    try await database.dbQueue.read { db in
+      try Row.fetchAll(
+        db,
+        sql: """
+          WITH
+            a_rows AS (
+              SELECT sg.song_id, sg.album_key,
+                     (COALESCE(s.artist_name, '') || ' — ' || COALESCE(s.album_title, '')) AS display
+                FROM song_genre sg
+                JOIN song s ON s.id = sg.song_id
+               WHERE sg.genre = ? AND sg.album_key IS NOT NULL
+            ),
+            b_rows AS (
+              SELECT sg.album_key
+                FROM song_genre sg
+               WHERE sg.genre = ? AND sg.album_key IS NOT NULL
+            )
+          SELECT a.display AS display,
+                 COUNT(DISTINCT a.song_id) AS overlap
+            FROM a_rows a
+            JOIN b_rows b ON a.album_key = b.album_key
+           GROUP BY a.album_key
+           ORDER BY overlap DESC, display
+           LIMIT ? OFFSET ?
+          """,
+        arguments: [genreA, genreB, max(0, limit), max(0, offset)],
+      ).map { row in
+        GenreMapEvidenceItem(
+          display: row["display"] ?? "",
+          overlapCount: row["overlap"] ?? 0,
+        )
+      }
+    }
+  }
+
+  /// Shared tracks between two genres, paginated. A track is "shared"
+  /// when its `song_genre` row exists under BOTH genres — the join key
+  /// is `song_id`. Rendered as `artist — title`.
+  func genreMapSharedTracks(
+    between genreA: String,
+    and genreB: String,
+    limit: Int = 25,
+    offset: Int = 0,
+  ) async throws -> [GenreMapEvidenceItem] {
+    try await database.dbQueue.read { db in
+      try Row.fetchAll(
+        db,
+        sql: """
+          WITH
+            a_rows AS (
+              SELECT sg.song_id,
+                     (COALESCE(s.artist_name, '') || ' — ' || COALESCE(s.title, '')) AS display
+                FROM song_genre sg
+                JOIN song s ON s.id = sg.song_id
+               WHERE sg.genre = ?
+            ),
+            b_rows AS (
+              SELECT sg.song_id
+                FROM song_genre sg
+               WHERE sg.genre = ?
+            )
+          SELECT a.display AS display,
+                 1 AS overlap
+            FROM a_rows a
+            JOIN b_rows b ON a.song_id = b.song_id
+           ORDER BY display
+           LIMIT ? OFFSET ?
+          """,
+        arguments: [genreA, genreB, max(0, limit), max(0, offset)],
+      ).map { row in
+        GenreMapEvidenceItem(
+          display: row["display"] ?? "",
+          overlapCount: row["overlap"] ?? 1,
+        )
+      }
+    }
+  }
+
 }
 
 // MARK: - GenreMapEvidenceOnDemand
