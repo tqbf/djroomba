@@ -42,7 +42,7 @@ struct EvidenceHeader: View {
           .foregroundStyle(.secondary)
         Text("·")
           .foregroundStyle(.secondary)
-        Text("transferness \(percentString(node.transferness))")
+        Text("Transferness \(percentString(node.transferness))")
           .font(.caption.monospacedDigit())
           .foregroundStyle(.secondary)
         if let subtitle = compareSubtitle {

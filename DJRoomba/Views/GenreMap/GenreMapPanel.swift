@@ -172,6 +172,11 @@ struct GenreMapPanel: View {
   @State private var dragging: DragState?
   @State private var centredOnce = false
   @State private var fitRequested = false
+  /// Live viewport size, updated by `mapBody`'s `GeometryReader`. Used
+  /// by `applyTransferMapPlan` so the transfer-map zoom/centre fits the
+  /// actual canvas instead of a hardcoded 900×600 (which on smaller
+  /// windows pushed the centred node off-screen entirely).
+  @State private var viewportSize: CGSize = CGSize(width: 900, height: 600)
   /// Phase 5 selection. `selectedGenre` is the focused genre; in
   /// compare-mode `compareSecondGenre` is set and the inspector shows
   /// the compare card.
@@ -197,7 +202,7 @@ struct GenreMapPanel: View {
   @State private var isLoadingCompare = false
   @State private var compareTask: Task<Void, Never>?
 
-  @SceneStorage("genreMapInspectorPresented") private var inspectorPresented = true
+  @AppStorage("genreMapInspectorPresented") private var inspectorPresented = true
 
   @GestureState private var gestureScale: CGFloat = 1.0
   @GestureState private var gestureOffset = CGSize.zero
@@ -292,6 +297,9 @@ struct GenreMapPanel: View {
       } else if let model = service.model {
         GeometryReader { geometry in
           mapBody(model: model, in: geometry.size)
+            .task(id: geometry.size) {
+              viewportSize = geometry.size
+            }
         }
       }
     }
@@ -484,6 +492,16 @@ struct GenreMapPanel: View {
     )
 
     ZStack {
+      // Background tap target — owns the empty-space "dismiss" gesture so
+      // it does *not* fire when a child StationLabel absorbs the tap. The
+      // previous posture (`.simultaneousGesture(TapGesture())` on the
+      // entire ZStack) also fired on station/button taps, which silently
+      // cancelled compare mode immediately after a child set it up.
+      Color.clear
+        .contentShape(Rectangle())
+        .onTapGesture {
+          if selectedGenre != nil { dismissEvidence() }
+        }
       hullsCanvas(model: model, transform: viewTransform)
       edgesCanvas(model: model, transform: viewTransform)
       strandsLayer(model: model, transform: viewTransform)
@@ -513,12 +531,6 @@ struct GenreMapPanel: View {
             width: offset.width + value.translation.width,
             height: offset.height + value.translation.height,
           )
-        }
-    )
-    .simultaneousGesture(
-      TapGesture()
-        .onEnded {
-          if selectedGenre != nil { dismissEvidence() }
         }
     )
     .accessibilityElement(children: .contain)
@@ -853,7 +865,13 @@ struct GenreMapPanel: View {
       ensureInspectorVisible()
       return
     }
-    if NSEvent.modifierFlags.contains(.shift), let first = selectedGenre, first != node.genre {
+    // Read the modifier flags of the actual click event rather than the
+    // global `NSEvent.modifierFlags` — by the time a SwiftUI tap closure
+    // runs the key may have already been released, but the dispatched
+    // event still carries the modifier state at the time the click
+    // landed. macOS 14 has no `.onModifierKeysChanged` modifier yet.
+    let eventShift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+    if eventShift, let first = selectedGenre, first != node.genre {
       compareSecondGenre = node.genre
       comparePending = false
       loadCompareEvidence(from: first, to: node.genre)
@@ -933,17 +951,20 @@ struct GenreMapPanel: View {
       GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
     }
     let nodesByGenre = Dictionary(uniqueKeysWithValues: model.nodes.map { ($0.genre, $0) })
-    // Use a reasonable proxy for the canvas viewport size — the panel
-    // doesn't have the geometry here, so fall back to a representative
-    // 900×600. The pan/zoom is animated in `mapBody`'s transform, so
-    // a slightly-mismatched plan only means a slightly tighter or
-    // looser fit, not a broken render.
+    // Use the live `viewportSize` measured by `mapBody`'s GeometryReader
+    // — on small windows the previous hardcoded 900×600 produced a plan
+    // whose centre/scale pushed the focused pill outside the visible
+    // canvas. Fall back to the initial default only if size hasn't
+    // arrived yet (no nodes-rendered frame yet).
+    let measured = viewportSize.width > 1 && viewportSize.height > 1
+      ? viewportSize
+      : CGSize(width: 900, height: 600)
     guard
       let plan = GenreMapDiscovery.transferMapPlan(
         centreGenre: node.genre,
         nodesByGenre: nodesByGenre,
         edges: edges,
-        viewport: CGSize(width: 900, height: 600),
+        viewport: measured,
       )
     else { return }
     withAnimation(.easeInOut(duration: 0.25)) {
@@ -998,7 +1019,7 @@ private struct HoverTooltipCard: View {
           .font(.callout.weight(.semibold))
         Text("·")
           .foregroundStyle(.secondary)
-        Text("transferness \(Int((node.transferness * 100).rounded()))%")
+        Text("Transferness \(Int((node.transferness * 100).rounded()))%")
           .font(.caption.monospacedDigit())
           .foregroundStyle(.secondary)
       }

@@ -199,3 +199,65 @@ deferred here.
   green; computer-use spot-checks unchanged transfer-station count
   on the real library.
 - **Effort:** L.
+
+## Phase-5-gate deferred (2026-05-21)
+
+### Phase-5-gate Phase A — Modern modifier-keys idiom once macOS 15+
+
+- **What:** `selectNode` currently reads `NSApp.currentEvent?.modifierFlags`
+  to detect a ⇧-modified click, because `.onModifierKeysChanged` (the
+  SwiftUI-native equivalent) is macOS-15-only and the project targets
+  macOS 14. The current posture is correct and reliable, but reaches
+  into AppKit. Once the minimum bumps to macOS 15, replace with
+  `@State shiftHeld` + `.onModifierKeysChanged(mask: .shift) { _, new in
+  shiftHeld = new.contains(.shift) }` on the panel root and read the
+  state inside `selectNode` instead.
+- **Law(s):** 14 (idiomatic SwiftUI; avoid AppKit reach-throughs where
+  SwiftUI now offers a native modifier).
+- **Pays its freight (falsifiable):** `NSApp.currentEvent` call goes
+  away from `GenreMapPanel.swift`; `import AppKit` becomes unused (if
+  nothing else still needs it).
+- **Veto condition:** if `.onModifierKeysChanged` doesn't reliably
+  observe modifier-down at the same instant the SwiftUI tap closure
+  runs in the live walkthrough, fall back to the current posture —
+  the AppKit reach-through is correct, just not idiomatic.
+- **Depends on:** macOS-15 minimum deployment target.
+- **Effort:** XS.
+
+### Phase-5-gate Phase B — Compare-mode discoverability cue on the canvas
+
+- **What:** the ⇧-click compare gesture has no canvas-side cue. Users
+  discover compare either by reading the help-bar copy ("⇧-click to
+  compare") or by clicking the inspector's Compare button. The plan
+  contracts a discoverable affordance. Add a faint compare-mode
+  affordance: when a genre is selected and the user hovers a
+  *different* genre, render a thin connecting line / "⇧" badge on the
+  hovered pill so the gesture is visible before they invoke it.
+- **Law(s):** macos-design (discoverability of non-obvious gestures).
+- **Pays its freight (falsifiable):** a first-time user can discover
+  compare without reading help-bar copy; the canvas itself surfaces
+  the affordance.
+- **Veto condition:** if the affordance reads as a permanent edge
+  instead of a hover hint, **stop** — that re-introduces the dense-
+  edge anti-feature the plan explicitly forbids outside transfer-map
+  mode.
+- **Depends on:** none.
+- **Effort:** M.
+
+### Phase-5-gate Phase C — Tooltip clipping at canvas right edge
+
+- **What:** when a hovered pill sits near the right edge of the
+  canvas, the `HoverTooltipCard` overflow gets clipped by the
+  surrounding ZStack. Cosmetic but visible (Phase-5-gate
+  walkthrough's early Ambient/Alt/BritPop hovers showed it). One-line
+  `.position()` clamp: if the tooltip's natural anchor would push it
+  past the canvas's trailing edge, anchor it on the leading side of
+  the pill instead.
+- **Law(s):** macos-design (don't clip primary affordances).
+- **Pays its freight (falsifiable):** a hover on the right-most pill
+  renders the tooltip fully inside the canvas.
+- **Veto condition:** if the clamp logic grows beyond a single
+  `.position` modifier with a measured-size branch, **stop** — it's a
+  cosmetic edge case, not worth a layout refactor.
+- **Depends on:** none.
+- **Effort:** XS.

@@ -5,6 +5,186 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — ✅ Genre Metro Map — Phase 5 GATE — visual walkthrough + firming fixes (`feature/genre-metro-map`)
+
+Live walkthrough of all five Phase 5 interactions on the signed dev
+build. Four real defects surfaced in the live pass that the static
+review had not caught; each was root-caused in `GenreMapPanel.swift`
+and fixed in-gate. **GO for Phase 6.** PR #5 stays open; **NOT
+merged.**
+
+### Walkthrough screenshot inventory
+
+1. **`/tmp/phase5-gate-01-hover-ordinary.png`** — Hover Alt/Laptop/Bristol
+   (Ordinary): floating tooltip card reads `Alt/Laptop/Bristol ·
+   Transferness 5%` + `16 Tracks · 8 Albums · 5 Artists` + neighbour
+   Electronic 0.02; surrounding pills fade to ~18 % opacity. Hover
+   latency subjectively instant.
+2. **`/tmp/phase5-gate-02-click-ordinary.png`** — Click Rock (Ordinary,
+   1,668/1,078/573): inspector populates with header `Ordinary ·
+   Transferness 3%`, SERVING STRANDS (Alternative Bristol), 6 nearest
+   neighbours with weights, no CONNECTED NEIGHBOURHOODS section (as
+   expected for Ordinary), REPRESENTATIVE Artists (R.E.M. ×55, U2
+   ×44…). Click → render: well under 100 ms.
+3. **`/tmp/phase5-gate-03-click-junction.png`** — Click Alt/BritPop
+   (Junction, 19%): inspector shows header `Junction · Transferness
+   19%` + the junction-specific **CONNECTED NEIGHBOURHOODS** section
+   listing the strands it serves (Alternative Bristol, Industrial
+   New). Tooltip + serving spline brighten on the canvas.
+4. **`/tmp/phase5-gate-04-transfer-map.png`** — Click Electronic
+   (Transfer station, 33%): canvas pans + zooms to centre the
+   focused pill (40 % zoom), many more stations become visible
+   (Hip Hop/Rap, Classical, Indie Pop, African, Alternative,
+   Soundtrack, Grunge, Psych/Shoegaze…), and the inspector lists
+   **CONNECTED NEIGHBOURHOODS** (Alternative Bristol, Dance Electro,
+   Electro) + REPRESENTATIVE Artists (Massive Attack ×12, Underworld
+   ×12…). Transfer-map mode visibly engaged; dense edges only
+   show under this mode (the plan's contract).
+5. **`/tmp/phase5-gate-05-compare.png`** — ⇧-click Punk while Rock
+   selected: inspector swaps to EvidenceCompare. Header `Rock ↔
+   Punk`; **HIGHEST-WEIGHT PATHS** lists 5 Yen-k routes with their
+   composite weight (`Σ0.12`, `Σ0.03`, `Σ0.18`, `Σ0.14`, `Σ0.07`);
+   **TRANSFER STATIONS ALONG THE WAY** = Pop; **STRANDS TRAVERSED** =
+   Alternative Bristol; **SHARED EVIDENCE** lists 8 artists (Public
+   Image Ltd. ×5, The Damned ×4, Billy Idol ×3, The Clash ×3,
+   Buzzcocks ×2, Ramones ×2, Rancid ×1, X ×1). Path strands
+   highlight on the canvas; non-path strands fade. Compare load
+   subjectively ~200 ms (under the 250 ms target).
+6. **`/tmp/phase5-gate-06-toggle-persistence.png`** — ⌘⌥I toggle +
+   quit/relaunch persistence: inspector collapsed before quit
+   remains collapsed in the relaunched window. Strand pill row
+   visible across the full-width canvas. `@AppStorage` (not
+   `@SceneStorage`) is the correct posture for cross-launch
+   persistence in a Mac sheet — see **defect 4** below.
+
+### Defects found in-gate + firming fixes
+
+The static skill review had flagged three "deferrable" tics. The
+**live** walkthrough surfaced four real defects, three of which
+broke the documented interactions outright:
+
+1. **Compare mode was completely broken.** Root cause: the map's
+   `.simultaneousGesture(TapGesture())` (on the entire `ZStack`)
+   also fired on every child StationLabel tap. So after the child
+   `selectNode` set `selectedGenre + comparePending`, the parent's
+   `TapGesture.onEnded` immediately called `dismissEvidence()`,
+   silently cancelling the compare-pending state. Neither
+   ⇧-click nor the inspector's Compare button could ever reach
+   the `EvidenceCompare` view. **Fix:** moved the dismiss-on-empty
+   tap onto a dedicated `Color.clear.contentShape(Rectangle())`
+   at the back of the ZStack, so child taps don't trigger it.
+   Verified with Rock ↔ Punk + Rock ↔ Electronica-Dance compares.
+2. **`NSEvent.modifierFlags` read inside a SwiftUI tap closure was
+   unreliable.** The static review flagged this as polish; the
+   live pass confirmed it was load-bearing. By the time the
+   closure runs, the modifier may already have been released. The
+   modifier-keys SwiftUI observer (`.onModifierKeysChanged`) is
+   macOS-15-only and the project targets macOS 14. **Fix:** read
+   `NSApp.currentEvent?.modifierFlags` instead — the dispatched
+   click event carries the correct modifier state from the moment
+   the click landed, regardless of when the SwiftUI closure runs.
+3. **Transfer-map mode pushed the centred pill off-screen on
+   non-1140×760 windows.** The toms-laws-D concern was real and
+   visible: `applyTransferMapPlan` hardcoded `viewport: 900×600`,
+   which on a smaller live window produced a plan whose
+   centre+scale put the focused pill outside the visible canvas
+   (map area was almost entirely blank on the first Pop click).
+   **Fix:** the panel now tracks live `viewportSize` via the
+   existing `GeometryReader` (`.task(id: geometry.size)`) and
+   passes the measured size into `GenreMapDiscovery.transferMapPlan`.
+4. **Inspector collapsed state did NOT persist across app
+   relaunch.** `@SceneStorage` only persists per-window state via
+   `NSWindowRestoration`, which isn't enabled for this sheet-hosted
+   panel. The plan's "persisted open state" contract requires
+   true cross-launch persistence. **Fix:** `@AppStorage(
+   "genreMapInspectorPresented")` instead of `@SceneStorage`.
+   UserDefaults-backed, survives quit/relaunch unconditionally.
+   Verified by toggling closed, ⌘Q, relaunch — inspector stayed
+   collapsed.
+
+Plus one typography fix (the swiftui-pro / typography-designer
+tic): the inline kindLabel section used `transferness X%`
+(sentence-internal lowercase) while the inspector's section header
+read `TRANSFERNESS INPUTS` (uppercase). The inline label is now
+`Transferness X%` — consistent leading capitalisation across both
+the inline caption and the section header (which still renders
+uppercase via `.textCase(.uppercase)`).
+
+### Latency observations (subjective, real library, 115 nodes)
+
+- Hover-to-tooltip: instant (< 16 ms perceived).
+- Click ordinary → inspector populated: well under 100 ms.
+- Click junction → connected-neighbourhoods section: same; SQL
+  reads are the indexed `(genre, …)` paths.
+- Click transfer station → transfer-map zoom + pan animation:
+  ~250 ms (the `.easeInOut(duration: 0.25)`).
+- ⇧-click compare → EvidenceCompare populated: subjectively
+  ~200 ms (under the 250 ms target).
+- Pan/zoom while compare active (Step 7 verification): no
+  recompute, no spinner, no flicker. The compare result + path
+  highlights stay cached as the transform changes.
+
+### Skill verdicts (post-walkthrough)
+
+- **swiftui-pro:** **PASS** — the `NSEvent.modifierFlags` polish
+  the static review flagged was upgraded from "deferrable" to a
+  load-bearing live defect and fixed in-gate. The
+  `.simultaneousGesture(TapGesture())`-on-ZStack posture was a
+  child-tap-leak bug; replaced with a background `Color.clear`
+  tap target. Both are now idiomatic.
+- **macos-design:** **PASS** — right-docked 340pt column posture
+  unchanged. Transfer-map mode now actually centres correctly on
+  small windows (defect 3 fix). Inspector collapse persists via
+  `@AppStorage`, which is the correct cross-launch idiom for a
+  Mac app preference.
+- **typography-designer:** **PASS** — the lowercase/uppercase
+  inconsistency between the inline `transferness X%` caption and
+  the section header `TRANSFERNESS INPUTS` is resolved. Both
+  share the underlying word "Transferness" with consistent
+  leading-capital posture; the section header still renders
+  uppercase via `.textCase(.uppercase)`.
+- **toms-laws:** **PASS** — the carried-forward "D" item
+  (hardcoded `900×600` viewport in `applyTransferMapPlan`) is
+  fixed: 1-file change wiring through the live `viewportSize`
+  state.
+- **airbnb-swift-style:** clean on touched files. The new
+  `@State viewportSize`, `eventShift` local, and the background
+  `Color.clear` tap target follow the guide's naming +
+  composition rules.
+
+### Tests + build
+
+- `swift test` → **338/50** green (unchanged from Phase 5 base —
+  the four fixes are SwiftUI state/binding wiring that is
+  exercised by the live walkthrough rather than unit-testable in
+  isolation; no new tests needed).
+- `make build` → clean, signed Apple Development.
+
+### Deferred to Phase 6
+
+- Tooltip clipping when the hovered pill is at the right edge of
+  the canvas (Alt/BritPop tooltip in early walkthrough screens
+  showed a partial clip). Cosmetic; one-line `.position()` clamp
+  in `HoverTooltipCard`.
+- Compare-discoverability hint — the ⇧-click compare gesture has
+  no canvas-side cue; users will discover it via the Compare
+  button. Documented in DESIGN-TODO.md.
+- Modern modifier-keys idiom (`.onModifierKeysChanged`) once the
+  minimum macOS bumps to 15. Documented in DESIGN-TODO.md.
+
+### Files changed in this gate
+
+- `DJRoomba/Views/GenreMap/GenreMapPanel.swift` — background
+  Color.clear tap target (defect 1); `NSApp.currentEvent`
+  modifier read (defect 2); `@State viewportSize` + live
+  `GeometryReader` wiring to `applyTransferMapPlan` (defect 3);
+  `@AppStorage` for inspector-presented (defect 4); inline
+  "Transferness" capitalisation (typography tic).
+- `DJRoomba/Views/GenreMap/GenreMapEvidencePanel.swift` —
+  inline "Transferness" capitalisation (typography tic).
+
+---
+
 ## 2026-05-21 — ✅ Genre Metro Map — Phase 5 (evidence + discovery UX) (`feature/genre-metro-map`)
 
 Phase 5 of `plans/genre-metro-map.md` lands the discovery layer: hover
