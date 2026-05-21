@@ -384,6 +384,12 @@ enum GenreMapBuilder {
       worldBounds: bounds,
       defaultCentre: defaultCentre,
       strands: strands,
+      routedStrands: [:],
+      // Bump on every fresh build — the routing actor invalidates its
+      // cache when `model.layoutRevision` changes, so a re-Analyze
+      // forces a routing recompute even if the strand set happens to
+      // be byte-identical.
+      layoutRevision: 1,
     )
   }
 

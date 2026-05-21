@@ -28,6 +28,13 @@ final class GenreMapService {
 
   // MARK: Internal
 
+  /// Geographic-epsilon for the drag-recommit ⇒ routing-rerun check
+  /// (`plans/genre-metro-map.md` Phase 4, step 5). A drag whose final
+  /// landing position moved less than `geographicEpsilon` from the
+  /// node's pre-drag position does NOT bump `layoutRevision` —
+  /// routing's cache hit covers the no-op micro-shuffle.
+  nonisolated static let geographicEpsilon: CGFloat = 6.0
+
   /// True while a build is in flight (covers both store SQL + the pure
   /// pipeline). Coalesces re-entrancy: a second `build()` while one is
   /// running is a no-op.
@@ -39,6 +46,20 @@ final class GenreMapService {
   /// The current model the panel binds to. `nil` ⇒ "not built yet" (the
   /// panel shows an empty state with an Analyze CTA).
   private(set) var model: GenreMapModel?
+
+  /// Phase 4 routing instrumentation (`plans/genre-metro-map.md` Phase 4
+  /// success criteria). Updated after each `GenreMapRoutingActor.route`
+  /// reply; surfaced via the side-panel footer + `PROGRESS.md` perf gate.
+  private(set) var lastRoutingElapsedSeconds: TimeInterval = 0
+  private(set) var lastRoutingCorridorCount = 0
+  private(set) var lastRoutingBundledCorridorCount = 0
+  private(set) var lastRoutingMaxStrandsPerCorridor = 0
+  private(set) var lastRoutingCrossingCount = 0
+  private(set) var lastRoutingTransferCrossingCount = 0
+  /// `true` while a Phase-4 routing pass is in flight. Renderer keeps
+  /// rendering the previously-routed polylines (or the Phase-3 fallback)
+  /// during the pass — no main-thread block, no spinner overlay.
+  private(set) var isRouting = false
 
   /// System-font-ish label sizing approximation — character count × an
   /// average glyph advance for the font size, plus pill padding. Real
@@ -93,6 +114,7 @@ final class GenreMapService {
         measureLabel: measureLabel,
       )
       model = built
+      refreshRouting()
     } catch {
       lastError = error.localizedDescription
     }
@@ -114,6 +136,7 @@ final class GenreMapService {
         measureLabel: measureLabel,
       )
       model = built
+      refreshRouting()
     } catch {
       lastError = error.localizedDescription
     }
@@ -213,7 +236,86 @@ final class GenreMapService {
     model = current
   }
 
+  /// Commit a finished drag — recompute routing if the dragged node
+  /// moved beyond `geographicEpsilon`. Called from the panel's
+  /// `DragGesture.onEnded`, NOT mid-drag (the live drag affordance
+  /// stays on the cheap relaxation pass in `applyDrag`).
+  ///
+  /// `originalPosition` is the dragged node's position BEFORE the
+  /// drag started. Mid-drag the panel calls `applyDrag` repeatedly
+  /// to relax neighbours; on release the panel calls this once.
+  func commitDrag(
+    dragged _: String,
+    originalPosition: CGPoint,
+    finalPosition: CGPoint,
+  ) {
+    guard var current = model else { return }
+    let dx = finalPosition.x - originalPosition.x
+    let dy = finalPosition.y - originalPosition.y
+    let distance = sqrt(dx * dx + dy * dy)
+    if distance < Self.geographicEpsilon { return }
+    // Bump the revision so the routing actor invalidates its cache.
+    current.layoutRevision += 1
+    model = current
+    refreshRouting()
+  }
+
+  /// Kick a background routing pass against the current model. The
+  /// Phase-3-fallback Catmull-Rom keeps rendering until this reply
+  /// lands — no spinner overlay, no main-thread stall.
+  func refreshRouting() {
+    guard let snapshot = makeRoutingSnapshot() else { return }
+    isRouting = true
+    Task { [routingActor] in
+      let result = await routingActor.route(snapshot)
+      await MainActor.run { self.applyRoutingResult(result) }
+    }
+  }
+
   // MARK: Private
 
   @ObservationIgnored private let store: LibraryStore
+  @ObservationIgnored private let routingActor = GenreMapRoutingActor()
+
+  /// Apply a finished routing pass onto `model.routedStrands`. Stale
+  /// results (`layoutRevision` mismatch) are dropped — a later pass
+  /// at the current revision will overwrite.
+  private func applyRoutingResult(_ result: GenreMapRoutingActor.Result) {
+    guard var current = model else { return }
+    guard current.layoutRevision == result.layoutRevision else {
+      // A newer revision landed while we were routing — ignore and
+      // let the in-flight pass for the newer revision win.
+      return
+    }
+    current.routedStrands = result.routedByStrand
+    model = current
+    lastRoutingElapsedSeconds = result.elapsedSeconds
+    lastRoutingCorridorCount = result.corridorCount
+    lastRoutingBundledCorridorCount = result.bundledCorridorCount
+    lastRoutingMaxStrandsPerCorridor = result.maxStrandsPerCorridor
+    lastRoutingCrossingCount = result.crossingCount
+    lastRoutingTransferCrossingCount = result.transferCrossingCount
+    isRouting = false
+  }
+
+  /// Build a snapshot of the data `GenreMapRouting` needs to recompute.
+  /// Returns `nil` when there's no model or no strands.
+  private func makeRoutingSnapshot() -> GenreMapRoutingActor.Snapshot? {
+    guard let current = model else { return nil }
+    guard !current.strands.isEmpty else { return nil }
+    let nodes = current.nodes.map { node in
+      GenreMapRoutingActor.Snapshot.Node(
+        genre: node.genre,
+        position: node.position,
+        labelSize: node.labelSize,
+      )
+    }
+    return GenreMapRoutingActor.Snapshot(
+      layoutRevision: current.layoutRevision,
+      strands: current.strands,
+      nodes: nodes,
+      configuration: GenreMapRouting.Configuration(),
+    )
+  }
+
 }

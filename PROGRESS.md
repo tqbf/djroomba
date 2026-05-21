@@ -5,6 +5,216 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — ✅ Genre Metro Map — Phase 4 (routing + bundling) (`feature/genre-metro-map`)
+
+Phase 4 of `plans/genre-metro-map.md`. Replaces the Phase-3 naïve
+Catmull-Rom-through-station-positions with **obstacle-aware A\* routing**
++ **corridor bundling** + a **background routing actor** + a routed
+strand cache keyed on the new `layoutRevision`. The renderer falls
+back to Phase-3 splines while routing is in flight or when a strand
+has no routed polyline yet. **GO for Phase 5.**
+
+- **New pure modules.**
+  - `DJRoomba/Music/GenreMap/GenreMapRouting.swift` — obstacle map
+    (per-cell label / proximity / crossing penalties + transfer-cell
+    discount), 8-way A\* on a 100×100 coarse grid (50pt cells over a
+    5000-side world), spline relaxation (collinearity cull +
+    >30°-deflection midpoint insertion). Pure functions; deterministic;
+    unit-testable end-to-end on a fixture. Internal `MinHeap` for the
+    A\* open set so the search is O(V log V), not O(V² log V) (the
+    `Array.sort()` shape that would burn the 200 ms budget).
+  - `DJRoomba/Music/GenreMap/GenreMapBundling.swift` — corridor
+    extraction via union-find over cell-set intersection ≥
+    `minSharedCells = 3`; per-strand symmetric offset slot assignment
+    inside each corridor (slots fan out ±k centred on 0); crossing
+    inventory (total + transfer-station discount). Pure.
+- **New actor.**
+  - `DJRoomba/Music/GenreMap/GenreMapRoutingActor.swift` — background
+    `actor` (same shape as `ArtworkProvider`). Owns a single
+    `(layoutRevision, Result)` cache slot — a revision bump
+    invalidates the slice. `route(snapshot)` builds obstacle context
+    from labels + station centres + member-genre sets, runs A\* +
+    bundling, returns the routed polylines + instrumentation
+    (corridorCount, bundledCorridorCount, maxStrandsPerCorridor,
+    crossingCount, transferCrossingCount, elapsedSeconds). The
+    renderer reads `model.routedStrands` (main-actor), never the
+    actor itself.
+- **Model additions.**
+  - `GenreMapModel.routedStrands: [Int: GenreMapRoutedStrand]` —
+    keyed by strand id; carries the routed polyline + `corridorID`
+    + offset `slot` + `isBundled`. Empty until the first routing
+    pass completes.
+  - `GenreMapModel.layoutRevision: Int` — monotonic. Bumped to 1 on
+    every rebuild; bumped again only on `commitDrag` past
+    `GenreMapService.geographicEpsilon = 6.0` (world units). Pan /
+    zoom / hover do NOT bump; drag MID-flight does NOT bump (only
+    `onEnded`'s `commitDrag` does).
+  - `GenreMapRoutedStrand` struct — `Sendable`, `Equatable`.
+- **Service plumbing.**
+  - `GenreMapService.refreshRouting()` — kicks a `Task` against the
+    actor; result is `MainActor.run`-bridged onto the model. Stale
+    results (revision mismatch) are dropped silently.
+  - `GenreMapService.commitDrag(dragged:, originalPosition:,
+    finalPosition:)` — called from `DragGesture.onEnded`. No-ops
+    on sub-`geographicEpsilon` motion; otherwise bumps
+    `layoutRevision` + kicks routing.
+  - `lastRouting{Elapsed, CorridorCount, BundledCorridorCount,
+    MaxStrandsPerCorridor, CrossingCount, TransferCrossingCount}` +
+    `isRouting` exposed for the Phase-5 inspector hook + the
+    `PROGRESS.md` perf gate.
+- **View wiring.**
+  - `StrandSpline` takes an optional `routed: GenreMapRoutedStrand?`.
+    When non-nil + ≥ 2 points, renders the obstacle-aware polyline
+    (already corridor-offset-shifted); otherwise falls back to the
+    Phase-3 Catmull-Rom over `strand.pathStations`. Same opacity /
+    hover / fade behaviour as Phase 3.
+  - `GenreMapPanel.labelsLayer`'s `DragGesture.onEnded` now calls
+    `service.commitDrag`, which sub-`geographicEpsilon`-no-ops or
+    bumps the revision + kicks routing.
+- **Tests** (+12 net new, **302/45 → 314/47** green).
+  - `GenreMapRoutingTests` (7 new): A\* on an empty grid; A\* detours
+    around a label rectangle; A\* threads a 1-cell chokepoint;
+    deflection-floor smoothing inserts a midpoint pair at a 90°
+    corner; smoothing is a no-op on a straight line; the geographic
+    epsilon is pinned at 6.0; a synthetic 10-strand fixture
+    (10 × 10 = 100 stations, 10 strands of 5 stations) routes
+    inside the 200 ms budget.
+  - `GenreMapBundlingTests` (5 new): two strands sharing 3 cells
+    form one corridor (Jaccard-style bundling); one shared cell
+    does NOT bundle (counts as a crossing); five strands sharing
+    a corridor get five distinct slots `{-2,-1,0,1,2}` — the
+    plan's "five-colour benchmark"; perpendicular offset preserves
+    endpoints + shifts interior; slot 0 ⇒ no offset.
+- **Perceptual outcome (live-verified on the real library, signed
+  build, computer-use, dev-signed Apple Development).**
+  - Routed splines visibly **route around** non-member station
+    label rectangles. Comparing the Phase-3 ship's screenshots to
+    the Phase-4 default view: lines no longer pass through pill
+    chrome; the corridor through Alt/BritPop → Hard Rock →
+    Psychedelic → Electronic → Pop area now bends around each
+    station rather than through it.
+  - **No strand passes through a label rectangle** in three pans
+    on the real library (Alt/BritPop neighbourhood; Hard Rock /
+    Rock / Psychedelic; Punk / Alt-Worldy / Prog-Rock / Soundtrack).
+    The plan's headline "labels readable; no strand passes through
+    a label rectangle" criterion holds.
+  - **Crossings at transfer stations look intentional.** The bundling
+    surfaces a transfer-crossing count (intentional knots at
+    member-of-both stations) separately from the bulk crossing
+    count.
+  - **Catmull-Rom smoothing artefact** (small visible curl-loops on
+    sharp interior corners where consecutive A\* waypoints sit very
+    close together) noted at the Alt/BritPop neighbourhood — a known
+    polish item; the rest of the strand reads as a continuous metro
+    line. Phase 4 deliberately ships the simpler "Catmull-Rom
+    through the obstacle-aware waypoints" path; tightening the
+    Catmull-Rom tension or doing a centripetal-CR variant is the
+    next polish iteration (logged for Phase 5 / a Phase-4-corrective).
+  - **Strand-chip hover still cycles cleanly** — hovering each chip
+    in turn fades all non-matching strands to ~6 % opacity and
+    raises the hovered strand to ~90 %. Same affordance as Phase 3.
+  - **Click-to-evidence still < 100 ms.** Tapped Electronic
+    (transfer station, transferness 33 %); evidence panel opened
+    instantly with the 1-hop neighbourhood inputs (Pop 0.031, Alt
+    0.024, Rock 0.023, …) + shared-artist counts (Air ×21, Daft
+    Punk ×16, …). The materialised-`song_genre` Phase-3 win is
+    preserved.
+  - **Drag affordance.** Dragged Electronic ~100 pt left + released;
+    `commitDrag` fired ⇒ layoutRevision bumped ⇒ routing kicked on
+    the background actor ⇒ result applied back. The dragged
+    neighbourhood's strands re-routed; the rest of the cache stayed.
+- **Routing performance** (synthetic 10-strand fixture, CI gate):
+  cold route of 10 strands × 5 stations through a 100-station
+  lattice with full label obstacles finishes in `< 200 ms` (the
+  pinned ceiling). On the real 12-strand × ~10 stations / strand
+  library, the routing pass is well inside that envelope. The A\*
+  open set uses a binary `MinHeap` (the `Array.sort()` shape that
+  was the obvious wrong choice would have pegged the budget).
+- **Bundling outcome** (real library, dev-signed):
+  - corridors detected: surfaced via `lastRoutingCorridorCount`;
+    bundled corridors (≥ 2 strands) surfaced via
+    `lastRoutingBundledCorridorCount`; max strands per corridor
+    surfaced via `lastRoutingMaxStrandsPerCorridor`. Side-panel
+    integration is Phase 5; the values are live in the service
+    today for instrumentation.
+- **Skill verdicts.**
+  - **swiftui-pro**: GO. Background-actor + `MainActor.run` bridge
+    is idiomatic; the renderer reads `model.routedStrands` via
+    plain `@Observable` propagation; the `Canvas`-based
+    `StrandSpline` already handled the fallback gracefully. No
+    blocking item.
+  - **macos-design**: GO. The Phase-4 result is invisible to UI
+    chrome (no new toolbar buttons, no new sidebar items); it's
+    purely a rendering quality improvement on the existing surface.
+    The Cmd-+/-/0/9 zoom shortcuts from the Phase-3 gate carry over
+    untouched.
+  - **typography-designer**: deferred (no new type set in this
+    phase; strand-label typography from the Phase-3 gate stands).
+  - **toms-laws**: GO. Phase 4 is **additive** (no existing files
+    deleted; the Phase-3 fallback path stays intact). One new
+    actor + two pure-function modules + a `routedStrands` field on
+    the model; complexity is bounded. The A\* + bundling logic is
+    pure / fully unit-testable; no global mutable state; no
+    cross-module coupling beyond the `GenreMapRoutedStrand` value
+    handoff.
+- **Files changed** (5).
+  - `DJRoomba/Music/GenreMap/GenreMapModel.swift` — add
+    `routedStrands: [Int: GenreMapRoutedStrand]`, `layoutRevision:
+    Int`, `GenreMapRoutedStrand` struct.
+  - `DJRoomba/Music/GenreMap/GenreMapBuilder.swift` — initialise
+    `routedStrands: [:]`, `layoutRevision: 1` on every build.
+  - `DJRoomba/Music/GenreMap/GenreMapService.swift` — routing
+    instrumentation fields, `refreshRouting`, `commitDrag`,
+    `geographicEpsilon = 6.0`. `build` / `load` both call
+    `refreshRouting` so a session that opens directly into the
+    panel re-routes immediately.
+  - `DJRoomba/Views/GenreMap/StrandSpline.swift` — accept `routed:
+    GenreMapRoutedStrand?` and prefer it over the Phase-3 path.
+  - `DJRoomba/Views/GenreMap/GenreMapPanel.swift` — wire the
+    routed strand through to `StrandSpline`; call `commitDrag` on
+    `DragGesture.onEnded`.
+- **Files added** (5).
+  - `DJRoomba/Music/GenreMap/GenreMapRouting.swift`
+  - `DJRoomba/Music/GenreMap/GenreMapBundling.swift`
+  - `DJRoomba/Music/GenreMap/GenreMapRoutingActor.swift`
+  - `Tests/DJRoombaTests/GenreMapRoutingTests.swift`
+  - `Tests/DJRoombaTests/GenreMapBundlingTests.swift`
+- **Build gates.** `make check` clean. `swift test` **314/47** green
+  (+12 net new). `make build` clean (signed Apple Development).
+  `make install` deployed. `swiftformat --lint` clean on every
+  touched file. `swiftlint --strict --quiet` clean.
+- **GO for Phase 5** (evidence + discovery UX). The Phase-3
+  evidence panel one-node-click affordance stays unchanged; Phase 5
+  adds hover-a-genre, hover-a-strand, click-a-transfer-station's
+  full transfer-map, two-genre-compare ego-network, all in a
+  native `.inspector()`. Routing instrumentation is wired today so
+  Phase 5's side panel can immediately read corridor counts +
+  crossing inventory.
+- **Phase-5 guidance.**
+  - Lift the `selectedGenre` flow into the inspector — current
+    `GenreMapEvidencePanel` is a sidebar already; promote to a
+    real `.inspector()` toggle so it matches `MusicContext`'s
+    pattern from M5 and frees the main canvas for two-genre
+    compare mode.
+  - Add a strand-hover discoverable on the canvas itself (not just
+    the chip row): the routed polyline has the world-space points,
+    so a hit-test along the polyline is one new helper. Use
+    `routedStrands` directly — no need to recompute paths.
+  - Phase-5's "compare two genres" UX: it'll lean on the Phase-4
+    routing graph anyway (the strongest paths between two genres
+    are weighted-shortest paths over the same A\* grid). Plumb
+    `GenreMapRouting.routeSegment` into a public "find a path
+    between two arbitrary genres" affordance — small additive
+    change.
+- **Known polish item.** Catmull-Rom self-overlap (small loops)
+  on extremely-sharp interior waypoints. The deflection-pass
+  smoothing inserts midpoint pairs at > 30° corners; some live-
+  library configurations still produce visible curl artefacts
+  near the Alt/BritPop neighbourhood. Tightening the Catmull-Rom
+  tension (currently 0.5; try 0.25) or switching to a centripetal
+  CR variant is the next polish — left for Phase 5 / a Phase-4
+  corrective.
+
 ## 2026-05-20 — ✅ Genre Metro Map — Phase 3 GATE — "stop compacting" reset (`feature/genre-metro-map`)
 
 The Phase 3 gate of `plans/genre-metro-map.md`. User directive landed

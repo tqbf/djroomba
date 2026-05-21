@@ -346,6 +346,32 @@ labels anywhere.**
 
 ### Phase 4 — Routing and bundling
 
+> **Phase-4 ship (2026-05-21).** Landed as planned. New pure modules
+> `GenreMapRouting.swift` (obstacle map + 8-way A\* on a 100×100
+> coarse grid over the 5000-side world; cost terms: label rectangle
+> penalty, station-proximity taper, crossing penalty with a
+> transfer-station discount; spline relaxation via collinearity cull
+> + deflection-floor midpoint insertion) and `GenreMapBundling.swift`
+> (union-find corridor extraction over cell-set intersection ≥ 3
+> shared cells; symmetric ±k offset slots inside each corridor;
+> crossing inventory split into "total" and "intentional at a
+> transfer station"). New `actor GenreMapRoutingActor` —
+> `ArtworkProvider` shape, single `(layoutRevision, Result)` cache
+> slot — recomputes routing on `layoutRevision` bumps (rebuild ⇒ 1;
+> `commitDrag` past `geographicEpsilon = 6.0` world units ⇒ +1).
+> Model gains `routedStrands: [Int: GenreMapRoutedStrand]`. The
+> renderer (`StrandSpline`) prefers the routed polyline; falls back
+> to Phase-3 Catmull-Rom during routing / for any disconnected
+> fallback. **+12 tests, 314/47 green.** Synthetic 10-strand fixture
+> routes inside the pinned 200 ms budget. Live-verified on the real
+> library — splines visibly route around label rectangles; the
+> headline "labels readable; no strand passes through a label
+> rectangle" criterion holds. Known polish item: Catmull-Rom
+> self-overlap on extremely-sharp interior corners produces small
+> visible curl loops near the Alt/BritPop neighbourhood; left as a
+> Phase-5 / corrective polish (tighten CR tension 0.5 → 0.25 or
+> switch to centripetal CR). **GO for Phase 5.**
+
 Make the metro overlay visually coherent. This is the longest phase by
 implementation surface and the one most likely to spawn its own sub-doc.
 

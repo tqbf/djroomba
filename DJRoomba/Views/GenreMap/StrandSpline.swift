@@ -27,6 +27,13 @@ struct StrandSpline: View {
   var positionsByGenre: [String: CGPoint]
   /// Strand to render.
   var strand: GenreMapStrandInference.Strand
+  /// Phase 4 (`plans/genre-metro-map.md` Phase 4): optional routed
+  /// polyline keyed off `strand.id`. When non-nil + non-empty, the
+  /// renderer draws the obstacle-aware A* polyline (with corridor
+  /// offset already applied) instead of the naïve Phase-3 Catmull-Rom
+  /// over `pathStations`. When `nil` (routing in flight, or
+  /// disconnected fallback) the renderer falls back to Phase 3.
+  var routed: GenreMapRoutedStrand?
   /// Hue derived from the strand's `colourID`. Same palette as
   /// `GenreMapPanel.communityColour` but indexed off the strand colour
   /// id — community hue + strand hue don't have to match.
@@ -44,10 +51,18 @@ struct StrandSpline: View {
 
   var body: some View {
     Canvas { context, _ in
-      let projected = strand.pathStations.compactMap { genre -> CGPoint? in
-        guard let position = positionsByGenre[genre] else { return nil }
-        return project(position)
-      }
+      // Phase 4 prefers the routed polyline (obstacle-aware A* +
+      // corridor offset). Fall back to Phase-3 Catmull-Rom through
+      // station positions when routing is in flight / unavailable.
+      let projected: [CGPoint] =
+        if let routed, routed.polyline.count >= 2 {
+          routed.polyline.map(project)
+        } else {
+          strand.pathStations.compactMap { genre -> CGPoint? in
+            guard let position = positionsByGenre[genre] else { return nil }
+            return project(position)
+          }
+        }
       guard projected.count >= 2 else { return }
       let path = Self.catmullRomPath(points: projected)
       let opacity: Double =

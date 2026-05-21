@@ -586,6 +586,7 @@ struct GenreMapPanel: View {
         StrandSpline(
           positionsByGenre: positionsByGenre,
           strand: strand,
+          routed: model.routedStrands[strand.id],
           colour: Self.strandColour(for: strand.colourID),
           isHighlighted: hoveredStrandID == strand.id
             || hoveredStrandID == strand.parentStrandID,
@@ -651,6 +652,20 @@ struct GenreMapPanel: View {
             service.applyDrag(dragged: node.genre, to: world)
           }
           .onEnded { _ in
+            // Phase 4 (`plans/genre-metro-map.md` Phase 4, step 5):
+            // recompute routing on drag release, NOT mid-drag.
+            // `commitDrag` no-ops on sub-`geographicEpsilon` motion,
+            // so a tiny twitch never invalidates the routing cache.
+            if
+              let info = dragging,
+              let current = service.model?.nodes.first(where: { $0.genre == info.genre })
+            {
+              service.commitDrag(
+                dragged: info.genre,
+                originalPosition: info.initialPosition,
+                finalPosition: current.position,
+              )
+            }
             dragging = nil
           }
       )

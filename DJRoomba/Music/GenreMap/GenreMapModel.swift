@@ -72,6 +72,43 @@ struct GenreMapModel: Equatable, Sendable {
   /// `colourID` to keep the same hue stable across the strand's spline
   /// + station ticks.
   var strands = [GenreMapStrandInference.Strand]()
+  /// Phase 4 (`plans/genre-metro-map.md`): obstacle-aware routed
+  /// polylines + corridor bundling, keyed by `strand.id`. Populated
+  /// by `GenreMapRoutingActor` on a background actor after the layout
+  /// settles; empty until the first routing pass completes. The
+  /// renderer prefers `routedStrands[id]` when present and falls back
+  /// to the Phase-3 naïve Catmull-Rom over `Strand.pathStations` while
+  /// routing is in flight (or for the rare disconnected fallback).
+  var routedStrands = [Int: GenreMapRoutedStrand]()
+  /// Phase 4: monotonically-increasing revision number that bumps on
+  /// any geographic mutation (rebuild + node-position movement past
+  /// `geographicEpsilon`). Routing keys its cache on
+  /// `(strand.id, layoutRevision)`; drag does NOT bump revision until
+  /// release (see `GenreMapService.commitDrag`).
+  var layoutRevision = 0
+}
+
+// MARK: - GenreMapRoutedStrand
+
+/// One Phase-4 routed strand — the obstacle-aware polyline +
+/// corridor / offset metadata produced by `GenreMapRouting` +
+/// `GenreMapBundling`. The renderer draws this polyline directly (no
+/// Catmull-Rom — the polyline has already been smoothed); the
+/// corridor id + slot are surfaced so the side panel can say
+/// "this strand shares a corridor with 4 others".
+struct GenreMapRoutedStrand: Equatable, Sendable {
+  var strandID: Int
+  /// World-space points; endpoints snap to the exact station
+  /// positions, interior points are A*-detoured + offset-shifted.
+  var polyline: [CGPoint]
+  /// Corridor identifier from `GenreMapBundling`. Singleton strands
+  /// still get a unique corridor id (downstream code stays uniform).
+  var corridorID: Int
+  /// Symmetric offset slot inside the corridor; 0 ⇒ on the corridor
+  /// centerline, ±1, ±2, … fan out perpendicular to the local tangent.
+  var slot: Int
+  /// `true` ⇒ corridor contains ≥ 2 strands.
+  var isBundled: Bool
 }
 
 // MARK: - GenreMapNode
