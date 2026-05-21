@@ -5,6 +5,245 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — Son of Genre Map — Phase E: Persistence repurpose + metro retirement (programme complete)
+
+**Branch `feature/genre-tree-map`.** The final phase of
+`plans/son-of-genre-map.md` strips the metro renderer + every layer
+that fed it. The substrate that earned its keep — community
+detection, transferness, multi-resolution Louvain matching, evidence
+reads — stays; the routing / bundling / strand inference / force
+layout / strand persistence stack is gone. The tree view becomes the
+sole user-visible genre-visualisation surface.
+
+### Test count delta
+
+- **Start of Phase E**: 405 tests / 58 suites (`feature/genre-tree-map`).
+- **End of Phase E**: **362 tests / 52 suites**. Six suites disappeared
+  with their modules; one suite (`GenreMapPhase6AcceptanceTests`)
+  retired because its invariant (force-layout position stability
+  across re-import) no longer applies; trimmed cases inside
+  `GenreMapPersistenceTests` + `GenreMapDiscoveryTests` +
+  `GenreMapBuilderTests` covered force-layout / strand / metro
+  invariants that no longer have producers.
+- **Net** −43 tests / −6 suites. The plan estimated 290–330 / 45–50;
+  362/52 sits comfortably above the plan floor — the surviving
+  substrate carries more coverage than the plan budgeted (the
+  multi-resolution community + transferness + Yen-k discovery
+  surfaces all still test against the same fixtures).
+
+### Modules deleted (10 files, ~3415 LOC source)
+
+| File | LOC | Reason |
+|---|---|---|
+| `DJRoomba/Music/GenreMap/GenreMapForceLayout.swift` | 623 | Force layout retired — geometric tree layout replaces it. |
+| `DJRoomba/Music/GenreMap/GenreMapRouting.swift` | 863 | A* obstacle-aware routing retired — tree edges follow Bezier curves, no routing needed. |
+| `DJRoomba/Music/GenreMap/GenreMapBundling.swift` | 298 | Corridor bundling retired — no parallel strand bundling under the tree grammar. |
+| `DJRoomba/Music/GenreMap/GenreMapRoutingActor.swift` | 245 | Background routing actor retired — tree layout is O(n+e) on the main thread. |
+| `DJRoomba/Music/GenreMap/GenreMapRoutingVerifier.swift` | 162 | Strand-clears-labels verifier retired — no strands, no labels-as-obstacles. |
+| `DJRoomba/Music/GenreMap/GenreMapStrandInference.swift` | 948 | Strand inference + TF-IDF labels retired — strand grammar replaced by trunks. |
+| `DJRoomba/Views/GenreMap/GenreMapPanel.swift` | 1067 | Metro sheet host replaced by `GenreTreeMapPanel`. |
+| `DJRoomba/Views/GenreMap/GenreMapInspector.swift` | 250 | Metro-flavoured inspector replaced by `GenreTreeInspector`. |
+| `DJRoomba/Views/GenreMap/StrandSpline.swift` | 251 | Strand spline renderer retired. |
+| `DJRoomba/Views/GenreMap/StationLabel.swift` | 205 | Metro station pill replaced by `TrunkPill` / `BranchPill`. |
+
+### Modules trimmed
+
+- `GenreMapBuilder.swift` rewritten — from a 783-line "pipeline that
+  produces force-laid-out positions + strands + state rows" into a
+  ~330-line **substrate loader** that produces nodes + community ids
+  + transferness + community-matched persistence state rows. Force
+  layout, strand inference, strand matching, `measureLabel` all gone.
+  Public surface: `build(nodes:evidence:previousState:configuration:)
+  → BuildResult { model, stateRows }`. No more `buildWithPersistence`
+  — the persistence path is the only path.
+- `GenreMapService.swift` rewritten — from a 464-line "metro panel
+  binding target" into a ~210-line read-only loader. Dropped
+  `applyDrag`, `commitDrag`, `refreshRouting`, `evidenceOnDemand`,
+  the routing instrumentation, the routing actor, the persistence
+  write (now lives in `GenreTreeService.persistTreeLayout`). Kept
+  `representativeEvidence` + `compareEvidence` (re-used verbatim by
+  `GenreTreeInspector`). `measureLabel` parameter kept as
+  source-compat shim (default-valued to a no-op `.zero` returner) so
+  surviving call sites compile without churn.
+- `GenreMapModel.swift` slimmed — dropped `strands` field +
+  `routedStrands` field + the `GenreMapRoutedStrand` type. `model.
+  worldBounds` / `model.defaultCentre` kept as informational fields
+  (tree view computes its own).
+- `GenreMapPersistence.swift` slimmed — dropped
+  `matchStrandsByMembers` + the `stabilityForce` constant.
+  `matchCommunities` + the Jaccard helpers + the
+  `encodeStrandIDs` / `encodeLabelTokens` codec helpers stay.
+- `GenreMapDiscovery.swift` slimmed — dropped `servingStrandIDs`,
+  `strandsOverlappingPath`, `transferMapPlan`, the `TransferMapPlan`
+  struct. `kShortestPaths` + `oneHopNeighbours` + `transferStations`
+  + the `Selection` enum stay (all consumed by the tree inspector).
+- `GenreMapEvidencePanel.swift` slimmed — dropped `EvidenceNeighbours`,
+  `EvidenceStrands`, `EvidenceConnectedNeighbourhoods` (only the
+  retired `GenreMapInspector` used them). Trimmed `EvidenceCompare`
+  to drop the `involvedStrandIDs` / `strandsSection` block. Kept
+  `EvidenceHeader` + `EvidenceRepresentative` + `EvidenceCompare`
+  (re-used by `GenreTreeInspector`).
+
+### Persistence repurpose (no schema change)
+
+- `v9.genreMapState.x` / `.y` columns now carry **tree-layout
+  positions** (the trunk-and-radial-fan world coordinates produced by
+  `GenreTreeLayout`). The tree positions are written back by a new
+  `GenreTreeService.persistTreeLayout(nodes:evidence:render:)`
+  helper invoked at the end of every successful `build()`.
+- `v9.genreMapState.strand_ids` retires as a write target — every
+  write emits `"[]"` (additive deprecation per the plan; the column
+  stays so v9 → v10 migration is unnecessary).
+- `v9.genreMapState.community_medium` continues to carry the
+  predecessor's matched community id (via Jaccard ≥ 0.5 in
+  `GenreMapPersistence.matchCommunities`). On the live library this
+  preserves the seven trunks across re-import: a re-Analyze that
+  arrives at the same partition keeps the same trunk labels.
+- `v9.genre_map_strand` retires as a write target — every write
+  passes `strands: []`. The table stays + the row record stays + the
+  `loadGenreMapState` strand-row read still happens (additive
+  deprecation). On a fresh run the table is empty; on an upgrade
+  from a metro-era DB the rows are present but ignored.
+
+### Menu + UI changes
+
+- **Playback menu** — `Analyze Genre Map` (the metro-era "rebuild
+  the v7 substrate") removed. `Show Genre Map…` removed. Surviving:
+  `Analyze Genre Graph` (⌥⌘A), `Show Genre Tree…` (⌥⇧⌘A),
+  `Reanalyze Automatically`.
+- **Debug menu** — `Show Genre Map (Metro)…` removed. `Re-Analyze
+  Genre Map (Metro)` removed. Surviving: `Seed 500 Random Plays`,
+  `Catalog Access Probe (Phase 0)`, `Re-Analyze Genre Tree`.
+- **`MainShellView`** — the metro `.sheet(isPresented:
+  $controller.genreMapSheetPresented)` modifier removed; the
+  `GenreMapPanel()` host is gone.
+- **`MusicController`** — `analyzeGenreMap()` removed;
+  `genreMapSheetPresented` property removed.
+  `runMapRebuildIfEnabled()` now kicks `genreTreeService.build()`
+  after the substrate `mapService.build()` so the v9 state row
+  positions land at the same write site they used to.
+
+### Tests
+
+- **Deleted suites** (~30 tests total):
+  - `GenreMapForceLayoutTests` — module gone.
+  - `GenreMapRoutingTests` — module gone.
+  - `GenreMapBundlingTests` — module gone.
+  - `GenreMapStrandInferenceTests` — module gone.
+  - `GenreMapPhase6AcceptanceTests` — the headline invariant
+    (force-layout position stability across re-import) retires with
+    force layout itself; the surviving invariant (community-id
+    stability via Jaccard ≥ 0.5) is covered by
+    `GenreMapPersistenceTests`.
+- **Trimmed cases** (~7 tests):
+  - `GenreMapPersistenceTests` — dropped `matchStrandsByMembers`
+    cases + the three `previousPositions / stabilityForce` cases
+    that touched the force-layout API.
+  - `GenreMapDiscoveryTests` — dropped `servingStrandIDs collapses
+    branches to parent corridor` (uses retired
+    `GenreMapStrandInference.Strand`) + `transferMapPlan centres on
+    the focused node` (function retired).
+  - `GenreMapBuilderTests` — rewrote the `measureLabel`-bearing
+    cases against the new `build(nodes:evidence:previousState:)`
+    signature; dropped the `default centre is the heaviest
+    community's centroid` case (force-layout-derived invariant; the
+    substrate's `defaultCentre` is now `.zero`).
+  - `GenreMapServiceErrorClearingTests` — updated call sites to the
+    new no-arg `service.build()` signature.
+
+### Live verification (real 84-genre / 180-back-edge library)
+
+Signed `build/DJRoomba.app` driven via computer-use. Screenshots in
+`/tmp/phase-e-*.png`:
+
+- **Menu confirmation** (`/tmp/phase-e-menu-playback.png` +
+  `/tmp/phase-e-menu-debug.png`): both menus show the surviving
+  entries; **no `Show Genre Map (Metro)…`, no `Analyze Genre Map`,
+  no `Re-Analyze Genre Map (Metro)`** anywhere in the user-visible
+  chrome.
+- **Trunk-tree default** (`/tmp/phase-e-trunk-tree-default.png`):
+  `Show Genre Tree…` → sheet opens with header "Genre Tree · 7
+  trunks · 84 genres · 180 back-edges"; trunk-tree rendering shows
+  Pop/Rock + Alt/Indie + Electro/Mainstream + R&B/Soul +
+  Pop/Rock/60s-70s/Classic + Pop/Rock/New-Wave + Contemporary
+  Celtic at trunk rank (`cmd+9` fit view); back-edges visible as
+  faint multi-coloured lines.
+- **Radial focus** (`/tmp/phase-e-radial-focus.png`): click
+  Pop/Rock → radial focus around the genre, 1-hop neighbours fanned
+  around it (Soft Rock, Adult Contemporary, Disco, Music,
+  Alternative, Rock, R&B/Soul, Contemporary Celtic, Hard Rock, Pop,
+  Alt/BritPop). Inspector shows full single-genre evidence: "Pop/
+  Rock · Ordinary · Transferness 6% · 25 Tracks / 11 Albums / 11
+  Artists"; Listen + Save as Playlist buttons; Nearest Neighbours
+  list (Soft Rock 0.079, Adult Contemporary 0.073, Disco 0.073,
+  Music 0.067, Contemporary Celtic 0.041, Hard Rock 0.022); Two-Hop
+  Neighbourhood (2 Tone, 80s, Alt/Goth/Industrial, ...).
+- **Compare** (`/tmp/phase-e-compare.png`): ⇧-click R&B/Soul while
+  Pop/Rock focused → inspector switches to "Pop/Rock ↔ R&B/Soul".
+  Highest-Weight Paths: 1. Pop/Rock → R&B/Soul Σ0.01, 2. Pop/Rock →
+  Soft Rock → R&B/Soul Σ0.09, 3. Pop/Rock → Adult Contemporary →
+  R&B/Soul Σ0.08, 4. Pop/Rock → Disco → R&B/Soul Σ0.08, 5. Pop/Rock
+  → Music → R&B/Soul Σ0.08. Transfer Stations Along the Way:
+  R&B/Soul. Shared Evidence: Artists ABBA ×1, Albums ABBA — ABBA
+  Gold: Greatest Hits ×1, Tracks ABBA — Dancing Queen ×1. Canvas
+  dims non-path pills.
+- **Listen → playback** (`/tmp/phase-e-listen-playback.png`):
+  clicked Listen on Pop/Rock; now-playing bar reads "This Is a Low"
+  by Blur at 0:09 / 5:17. Transient queue start works.
+- **Inspector single-genre after relaunch**
+  (`/tmp/phase-e-inspector-single.png`): closed sheet, reopened via
+  ⌥⇧⌘A → "7 trunks · 84 genres · 180 back-edges" unchanged; click
+  Pop/Rock reproduces the same inspector content. Persistence
+  round-trips cleanly.
+
+### Persistence verification
+
+`sqlite3 ~/Library/Containers/org.sockpuppet.djroomba/Data/Library/
+Application Support/DJRoomba/library.sqlite` post-build:
+
+- `genre_map_state` has 115 rows (one per genre).
+- `genre_map_strand` has 0 rows (additive deprecation).
+- Tree positions in `(x, y)` for the four spot-checked rows:
+  `Pop/Rock = (3500, 3500)` (canvas centre), `R&B/Soul = (5750,
+  5750)`, `Alternative = (1617.7, 882.3)`, `Folk = (5155.5,
+  3301.0)` — all sensible tree-layout coordinates.
+- `community_medium` carries `new-N` ids on the first build; on
+  re-analyze the same `new-N` ids stay (because the same partition
+  hits Jaccard = 1.0 against itself). Trunk identity preserved
+  across re-import.
+- `revision` bumped on every `analyzeGenreTree` call.
+
+### Carry-forward
+
+- **The metro-era `feature/genre-metro-map` branch + PR #5 stay
+  open as historical reference.** Phase E retires the metro view
+  entirely, so the PR's commits become "intermediate state we
+  learned from"; neither branch ships to `main` in this programme.
+- **`v10.genreMapState`** (drop the `strand_ids` column + the
+  `genre_map_strand` table) is the eventual cleanup target. Not
+  scheduled — the additive-deprecation posture is fine in
+  perpetuity.
+- **macos-design carry-forward from the metro Phase-6 gate** (the
+  "remember last pan/zoom?" question) still lives in
+  `DESIGN-TODO.md`. The tree sheet inherits the same posture: pan/
+  zoom resets on each open. Atlas state belongs in a top-level
+  `WindowGroup`, not a sheet.
+
+### `swift test` + `make check` + `make build`
+
+- `swift test` — **362 tests / 52 suites passed**.
+- `make check` — clean (Swift 6.3.1 / macOS 26.4.1).
+- `make build` — clean + signed (`build/DJRoomba.app` valid on disk,
+  satisfies its Designated Requirement).
+- `swiftformat --lint` — 0 violations across 169 files.
+- `swiftlint --strict` — 0 violations across 203 files.
+
+### Phase E gate verdict
+
+**Ship-status block landed on `plans/son-of-genre-map.md`.** The
+programme is feature-complete on `feature/genre-tree-map`. Neither
+this branch nor the metro predecessor lands on `main`.
+
 ## 2026-05-21 — Son of Genre Map — Phase D: Inspector + compare + listen-to-this
 
 **Branch `feature/genre-tree-map`.** Phase D of

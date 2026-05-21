@@ -26,7 +26,7 @@ struct GenreMapServiceErrorClearingTests {
     let service = GenreMapService(store: store)
     #expect(service.lastError == nil, "fresh service has no error")
 
-    await service.build(measureLabel: GenreMapService.defaultMeasureLabel)
+    await service.build()
     #expect(service.lastError == nil, "successful build clears lastError at success site")
     #expect(service.model != nil, "build produced a model")
   }
@@ -41,7 +41,7 @@ struct GenreMapServiceErrorClearingTests {
     let service = GenreMapService(store: store)
 
     // First build: writes through cleanly.
-    await service.build(measureLabel: GenreMapService.defaultMeasureLabel)
+    await service.build()
     #expect(service.lastError == nil)
 
     // Second build on the same store + service. Even if a previous run
@@ -51,7 +51,7 @@ struct GenreMapServiceErrorClearingTests {
     // failure without injecting a fake store, but the invariant we
     // care about is post-condition: after a successful rebuild,
     // lastError is nil.
-    await service.build(measureLabel: GenreMapService.defaultMeasureLabel)
+    await service.build()
     #expect(service.lastError == nil, "second successful build still nil at the success site")
   }
 

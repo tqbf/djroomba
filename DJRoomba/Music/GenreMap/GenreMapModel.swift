@@ -47,68 +47,22 @@ enum GenreMapNodeKind: Int, Equatable, Sendable, CaseIterable {
 struct GenreMapModel: Equatable, Sendable {
   var nodes: [GenreMapNode]
   var layoutEdges: [GenreMapEdge]
-  /// Medium-resolution communities, keyed by community id. Hulls draw
-  /// from these.
+  /// Medium-resolution communities, keyed by community id.
   var communities: [GenreMapCommunity]
-  /// World-space bounding box of the laid-out nodes (label centres,
-  /// pre-zoom). The panel uses it for the **opt-in** Fit toolbar action
-  /// (Cmd-9). Default presentation centres on `defaultCentre` at scale
-  /// 1.0× — Phase-3-gate "stop compacting" reset (2026-05-20): the map
-  /// is a panable / zoomable surface, not a fit-to-viewport overview.
+  /// World-space bounding box of the laid-out nodes (label centres).
+  /// Retained on the model for downstream code that reads it; the
+  /// tree view computes its own bounds from the geometric layout, so
+  /// this is informational under the Son-of-Genre-Map regime
+  /// (`plans/son-of-genre-map.md` Phase E).
   var worldBounds: CGRect
-  /// World-space point the panel uses as the **default viewport
-  /// centre** on first appearance (Phase-3-gate 2026-05-20). Computed
-  /// as the centroid of the heaviest community — defined as the
-  /// community whose summed member `weight` is largest, deterministic
-  /// tie-break by community id. A recognisable neighbourhood, not the
-  /// world centroid; the user pans / zooms to discover the rest.
+  /// World-space "default viewport centre" left over from the metro
+  /// renderer; the tree view does its own centring so this is a no-op
+  /// historical record under Phase E of `plans/son-of-genre-map.md`.
   var defaultCentre = CGPoint.zero
-  /// Phase 3 (`plans/genre-metro-map.md`): algorithmic metro strands
-  /// extracted from the layout graph + community partition (heavy paths
-  /// inside communities + cross-community bridge strands). Empty before
-  /// Phase 3; in-memory only (Phase 6 persists). Each strand renders as
-  /// a faint Catmull-Rom spline over its `pathStations`; the renderer
-  /// draws coloured ticks on every station serving a strand and uses
-  /// `colourID` to keep the same hue stable across the strand's spline
-  /// + station ticks.
-  var strands = [GenreMapStrandInference.Strand]()
-  /// Phase 4 (`plans/genre-metro-map.md`): obstacle-aware routed
-  /// polylines + corridor bundling, keyed by `strand.id`. Populated
-  /// by `GenreMapRoutingActor` on a background actor after the layout
-  /// settles; empty until the first routing pass completes. The
-  /// renderer prefers `routedStrands[id]` when present and falls back
-  /// to the Phase-3 naïve Catmull-Rom over `Strand.pathStations` while
-  /// routing is in flight (or for the rare disconnected fallback).
-  var routedStrands = [Int: GenreMapRoutedStrand]()
-  /// Phase 4: monotonically-increasing revision number that bumps on
-  /// any geographic mutation (rebuild + node-position movement past
-  /// `geographicEpsilon`). Routing keys its cache on
-  /// `(strand.id, layoutRevision)`; drag does NOT bump revision until
-  /// release (see `GenreMapService.commitDrag`).
+  /// Monotonically-increasing revision number bumped on every
+  /// rebuild. Retained for persistence bookkeeping (the v9 row's
+  /// `revision` column carries this value forward).
   var layoutRevision = 0
-}
-
-// MARK: - GenreMapRoutedStrand
-
-/// One Phase-4 routed strand — the obstacle-aware polyline +
-/// corridor / offset metadata produced by `GenreMapRouting` +
-/// `GenreMapBundling`. The renderer draws this polyline directly (no
-/// Catmull-Rom — the polyline has already been smoothed); the
-/// corridor id + slot are surfaced so the side panel can say
-/// "this strand shares a corridor with 4 others".
-struct GenreMapRoutedStrand: Equatable, Sendable {
-  var strandID: Int
-  /// World-space points; endpoints snap to the exact station
-  /// positions, interior points are A*-detoured + offset-shifted.
-  var polyline: [CGPoint]
-  /// Corridor identifier from `GenreMapBundling`. Singleton strands
-  /// still get a unique corridor id (downstream code stays uniform).
-  var corridorID: Int
-  /// Symmetric offset slot inside the corridor; 0 ⇒ on the corridor
-  /// centerline, ±1, ±2, … fan out perpendicular to the local tangent.
-  var slot: Int
-  /// `true` ⇒ corridor contains ≥ 2 strands.
-  var isBundled: Bool
 }
 
 // MARK: - GenreMapNode

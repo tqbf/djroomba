@@ -296,8 +296,6 @@ struct GenreTreeInspector: View {
       genreB: rhs.genre,
       paths: comparePaths,
       transferStations: uniqueTransferStations,
-      involvedStrandIDs: [],
-      model: model,
       evidence: compareEvidence,
       isLoading: isLoadingCompare,
     )

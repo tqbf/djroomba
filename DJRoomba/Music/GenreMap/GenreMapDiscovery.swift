@@ -17,9 +17,8 @@ import Foundation
 ///    cumulative cost.
 /// 3. **Evidence rollup helpers.** Light-weight collectors over the
 ///    in-memory model: 1-hop layout-graph neighbours of a genre with
-///    their composite weight, strand membership lookups, transfer-
-///    station enumeration along a path, and the per-genre serving
-///    strand list (used by hover-mode brightness rules).
+///    their composite weight, and transfer-station enumeration along
+///    a path.
 ///
 /// Everything here is `nonisolated` static and unit-testable on a
 /// fixture without touching the SwiftUI panel or `GenreMapService`.
@@ -64,15 +63,6 @@ enum GenreMapDiscovery {
   struct Neighbour: Equatable, Sendable {
     var genre: String
     var weight: Double
-  }
-
-  /// Output of `transferMapPlan`. World-space `centre` + the final
-  /// `scale` factor (`scale > 1` = zoomed in). The view layer applies
-  /// this by setting its `offset` to centre `centre` in the viewport
-  /// and its `scale` to `scale`.
-  struct TransferMapPlan: Equatable, Sendable {
-    var centre: CGPoint
-    var scale: CGFloat
   }
 
   /// Edge over the layout graph (or any other display channel the
@@ -199,30 +189,6 @@ enum GenreMapDiscovery {
     }
   }
 
-  /// Set of strands whose `memberGenres` include `genre`. Returned as
-  /// strand ids so callers can resolve back to the strand record. Used
-  /// by hover-brightness ("brighten strands that pass through this
-  /// pill") and the transfer-map mode ("which strands does this
-  /// transfer station serve").
-  static func servingStrandIDs(
-    of genre: String,
-    strands: [GenreMapStrandInference.Strand],
-  ) -> Set<Int> {
-    var ids = Set<Int>()
-    for strand in strands where strand.memberGenres.contains(genre) {
-      // For a branch, the user-facing identity is the parent strand
-      // (the colour fans out from the parent). The transfer-map mode
-      // wants the LIST of serving corridors; branches share the parent
-      // corridor, so we collapse to the parent.
-      if strand.isBranch, let parent = strand.parentStrandID {
-        ids.insert(parent)
-      } else {
-        ids.insert(strand.id)
-      }
-    }
-    return ids
-  }
-
   /// Transfer stations along a path — the genres on `path.stations`
   /// whose `nodeKind == .transferStation`. Used by the compare-genres
   /// inspector section to highlight "you pass through these transfer
@@ -235,90 +201,6 @@ enum GenreMapDiscovery {
       guard let node = nodesByGenre[name] else { return nil }
       return node.nodeKind == .transferStation ? name : nil
     }
-  }
-
-  /// Strand ids whose `pathStations` overlap the given path by ≥ 1
-  /// edge (consecutive station pair). Used by the compare-genres
-  /// inspector to surface "this comparison crosses these corridors".
-  static func strandsOverlappingPath(
-    path: Path,
-    strands: [GenreMapStrandInference.Strand],
-  ) -> Set<Int> {
-    guard path.stations.count >= 2 else { return [] }
-    var pathEdges = Set<EdgeKey>()
-    for index in 0..<(path.stations.count - 1) {
-      let lhs = path.stations[index]
-      let rhs = path.stations[index + 1]
-      pathEdges.insert(EdgeKey(a: min(lhs, rhs), b: max(lhs, rhs)))
-    }
-    var ids = Set<Int>()
-    for strand in strands {
-      let stations = strand.pathStations
-      guard stations.count >= 2 else { continue }
-      for index in 0..<(stations.count - 1) {
-        let lhs = stations[index]
-        let rhs = stations[index + 1]
-        let key = EdgeKey(a: min(lhs, rhs), b: max(lhs, rhs))
-        if pathEdges.contains(key) {
-          // Collapse branches to their parent corridor for the visual
-          // bundle the user sees as "one strand".
-          if strand.isBranch, let parent = strand.parentStrandID {
-            ids.insert(parent)
-          } else {
-            ids.insert(strand.id)
-          }
-          break
-        }
-      }
-    }
-    return ids
-  }
-
-  /// Transfer-station "centre and zoom" plan — the deterministic
-  /// numeric output that the view layer animates the viewport to. The
-  /// algorithm here is unit-testable; the actual viewport animation
-  /// lives in `GenreMapPanel`.
-  ///
-  /// Computes a zoom level that lands the bounding box of the
-  /// transfer station + its one-hop layout-graph neighbours snugly
-  /// inside `viewport`, with a comfortable padding inset. Returns
-  /// `nil` when the input is degenerate (no neighbours, zero
-  /// viewport, etc.).
-  static func transferMapPlan(
-    centreGenre: String,
-    nodesByGenre: [String: GenreMapNode],
-    edges: [Edge],
-    viewport: CGSize,
-    padding: CGFloat = 100,
-    minScale: CGFloat = 0.4,
-    maxScale: CGFloat = 2.4,
-  ) -> TransferMapPlan? {
-    guard let centreNode = nodesByGenre[centreGenre] else { return nil }
-    guard viewport.width > 0, viewport.height > 0 else { return nil }
-    let neighbours = oneHopNeighbours(of: centreGenre, edges: edges)
-      .compactMap { nodesByGenre[$0.genre] }
-    var points: [CGPoint] = [centreNode.position]
-    points.append(contentsOf: neighbours.map(\.position))
-    var minX = CGFloat.infinity
-    var minY = CGFloat.infinity
-    var maxX = -CGFloat.infinity
-    var maxY = -CGFloat.infinity
-    for point in points {
-      minX = min(minX, point.x)
-      minY = min(minY, point.y)
-      maxX = max(maxX, point.x)
-      maxY = max(maxY, point.y)
-    }
-    let width = max(1, maxX - minX)
-    let height = max(1, maxY - minY)
-    let availableWidth = max(1, viewport.width - 2 * padding)
-    let availableHeight = max(1, viewport.height - 2 * padding)
-    let raw = min(availableWidth / width, availableHeight / height)
-    let scale = max(minScale, min(maxScale, raw))
-    return TransferMapPlan(
-      centre: centreNode.position,
-      scale: scale,
-    )
   }
 
   // MARK: Private

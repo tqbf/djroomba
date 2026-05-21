@@ -139,20 +139,11 @@ final class MusicController {
   /// app-level sheet state under `@Observable`).
   var catalogSearchPresented = false
 
-  /// Phase 1 (`plans/genre-metro-map.md`) — drives the genre-map sheet's
-  /// presentation flag from `MainShellView` via `Bindable`. A sheet (not a
-  /// docked panel) for Phase 1 because the map is a sibling, exploratory
-  /// view; the existing genre-graph panel stays the always-on detail-pane
-  /// affordance. Phase 6 will rename / consolidate.
-  var genreMapSheetPresented = false
-
-  /// Phase B (`plans/son-of-genre-map.md`) — drives the genre-tree
-  /// sheet's presentation flag from `MainShellView` via `Bindable`.
-  /// The new user-visible surface; the metro sheet
-  /// (`genreMapSheetPresented`) stays in-tree but is unwired from the
-  /// user-visible menu in Phase B (it can be re-enabled for a
-  /// comparison build by un-commenting its Playback ▸ menu entry).
-  /// Phase E retires the metro sheet entirely.
+  /// Drives the genre-tree sheet's presentation flag from
+  /// `MainShellView` via `Bindable`. Phase B of
+  /// `plans/son-of-genre-map.md` introduced this as the new
+  /// user-visible surface; Phase E retired the metro sibling sheet
+  /// (`genreMapSheetPresented`) entirely.
   var genreTreeSheetPresented = false
 
   /// Derived summary collections — **stored, input-driven state**, not
@@ -478,21 +469,6 @@ final class MusicController {
     await runGenreAnalysis()
   }
 
-  /// **Analyze (Map)** — Phase 1 of `plans/genre-metro-map.md`. Always
-  /// runs (the menu action's unconditional path). Sequence:
-  ///
-  /// 1. Rebuild the v6 `genre_edge` table first (the playlist channel
-  ///    of the new model reads from it; without this step the playlist
-  ///    channel is silent — still correct, but weaker).
-  /// 2. Rebuild the v7 `genre_node` + `genre_edge_evidence` substrate
-  ///    and fold it into a renderable `GenreMapModel` via
-  ///    `GenreMapBuilder` (pure, off-main pipeline). Failures are
-  ///    surfaced via `genreMapService.lastError`, never thrown.
-  func analyzeGenreMap() async {
-    await runGenreAnalysis()
-    await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel)
-  }
-
   /// **Analyze Genre Tree** — Phase B of `plans/son-of-genre-map.md`.
   /// User-facing rebuild of the trunk-tree view. Reuses the metro
   /// substrate (community detection lives in `GenreMapService`) so the
@@ -509,7 +485,7 @@ final class MusicController {
   ///    no SQL outside steps 1–2.
   func analyzeGenreTree() async {
     await runGenreAnalysis()
-    await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel)
+    await genreMapService.build()
     await genreTreeService.build()
   }
 
@@ -611,27 +587,27 @@ final class MusicController {
     }
   }
 
-  /// Auto-rebuild hook for the map. **Phase 6 consolidation** of
-  /// `reanalyzeGenreGraphIfEnabled` + the old `rebuildGenreMapIfEnabled`
-  /// into a single funnel called from every mutation trigger
-  /// (`runImport`, `addSongs`, `removeTracks`, `setAppPlaylistTracks`,
-  /// `deleteAppPlaylist`). Fire-and-forget on the MainActor; gated on
-  /// the `autoReanalyzeGenreGraph` UserDefaults key (semantics
-  /// preserved — the key flips BOTH the v6 graph + the v7 map; the
-  /// v6 panel still consumes the v6 `genre_edge` table until a
-  /// post-merge cleanup pass retires that panel).
+  /// Auto-rebuild hook for the genre tree. Single funnel called from
+  /// every mutation trigger (`runImport`, `addSongs`, `removeTracks`,
+  /// `setAppPlaylistTracks`, `deleteAppPlaylist`). Fire-and-forget on
+  /// the MainActor; gated on the `autoReanalyzeGenreGraph` UserDefaults
+  /// key (semantics preserved across the metro → tree pivot — the key
+  /// flips BOTH the v6 graph + the v7 substrate + the tree view).
   ///
-  /// Sequence: v6 `rebuildGenreGraph` first (the map's playlist channel
-  /// reads from it), then v7 `rebuildGenreMap` + the Phase-6-aware
-  /// `GenreMapBuilder.buildWithPersistence`. `GenreGraphService` /
-  /// `GenreMapService` each coalesce concurrent triggers via their
-  /// own `isAnalyzing` flag, so a burst of edits collapses into one
-  /// rebuild — the next trigger after it lands already reflects every
-  /// change in between.
+  /// Sequence: v6 `rebuildGenreGraph` first (the map's playlist
+  /// channel reads from it), then v7 `rebuildGenreMap` substrate +
+  /// `GenreTreeService.build` (which persists tree positions back to
+  /// `v9.genreMapState`). Each service coalesces concurrent triggers
+  /// via its own `isAnalyzing` flag, so a burst of edits collapses
+  /// into one rebuild — the next trigger after it lands already
+  /// reflects every change in between.
   func runMapRebuildIfEnabled() {
     guard autoReanalyzeGenreGraph else { return }
     Task { await runGenreAnalysis() }
-    Task { await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel) }
+    Task {
+      await genreMapService.build()
+      await genreTreeService.build()
+    }
   }
 
   /// File ▸ Export Library Snapshot…. Build the compressed `.djroomba`

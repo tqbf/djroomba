@@ -2,9 +2,12 @@ import SwiftUI
 
 // MARK: - GenreMapInspectorSelection
 
-/// Phase 5 inspector mode. The panel maps its `selectedGenre` /
-/// `compareSecondGenre` state to one of these cases; the inspector
-/// dispatches on the case.
+/// Inspector mode selector for the tree inspector. Originated as the
+/// metro Phase-5 inspector dispatcher; the metro view retired in Phase
+/// E of `plans/son-of-genre-map.md`, but the enum + the three subviews
+/// below survive verbatim — the tree inspector (`GenreTreeInspector`)
+/// reuses them for the single-genre header, the representative
+/// artists/albums roll-up, and the compare-mode card.
 enum GenreMapInspectorSelection: Equatable {
   case empty
   case single(GenreMapNode)
@@ -15,8 +18,7 @@ enum GenreMapInspectorSelection: Equatable {
 
 /// Shared header for the single-genre inspector — name, kind chip,
 /// transferness%. Pulled out as its own struct per swiftui-pro's
-/// "extract subviews" rule; the panel's `body` was already large at
-/// Phase 2 and Phase 5 adds three more sections.
+/// "extract subviews" rule.
 struct EvidenceHeader: View {
 
   // MARK: Internal
@@ -113,147 +115,11 @@ struct EvidenceHeader: View {
   }
 }
 
-// MARK: - EvidenceNeighbours
-
-/// One-hop layout-graph neighbours of the selected genre with their
-/// composite weight. The ego network of the click target. Reads
-/// `GenreMapDiscovery.oneHopNeighbours` — pure / fast / no I/O.
-struct EvidenceNeighbours: View {
-
-  // MARK: Internal
-
-  var genre: String
-  var model: GenreMapModel
-  var hullColour: Color
-  /// Tap a neighbour name ⇒ jump the inspector + the canvas highlight
-  /// to that genre. Optional so the compare-section can re-use the
-  /// rendering without a tap target.
-  var onSelect: ((String) -> Void)?
-
-  var body: some View {
-    let edges = neighbours()
-    return VStack(alignment: .leading, spacing: 6) {
-      Text("Nearest neighbours")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .textCase(.uppercase)
-      if edges.isEmpty {
-        Text("No layout-graph edges incident to this node.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      } else {
-        ForEach(edges, id: \.genre) { row in
-          neighbourRow(row)
-        }
-      }
-    }
-  }
-
-  // MARK: Private
-
-  private func neighbours() -> [GenreMapDiscovery.Neighbour] {
-    let edges = model.layoutEdges.map {
-      GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
-    }
-    return Array(GenreMapDiscovery.oneHopNeighbours(of: genre, edges: edges).prefix(8))
-  }
-
-  @ViewBuilder
-  private func neighbourRow(_ row: GenreMapDiscovery.Neighbour) -> some View {
-    let content = HStack(spacing: 6) {
-      Circle()
-        .fill(hullColour)
-        .frame(width: 5, height: 5)
-      Text(row.genre)
-        .font(.caption)
-        .lineLimit(1)
-      Spacer()
-      Text(String(format: "%.3f", row.weight))
-        .font(.caption.monospacedDigit())
-        .foregroundStyle(.secondary)
-    }
-    if let onSelect {
-      Button {
-        onSelect(row.genre)
-      } label: {
-        content
-      }
-      .buttonStyle(.plain)
-      .contentShape(Rectangle())
-    } else {
-      content
-    }
-  }
-}
-
-// MARK: - EvidenceStrands
-
-/// "Serving strands" list — the strands whose `memberGenres` include
-/// the selected genre. Each row is the strand's algorithmic placename
-/// + a coloured dot at the strand colour. On transfer stations this
-/// is the answer to "which corridors meet here".
-struct EvidenceStrands: View {
-
-  // MARK: Internal
-
-  var genre: String
-  var model: GenreMapModel
-
-  var body: some View {
-    let strands = servingStrands()
-    return VStack(alignment: .leading, spacing: 6) {
-      Text("Serving strands")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .textCase(.uppercase)
-      if strands.isEmpty {
-        Text("Not on any inferred strand.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      } else {
-        ForEach(strands) { strand in
-          HStack(spacing: 6) {
-            Circle()
-              .fill(GenreMapPanel.strandColour(for: strand.colourID))
-              .frame(width: 7, height: 7)
-            Text(strandLabel(strand))
-              .font(.caption)
-              .lineLimit(1)
-            Spacer()
-          }
-        }
-      }
-    }
-  }
-
-  // MARK: Private
-
-  private func servingStrands() -> [GenreMapStrandInference.Strand] {
-    var seen = Set<Int>()
-    var out = [GenreMapStrandInference.Strand]()
-    for strand in model.strands where strand.memberGenres.contains(genre) {
-      let canonicalID = strand.isBranch ? (strand.parentStrandID ?? strand.id) : strand.id
-      guard seen.insert(canonicalID).inserted else { continue }
-      // Find the canonical (non-branch) record if present.
-      let canonical = model.strands.first { $0.id == canonicalID && !$0.isBranch } ?? strand
-      out.append(canonical)
-    }
-    return out.sorted { $0.id < $1.id }
-  }
-
-  private func strandLabel(_ strand: GenreMapStrandInference.Strand) -> String {
-    if !strand.label.isEmpty { return strand.label }
-    if let first = strand.representativeGenres.first { return first }
-    return "Strand \(strand.id + 1)"
-  }
-}
-
 // MARK: - EvidenceRepresentative
 
-/// Phase 5 "representative artists / albums" pulled from `song_genre`.
-/// Two short lists; identical posture to the existing Phase-2 shared-
-/// evidence section but for a single genre. Loading spinner while the
-/// `Task` in flight; empty rows hidden.
+/// "Representative artists / albums" pulled from `song_genre`. Two
+/// short lists; loading spinner while the `Task` is in flight; empty
+/// rows hidden.
 struct EvidenceRepresentative: View {
 
   // MARK: Internal
@@ -317,102 +183,13 @@ struct EvidenceRepresentative: View {
   }
 }
 
-// MARK: - EvidenceConnectedNeighbourhoods
-
-/// "Connected neighbourhoods" — the Phase-2 community-list surface
-/// kept verbatim, but pulled into its own subview. Lists the medium-
-/// resolution communities reachable from the selected genre's
-/// layout-graph neighbours, with a 5-member sample per community.
-struct EvidenceConnectedNeighbourhoods: View {
-
-  // MARK: Internal
-
-  var genre: String
-  var model: GenreMapModel
-
-  var body: some View {
-    let ids = connectedNeighbourCommunityIDs()
-    return VStack(alignment: .leading, spacing: 6) {
-      Text("Connected neighbourhoods")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .textCase(.uppercase)
-      if ids.isEmpty {
-        Text("No connected neighbourhoods.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      } else {
-        ForEach(ids, id: \.self) { id in
-          if let community = model.communities.first(where: { $0.id == id }) {
-            row(community)
-          }
-        }
-      }
-    }
-  }
-
-  // MARK: Private
-
-  private func connectedNeighbourCommunityIDs() -> [Int] {
-    var ids = Set<Int>()
-    let nodesByName = Dictionary(uniqueKeysWithValues: model.nodes.map { ($0.genre, $0) })
-    for edge in model.layoutEdges {
-      let other: String? =
-        if edge.genreA == genre { edge.genreB }
-        else if edge.genreB == genre { edge.genreA }
-        else { nil }
-      if let other, let neighbourNode = nodesByName[other] {
-        ids.insert(neighbourNode.communityID)
-      }
-    }
-    return ids.sorted()
-  }
-
-  private func row(_ community: GenreMapCommunity) -> some View {
-    let colour = GenreMapPanel.communityColour(for: community.id)
-    // Phase 5 — try to surface algorithmic placenames from the strands
-    // serving this community (instead of just a 5-member name sample).
-    // Falls back to the member sample when no strand intersects.
-    let names = communityPlacenames(community)
-    return HStack(alignment: .top, spacing: 8) {
-      Circle()
-        .fill(colour)
-        .frame(width: 8, height: 8)
-        .padding(.top, 5)
-      Text(names)
-        .font(.caption)
-        .foregroundStyle(.primary)
-        .lineLimit(3)
-      Spacer()
-    }
-  }
-
-  private func communityPlacenames(_ community: GenreMapCommunity) -> String {
-    let memberSet = Set(community.members)
-    let labels = model.strands
-      .filter { !$0.isBranch }
-      .filter { strand in
-        strand.memberGenres.contains { memberSet.contains($0) }
-      }
-      .map(\.label)
-      .filter { !$0.isEmpty }
-    if !labels.isEmpty {
-      return labels.prefix(3).joined(separator: " · ")
-    }
-    return community.members
-      .filter { $0 != genre }
-      .prefix(5)
-      .joined(separator: ", ")
-  }
-}
-
 // MARK: - EvidenceCompare
 
-/// Phase 5 compare-mode card. Shows up to k highest-weight paths
-/// between the two selected genres, the involved transfer stations,
-/// and three lists of shared evidence (artists / albums / tracks).
-/// Loading state covers the SQL roll-up; the path search itself is
-/// pure + sub-millisecond.
+/// Compare-mode card. Shows up to k highest-weight paths between two
+/// selected genres, the involved transfer stations, and three lists
+/// of shared evidence (artists / albums / tracks). The metro-era
+/// "strands traversed" section retired in Phase E of
+/// `plans/son-of-genre-map.md` along with the strand grammar itself.
 struct EvidenceCompare: View {
 
   // MARK: Internal
@@ -421,8 +198,6 @@ struct EvidenceCompare: View {
   var genreB: String
   var paths: [GenreMapDiscovery.Path]
   var transferStations: [String]
-  var involvedStrandIDs: Set<Int>
-  var model: GenreMapModel
   var evidence: GenreMapCompareEvidence?
   var isLoading: Bool
 
@@ -430,7 +205,6 @@ struct EvidenceCompare: View {
     VStack(alignment: .leading, spacing: 12) {
       pathsSection
       transferStationsSection
-      strandsSection
       sharedSection
     }
   }
@@ -478,32 +252,6 @@ struct EvidenceCompare: View {
           .textCase(.uppercase)
         Text(transferStations.joined(separator: ", "))
           .font(.caption)
-      }
-    }
-  }
-
-  @ViewBuilder
-  private var strandsSection: some View {
-    if !involvedStrandIDs.isEmpty {
-      VStack(alignment: .leading, spacing: 6) {
-        Text("Strands traversed")
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(.secondary)
-          .textCase(.uppercase)
-        let strands = model.strands.filter { involvedStrandIDs.contains($0.id) }
-        ForEach(strands) { strand in
-          HStack(spacing: 6) {
-            Circle()
-              .fill(GenreMapPanel.strandColour(for: strand.colourID))
-              .frame(width: 7, height: 7)
-            Text(strand.label.isEmpty
-              ? (strand.representativeGenres.first ?? "Strand \(strand.id + 1)")
-              : strand.label)
-              .font(.caption)
-              .lineLimit(1)
-            Spacer()
-          }
-        }
       }
     }
   }

@@ -146,19 +146,23 @@ final class GenreTreeService {
 
   /// Build the tree from scratch — reads `genre_node` +
   /// `genre_edge_evidence`, runs Phase A + Phase B, surfaces the
-  /// render model. Idempotent under concurrent triggers.
+  /// render model, then persists the freshly-computed tree-layout
+  /// positions + community-id triples to `v9.genreMapState` so the
+  /// next launch / re-import preserves trunk identity (Phase E of
+  /// `plans/son-of-genre-map.md`). Persistence failures are
+  /// non-fatal — the in-memory render is already presentable.
   func build() async {
     guard !isBuilding else { return }
     isBuilding = true
     lastError = nil
     defer { isBuilding = false }
     do {
-      // Reuse the metro service's load path so community detection
-      // doesn't run twice. If the metro hasn't been built yet (first
-      // launch on a fresh DB), load it — that's a single SQL read +
-      // Louvain pass, the same cost the metro panel would pay.
+      // Reuse the substrate's load path so community detection doesn't
+      // run twice. If the substrate hasn't been built yet (first launch
+      // on a fresh DB), load it — that's a single SQL read + Louvain
+      // pass.
       if mapService.model == nil {
-        await mapService.load(measureLabel: GenreMapService.defaultMeasureLabel)
+        await mapService.load()
       }
       guard let mapModel = mapService.model else {
         // No substrate yet — empty state. Not an error.
@@ -170,12 +174,57 @@ final class GenreTreeService {
       let communityByGenre = mapModel.nodes.reduce(into: [String: Int]()) { out, node in
         out[node.genre] = node.communityID
       }
-      renderModel = Self.assembleRenderModel(
+      let render = Self.assembleRenderModel(
         nodes: nodes,
         evidence: evidence,
         communityByGenre: communityByGenre,
         metric: metric,
       )
+      renderModel = render
+      await persistTreeLayout(
+        nodes: nodes,
+        evidence: evidence,
+        render: render,
+      )
+    } catch {
+      lastError = error.localizedDescription
+    }
+  }
+
+  /// Persist the freshly-computed tree-layout positions + community-id
+  /// matching back to `v9.genreMapState` (Phase E repurpose of the
+  /// metro plan's persistence columns). One transaction; failures are
+  /// logged via `lastError` but never thrown — the in-memory view is
+  /// authoritative for the current session.
+  ///
+  /// The strand columns retire (additive deprecation): we always write
+  /// an empty `strand_ids` JSON array + zero `genre_map_strand` rows.
+  func persistTreeLayout(
+    nodes: [GenreNode],
+    evidence: [GenreEdgeEvidence],
+    render: GenreTreeRenderModel,
+  ) async {
+    do {
+      let previousState = try await store.loadGenreMapState()
+      let builderResult = GenreMapBuilder.build(
+        nodes: nodes,
+        evidence: evidence,
+        previousState: previousState,
+      )
+      let positionsByGenre = Dictionary(
+        uniqueKeysWithValues: render.layout.placedNodes.map {
+          ($0.genre.name, $0.position)
+        }
+      )
+      let stateRows = builderResult.stateRows.map { row -> GenreMapStateRow in
+        var updated = row
+        if let position = positionsByGenre[row.genre] {
+          updated.x = Double(position.x)
+          updated.y = Double(position.y)
+        }
+        return updated
+      }
+      try await store.writeGenreMapState(states: stateRows, strands: [])
     } catch {
       lastError = error.localizedDescription
     }

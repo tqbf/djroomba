@@ -71,29 +71,22 @@ struct GenreMapPersistedStrandRow: Equatable, Hashable, Sendable {
 
 // MARK: - GenreMapPersistence
 
-/// Phase-6 pure logic: community-id matching, strand-id matching, and the
-/// initial-position seeding helper the builder consumes
-/// (`plans/genre-metro-map.md` Phase 6). All functions are `nonisolated
-/// static`, deterministic, free of mutable globals — fully unit-testable
-/// on fixtures.
+/// Pure persistence-matching logic surviving from Phase 6 of the
+/// metro plan into Phase E of `plans/son-of-genre-map.md`. The
+/// **strand-matching** half retired with the strands; **community-id
+/// matching** stays — it preserves trunk identity across re-import
+/// (a re-Analyze of the same library keeps the same trunks instead of
+/// relabelling them arbitrarily).
 ///
-/// `MatchThreshold` is the Jaccard cutoff (≥ 0.5 ⇒ reuse predecessor id;
-/// below ⇒ mint fresh). Strand matching uses member-set Jaccard — path
-/// pairs are not persisted in v9, so the composite weights the spec
-/// originally floated never had a path channel to compose against. See
-/// `matchStrandsByMembers` for the actual scoring used.
+/// All functions are `nonisolated static`, deterministic, free of
+/// mutable globals — fully unit-testable on fixtures.
+///
+/// `MatchThreshold` is the Jaccard cutoff (≥ 0.5 ⇒ reuse predecessor
+/// id; below ⇒ mint fresh).
 enum GenreMapPersistence {
 
-  /// Member-set Jaccard threshold for community / strand id reuse.
+  /// Member-set Jaccard threshold for community id reuse.
   static let matchThreshold = 0.5
-
-  /// Stability force coefficient `μ` applied to existing nodes only
-  /// (Phase 6 step D). The builder applies `μ · (previous_pos −
-  /// current_pos)` as an extra restoring force on each step for
-  /// previously-known nodes; new nodes are NOT stability-anchored.
-  /// Tuned so the layout settles near the persisted positions but
-  /// new nodes can still find natural homes around their neighbours.
-  static let stabilityForce = 0.05
 
   /// Match new communities to old by member-set Jaccard at one
   /// resolution. Returns a `newCommunityID -> persistedCommunityID`
@@ -151,62 +144,6 @@ enum GenreMapPersistence {
       }
       if bestScore >= matchThreshold, let predecessor = bestPredecessor {
         byNewID[entry.id] = predecessor
-        usedPredecessors.insert(predecessor)
-      }
-    }
-
-    return byNewID
-  }
-
-  /// Match new strands to old by member-set Jaccard. ≥ `matchThreshold`
-  /// (0.5) ⇒ reuse the predecessor strand id + colour + label tokens.
-  ///
-  /// Path-similarity was originally specced as a second channel in a
-  /// `0.6 · member + 0.4 · path` composite, but path pairs are not
-  /// persisted in v9 (paths are large, re-derived every rebuild). The
-  /// only caller never had path pairs to feed in, so the path channel
-  /// degenerated to zero. We name it after what it actually computes.
-  ///
-  /// Tie-break: highest member-Jaccard wins; on ties the predecessor
-  /// with the larger member-set wins; ultimate tie-break is lex on the
-  /// predecessor id.
-  static func matchStrandsByMembers(
-    newStrands: [(id: Int, members: Set<String>)],
-    oldStrands: [(id: String, members: Set<String>)],
-  ) -> [Int: String] {
-    var byNewID = [Int: String]()
-    var usedPredecessors = Set<String>()
-
-    let ordered = newStrands
-      .sorted { lhs, rhs in
-        if lhs.members.count != rhs.members.count {
-          return lhs.members.count > rhs.members.count
-        }
-        return lhs.id < rhs.id
-      }
-
-    for newStrand in ordered {
-      var bestScore = 0.0
-      var bestPredecessor: String?
-      var bestPredecessorSize = 0
-      for old in oldStrands {
-        if usedPredecessors.contains(old.id) { continue }
-        let score = jaccard(newStrand.members, old.members)
-        if score > bestScore {
-          bestScore = score
-          bestPredecessor = old.id
-          bestPredecessorSize = old.members.count
-        } else if score == bestScore, let current = bestPredecessor {
-          if old.members.count > bestPredecessorSize {
-            bestPredecessor = old.id
-            bestPredecessorSize = old.members.count
-          } else if old.members.count == bestPredecessorSize, old.id < current {
-            bestPredecessor = old.id
-          }
-        }
-      }
-      if bestScore >= matchThreshold, let predecessor = bestPredecessor {
-        byNewID[newStrand.id] = predecessor
         usedPredecessors.insert(predecessor)
       }
     }

@@ -1,5 +1,103 @@
 # Son of genre map — trunk + radial tree, with faint back-edges
 
+## Ship status — 2026-05-21
+
+**Programme complete on `feature/genre-tree-map`. Neither branch
+merged to `main`.** Phases A through E all landed on the same day
+(2026-05-21) as sequenced commits on top of `feature/genre-metro-map`.
+The result: a trunk-tree genre-visualisation surface (k≤7 trunks
+arranged along the canvas diagonal, radial branches around each
+trunk, faint back-edges for the MST-dropped cross-community
+connections) with on-click radial focus, ⇧-click compare via Yen-k,
+right-docked 340 pt inspector, listen-to-this transient queue, and
+save-as-playlist follow-up.
+
+### Per-phase resolution
+
+- **Phase A — MST + trunk selection + tree construction (pure
+  logic).** Pure `GenreTreeBuilder` module: Kruskal MST over
+  `genre_edge_evidence`, pluggable `TrunkSelectionMetric`
+  (`.highestWeight` / `.highestTransferness` / `.highestCentrality`)
+  with k=7 cap and tie-break by community weight, BFS first-claim
+  forest construction. +tests, all green.
+- **Phase B — Geometric layout + the trunk-tree view.** Pure
+  `GenreTreeLayout` (diagonal trunks, radial branches over a ~120°
+  arc per trunk, depth-recursion with narrower arcs at each level)
+  + new `GenreTreeMapPanel` view replacing `GenreMapPanel`. Branch
+  edges drawn as Catmull-Rom curves; faint straight back-edges for
+  every non-tree edge. New `Show Genre Tree…` (⌥⇧⌘A) command;
+  metro sheet stays in-tree but unwired from the user menu (Phase E
+  retires).
+- **Phase C — Radial focus + animated transition.** Pure
+  `GenreTreeRadialPlan` computes target positions for the focused
+  genre's 1-hop + 2-hop neighbours; SwiftUI animates between the
+  trunk-tree layout and the radial-focus layout. ⌘+/-/0/9 zoom
+  shortcuts; pan-to-explore (no fit-to-view default per the
+  standing user directive "scrolling is fine").
+- **Phase D — Inspector + compare + listen-to-this.** Right-docked
+  340 pt inspector with three modes (`.empty / .single / .compare`);
+  re-uses the metro Phase 5 `EvidenceHeader`, `EvidenceRepresentative`,
+  `EvidenceCompare` subviews verbatim. ⇧-click compare via Yen-k
+  shortest paths over the layout graph. Pure `GenreTreeListenPicker`
+  + two `MusicController` helpers (`listenToGenre`,
+  `saveListenAsAppPlaylist`) close the inspiration loop.
+- **Phase E — Persistence repurpose + retirement.** Metro renderer
+  deleted: `GenreMapForceLayout`, `GenreMapRouting`,
+  `GenreMapBundling`, `GenreMapRoutingActor`,
+  `GenreMapRoutingVerifier`, `GenreMapStrandInference`,
+  `GenreMapPanel`, `GenreMapInspector`, `StrandSpline`,
+  `StationLabel` — 10 files / ~3415 LOC removed. Substrate
+  rewritten to a lean substrate loader. `v9.genreMapState.x` / `.y`
+  repurposed from force-layout positions to tree-layout positions;
+  `strand_ids` + `genre_map_strand` retire as write targets
+  (additive deprecation — column + table stay, never written).
+  Community-Jaccard matching preserves trunk identity across
+  re-import.
+
+### Final state
+
+- **Tests**: 362 / 52 (down from 405 / 58 at Phase E start; the
+  deletions covered metro-only invariants no longer producible by
+  the surviving code). The plan budgeted 290–330 / 45–50; we
+  landed higher because the surviving substrate carries more
+  coverage than the budget anticipated.
+- **`make check` / `make build` / `swift test`**: all green and
+  signed.
+- **`swiftformat --lint` / `swiftlint --strict`**: 0 violations.
+- **Live-verified on the real 84-genre / 180-back-edge library**
+  via signed `build/DJRoomba.app` driven by computer-use.
+  Screenshots in `/tmp/phase-e-*.png` covering trunk-tree default,
+  radial focus + inspector, compare mode + inspector, listen →
+  playback, and the post-relaunch state. Persistence write
+  round-trips cleanly (115 rows in `genre_map_state`, 0 in
+  `genre_map_strand`, sensible tree positions, community ids
+  stable across re-analyze).
+- **Branch posture**: `feature/genre-tree-map` is forked off
+  `feature/genre-metro-map`; both branches stay alive, neither
+  merges to `main` in this programme. The metro PR (#5) is
+  intentionally left open as historical reference.
+
+### Open questions answered along the way
+
+- Trunk selection metric ships as `.highestTransferness` (default);
+  the three-way Picker stays in the panel header for live A/B.
+- Diagonal angle = 45°; branch arc = ~120°; default radial focus
+  animation = 300 ms.
+- Listen-to-this picker = deterministic top-N (N=30) sorted by play
+  count, tied broken by lastPlayed-desc → title-asc → songID-asc,
+  with a 3-per-artist diversity cap.
+
+### Carry-forward
+
+- `v10.genreMapState` cleanup (drop `strand_ids` column + the
+  `genre_map_strand` table) is the eventual housekeeping target —
+  not scheduled, additive deprecation is fine in perpetuity.
+- "Remember last pan/zoom across sheet open" deferred from the
+  metro Phase-6 gate still lives in `DESIGN-TODO.md`. Same
+  reasoning: atlas state belongs in a `WindowGroup`, not a sheet.
+
+---
+
 The successor to `plans/genre-metro-map.md` (which is feature-complete
 through Phase 6 on `feature/genre-metro-map` but not merged). The
 substrate Phases 1–6 built — multi-channel edge scoring, multi-resolution

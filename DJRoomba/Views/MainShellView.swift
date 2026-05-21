@@ -251,18 +251,11 @@ struct MainShellView: View {
     .sheet(isPresented: Bindable(controller).catalogSearchPresented) {
       CatalogSearchSheet(isPresented: Bindable(controller).catalogSearchPresented)
     }
-    // Phase 1 (`plans/genre-metro-map.md`) — the sibling map sheet,
-    // kept in-tree but unwired from the user menu in Phase B of the
-    // `son-of-genre-map.md` plan. Reachable via the Debug ▸ Show
-    // Genre Map (Metro)… entry for A/B comparison builds; Phase E
-    // retires it entirely.
-    .sheet(isPresented: Bindable(controller).genreMapSheetPresented) {
-      GenreMapPanel()
-    }
-    // Phase B (`plans/son-of-genre-map.md`) — the new user-visible
-    // surface. Replaces the metro sheet on the Playback ▸ menu
-    // (⌥⇧⌘A) + the toolbar / shortcut path; reads the same
-    // substrate via `genreTreeService`.
+    // The genre-tree sheet (`plans/son-of-genre-map.md` Phase B).
+    // Phase E retired the metro-era sibling sheet entirely; the tree
+    // view is now the sole genre-visualisation surface. Reads its
+    // substrate via `genreTreeService` and persists tree positions
+    // back to `v9.genreMapState` after every successful build.
     .sheet(isPresented: Bindable(controller).genreTreeSheetPresented) {
       GenreTreeMapPanel()
     }

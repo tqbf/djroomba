@@ -210,16 +210,10 @@ struct PlaylistPlayerApp: App {
           Task { await controller.runCatalogAccessProbe() }
         }
         Divider()
-        // Phase B (`plans/son-of-genre-map.md`) — the retired metro
-        // panel is kept in-tree for A/B comparison builds. Wired here
-        // under Debug so the user-facing menu doesn't surface it.
-        // Phase E retires it entirely.
-        Button("Show Genre Map (Metro)…") {
-          controller.genreMapSheetPresented = true
-        }
-        Button("Re-Analyze Genre Map (Metro)") {
-          Task { await controller.analyzeGenreMap() }
-        }
+        // Manual rebuild affordance for the genre tree. The user-
+        // facing "Show Genre Tree…" command auto-rebuilds on demand;
+        // this entry is a developer escape hatch for re-running the
+        // pipeline without leaving the menu.
         Button("Re-Analyze Genre Tree") {
           Task { await controller.analyzeGenreTree() }
         }

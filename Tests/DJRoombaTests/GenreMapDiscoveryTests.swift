@@ -162,38 +162,6 @@ struct GenreMapDiscoveryTests {
     #expect(rows.map(\.genre) == ["Folk", "Jazz", "Rock"])
   }
 
-  /// Serving-strand lookup collapses branches into the parent corridor.
-  @Test
-  func `servingStrandIDs collapses branches to parent corridor`() {
-    let parent = GenreMapStrandInference.Strand(
-      id: 0,
-      label: "Folk Acoustic",
-      tokens: ["folk"],
-      representativeGenres: ["Folk"],
-      memberGenres: ["Folk", "Acoustic", "Roots"],
-      pathStations: ["Folk", "Acoustic", "Roots"],
-      colourID: 0,
-      isBranch: false,
-      parentStrandID: nil,
-    )
-    let branch = GenreMapStrandInference.Strand(
-      id: 1,
-      label: "Folk Acoustic",
-      tokens: ["folk"],
-      representativeGenres: ["Folk"],
-      memberGenres: ["Folk", "Roots", "Celtic"],
-      pathStations: ["Folk", "Roots", "Celtic"],
-      colourID: 0,
-      isBranch: true,
-      parentStrandID: 0,
-    )
-    let serving = GenreMapDiscovery.servingStrandIDs(
-      of: "Celtic",
-      strands: [parent, branch],
-    )
-    #expect(serving == Set([0]))
-  }
-
   /// `transferStations(along:)` reads `nodeKind` on each station.
   @Test
   func `transferStations along path filters by nodeKind`() {
@@ -211,41 +179,8 @@ struct GenreMapDiscoveryTests {
     #expect(stations == ["B", "D"])
   }
 
-  /// `transferMapPlan` produces deterministic centre + scale numbers.
-  /// Centre = the world position of the focused node; scale tightens
-  /// to fit the 1-hop neighbours into the supplied viewport with a
-  /// padding inset.
-  @Test
-  func `transferMapPlan centres on the focused node`() {
-    let nodes: [String: GenreMapNode] = [
-      "Hub": Self.testNode(genre: "Hub", position: CGPoint(x: 100, y: 100)),
-      "N1": Self.testNode(genre: "N1", position: CGPoint(x: 200, y: 100)),
-      "N2": Self.testNode(genre: "N2", position: CGPoint(x: 0, y: 100)),
-    ]
-    let edges = [
-      GenreMapDiscovery.Edge(a: "Hub", b: "N1", weight: 0.5),
-      GenreMapDiscovery.Edge(a: "Hub", b: "N2", weight: 0.5),
-    ]
-    let plan = try? #require(GenreMapDiscovery.transferMapPlan(
-      centreGenre: "Hub",
-      nodesByGenre: nodes,
-      edges: edges,
-      viewport: CGSize(width: 600, height: 400),
-      padding: 50,
-      minScale: 0.5,
-      maxScale: 4.0,
-    ))
-    #expect(plan?.centre == CGPoint(x: 100, y: 100))
-    // The bounding box is 200 wide (N2 at 0 → N1 at 200) by 1 tall;
-    // 600 − 100 = 500 available width ⇒ scale = 2.5 (clamped to
-    // [minScale, maxScale]).
-    #expect((plan?.scale ?? 0) >= 0.5 && (plan?.scale ?? 0) <= 4.0)
-  }
-
   // MARK: Private
 
-  /// Tiny helper — every `GenreMapNode` field has a sensible default
-  /// for tests that only care about a couple of fields.
   private static func testNode(
     genre: String,
     kind: GenreMapNodeKind = .ordinary,
