@@ -5,6 +5,188 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — Son of Genre Map — Phase B: Geometric layout + trunk-tree view
+
+**Branch `feature/genre-tree-map`.** Phase B of `plans/son-of-genre-map.md`
+lands the pure geometric layout + the new sheet view. The trunks-tree
+is now the user-visible default surface (Playback ▸ Show Genre Tree…
+⌥⇧⌘A); the metro panel stays in-tree under Debug ▸ Show Genre Map
+(Metro)… for A/B comparison builds. Phase E retires the metro side.
+
+### What landed
+
+Three new pure-geometry files under `DJRoomba/Music/GenreTreeMap/`:
+
+- **`GenreTreeLayout.swift`** — pure Phase-A-consuming layout. Trunks
+  laid out *evenly* along the canvas diagonal (parameter `(i+1)/(k+1)`
+  per trunk — even-spaced, not weight-spaced; the simpler readable
+  default per the plan, documented in the file's docstring). Branches
+  fan radially around each trunk over `branchArcWidthDegrees` (~120°
+  default), depth-2 narrows by `depthArcShrink` (default 0.5 ⇒ depth-2
+  60°, depth-3 30°). Side-of-diagonal alternates per trunk
+  (`aboveDiagonal` / `belowDiagonal`) so ink balances across the
+  canvas. Inside each parent's arc, slots are ranked by absolute
+  distance from the bisector and assigned to children in
+  weight-descending order ⇒ **heaviest branch always lands closest to
+  the parent's 12 o'clock**, regardless of odd/even child count. Each
+  parent → child edge is a single cubic Bezier with control points at
+  `0.45 × distance` along the start → end line. Pure, `nonisolated
+  static`, deterministic.
+- **`GenreTreeService.swift`** — `@MainActor @Observable` service the
+  panel binds to. Reads `genre_node` + `genre_edge_evidence` once, pulls
+  the medium-resolution Louvain partition out of the existing
+  `GenreMapService.model` (no duplicate Louvain pass), composes Phase A
+  (`GenreTreeBuilder`) ⇒ Phase B (`GenreTreeLayout`) ⇒
+  `GenreTreeRenderModel`. Surfaces a `metric: TrunkSelectionMetric`
+  with `didSet` ⇒ rerun, so the panel's segmented Picker live-flips
+  trunk selection without touching SQLite. No background actor; no
+  schema change.
+
+Five new view files under `DJRoomba/Views/GenreTreeMap/`:
+
+- **`GenreTreeMapPanel.swift`** — the sheet content. Replaces
+  `GenreMapPanel` on the user menu. Inherited interaction grammar:
+  ⌘+ / ⌘− zoom (10 %–600 %), ⌘0 reset + recenter, ⌘9 fit, magnify
+  pinch, drag-to-pan. Default presentation is identity scale centred
+  on the canvas centre (the diagonal's midpoint), **not** fitted —
+  matches the standing user directive "scrolling is fine."
+- **`TrunkPill.swift`** — depth-0 pill renderer. 18–22 pt
+  semibold/bold rounded (typography-designer:
+  `weight ≥ 0.55` ⇒ `.bold`, else `.semibold`); community-coloured
+  1.5 pt border at 0.7 opacity over `.regularMaterial` + 0.14 colour
+  wash. Phase-C `isHighlighted` / `isFaded` props plumbed but inert.
+- **`BranchPill.swift`** — depth-1 + depth-2+ pill renderer.
+  Depth-1: 13–15 pt `.medium`; depth-2: 11–12 pt `.regular`;
+  depth-3+: 10 pt floor. Subtree colour inherited from the trunk
+  (BFS forest first-claim ⇒ one hue per subtree).
+- **`BranchEdge.swift`** — single-segment cubic-Bezier renderer per
+  parent → child edge. Width tapers with depth (1.6 → 1.2 → 1.0 pt);
+  colour matches the subtree. Self-contained Canvas; does **not**
+  import the retiring `StrandSpline` kernel — the layout already
+  computed the control points.
+- **`BackEdge.swift`** — single Canvas drawing every non-tree edge as
+  a faint straight line. Opacity scales with the original edge's
+  composite weight inside `0.025…0.075` (capped well below the
+  plan's ~8 % ceiling); 0.6 pt stroke.
+
+Wiring:
+
+- `PlaylistPlayerApp.swift` — Playback ▸ "Show Genre Tree…" replaces
+  "Analyze Genre Map" + "Show Genre Map…" on ⌥⇧⌘A. The v6 "Analyze
+  Genre Graph" (⌥⌘A) stays bound. The Debug menu gains "Show Genre Map
+  (Metro)…", "Re-Analyze Genre Map (Metro)", "Re-Analyze Genre Tree"
+  — Phase E retires the metro entries entirely.
+- `MainShellView.swift` — new `.sheet(isPresented: genreTreeSheetPresented)`
+  binding hosting `GenreTreeMapPanel`. The existing metro sheet stays
+  in-tree but is only reachable via the Debug entry.
+- `MusicController.swift` — adds `genreTreeService`, `genreTreeSheetPresented`,
+  `analyzeGenreTree()`.
+
+### Live verification (real 84-genre / 180-back-edge library)
+
+The signed `build/DJRoomba.app` was launched + driven via computer-use:
+
+- **Default identity-zoom view** (`/tmp/phase-b-default-transferness-100.png`):
+  canvas centred on the middle trunk (Pop/Rock). The user pans to
+  explore — only one trunk + a hint of its branches fits at 100 %.
+  Matches the project standing directive "scrolling is fine; the map
+  need not fit on one screen."
+- **Panned canvas** (`/tmp/phase-b-panned.png`): drag-to-pan moves the
+  canvas; pills + back-edges stay in registration; no rendering
+  artefacts.
+- **Multi-trunk zoomed-out** (`/tmp/phase-b-zoomed-out-33pct.png`,
+  `/tmp/phase-b-back-edges-visible.png`): at 33–41 % three trunks
+  visible at once with their fanning branches; subtree colours read
+  clearly (Pop/Rock green, Pop/Rock/60s-70s/Classic red,
+  Pop/Rock/New-Wave yellow). Back-edges visible as faint diagonal
+  lines crossing the canvas.
+- **Fit-to-view** (`/tmp/phase-b-fit-all-7-trunks.png`): all 7 trunks
+  visible along the diagonal — Alt/Punk (pink), Electro/Mainstream/
+  Dance (cyan), Pop/Rock (green), Pop/Rock/60s-70s/Classic (red),
+  Pop/Rock/New-Wave (yellow), R&B/Soul (purple), + one off-edge. The
+  fit view is informational only; at full-fit, pills overlap heavily
+  because labels don't scale with the viewport — matches the standing
+  directive "we CANNOT reasonably visualize the entire genre space in
+  one screen, so don't try."
+- **Live metric toggle**: Picker swap between Transferness / Weight /
+  Centrality re-runs the trunk selection without touching SQLite +
+  re-renders inside a few hundred ms. Weight pick produced
+  Singer/Songwriter as a trunk (the docstring's risk warning bore out);
+  Centrality picked Indie Rock + R&B/Soul as bridging trunks;
+  Transferness (default) picked Pop/Rock and its three Pop/Rock/...
+  shaped trunks.
+
+### Layout defaults (decisions documented)
+
+- `worldSide = 7000` (widened from the metro plan's 5000) +
+  `diagonalPadding = 500`. Wider canvas + bigger padding ⇒ trunks
+  along the diagonal are ~857 pt apart, plenty of room for radial
+  fanning + branch labels.
+- `depth1Radius = 520`, `depthRadiusShrink = 0.65` ⇒ depth-2 children
+  sit at ~338 pt from their parent. Initial smaller defaults
+  (`worldSide 5000`, `depth1Radius 360`) produced visibly overlapping
+  branch labels at fit-to-view; the widened canvas trades a more pan-
+  centric default view for legibility at every reasonable zoom level.
+- `branchArcWidthDegrees = 120` per the plan; depth-2 arc shrinks to
+  60° per the `depthArcShrink = 0.5` recursion.
+- Diagonal angle: 45° (the natural default); deferred until visual
+  walkthrough shows otherwise.
+- Trunk-selection metric default: **`.highestTransferness`** — the
+  most-connective member of each community is the most defensible
+  visual anchor. The user can flip live to Weight or Centrality from
+  the panel header; whichever wins the user's eye becomes the eventual
+  ship default.
+
+### Tests
+
+New `Tests/DJRoombaTests/GenreTreeLayoutTests.swift` — **13 new tests**
+in one new suite. Covers:
+
+- Empty model returns empty placed nodes + canvas bounds + diagonal endpoints.
+- Single trunk lands at the diagonal midpoint (k=1 ⇒ parameter 1/2).
+- Three children fan around the bisector; heaviest sits exactly on the bisector.
+- Lighter siblings sit at the arc edges (`bisector ± arc/2`).
+- Trunks alternate sides of the diagonal (`above` then `below`).
+- Disabled alternation makes every trunk fan above the diagonal.
+- Two trunks land at parameters 1/3 + 2/3 of the diagonal.
+- Depth-recursion narrows arc width by `depthArcShrink` per level.
+- Per-arc weight ordering puts the heaviest sibling exactly on the bisector.
+- Arc partitioning sums to the allocated arc width on a 5-child fan.
+- Cubic-Bezier endpoints land where the layout placed the parent + child.
+- Depth-2 grandchildren fan around their depth-1 parent's outward direction.
+- Layout is deterministic across runs.
+
+### Acceptance
+
+- **`swift test`: 382 / 56 green** (was 369 / 55 ⇒ +13 tests, +1 suite).
+- `make check` clean (compiles debug).
+- `make build` clean (signed `build/DJRoomba.app` produced).
+- `swiftformat --lint` clean on the new files.
+- `swiftlint --strict` clean on the new files.
+
+### Carry-forward items
+
+- **Label overlap at fit-to-view** — pills don't scale with the
+  viewport, so cmd-9 over the whole canvas always packs them.
+  Acceptable per the standing "don't try to fit everything on screen"
+  directive; the daily-driver view is identity-zoom + panning. Phase C
+  radial focus addresses the "I want one neighbourhood at full
+  legibility" need; Phase D inspector addresses the "I want detail
+  about this genre" need.
+- **Default metric pick** — `.highestTransferness` ships as default;
+  user picks the eventual ship default after living with all three on
+  the real library. The Picker in the panel header is the live A/B
+  surface.
+- **Diagonal angle** + **arc width** — both at the plan's natural
+  defaults (45°, 120°). Flip after Phase C/D land if visual review
+  finds either constrains readability.
+- **Layout-time label-collision avoidance** — Phase B's pure geometry
+  doesn't repel labels (the metro plan needed a full force solver).
+  Mitigated by widened canvas defaults; finer mitigation deferred to
+  whichever later phase the visual stickler flag goes up.
+
+**GO for Phase C.**
+
 ## 2026-05-21 — Son of Genre Map — Phase A: MST + trunk selection + tree construction (pure logic)
 
 **Branch `feature/genre-tree-map`** (fresh, off `main`). Phase A of

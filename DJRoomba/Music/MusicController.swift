@@ -34,6 +34,7 @@ final class MusicController {
     genreImportService = GenreImportService(store: safeStore)
     genreGraphService = GenreGraphService(store: safeStore)
     genreMapService = GenreMapService(store: safeStore)
+    genreTreeService = GenreTreeService(store: safeStore, mapService: genreMapService)
     catalogIngestService = CatalogIngestService(store: safeStore)
     snapshotService = SnapshotService(store: safeStore)
     resolver = PlaybackResolver()
@@ -71,6 +72,16 @@ final class MusicController {
   /// new "Analyze (Map)" action and a `runMapRebuildIfEnabled()` hook
   /// alongside the existing genre-graph one. Phase 6 will consolidate.
   let genreMapService: GenreMapService
+
+  /// Phase B of `plans/son-of-genre-map.md` — the genre **tree** view's
+  /// binding target. A thin observable that runs the pure Phase A
+  /// (`GenreTreeBuilder` MST + trunk selection + BFS forest) and
+  /// Phase B (`GenreTreeLayout` diagonal + radial fanning) pipelines
+  /// against the metro substrate. Reads `genre_node` +
+  /// `genre_edge_evidence` from the store; pulls the medium-resolution
+  /// Louvain partition out of `genreMapService.model` so community
+  /// detection runs once across both views. No schema change.
+  let genreTreeService: GenreTreeService
   /// `.djroomba` library snapshot export / import + revert
   /// (`plans/snapshot-export-import.md`). Non-MusicKit; the controller
   /// owns the post-op UI reload + genre reanalyze, exactly as it does for
@@ -134,6 +145,15 @@ final class MusicController {
   /// view; the existing genre-graph panel stays the always-on detail-pane
   /// affordance. Phase 6 will rename / consolidate.
   var genreMapSheetPresented = false
+
+  /// Phase B (`plans/son-of-genre-map.md`) — drives the genre-tree
+  /// sheet's presentation flag from `MainShellView` via `Bindable`.
+  /// The new user-visible surface; the metro sheet
+  /// (`genreMapSheetPresented`) stays in-tree but is unwired from the
+  /// user-visible menu in Phase B (it can be re-enabled for a
+  /// comparison build by un-commenting its Playback ▸ menu entry).
+  /// Phase E retires the metro sheet entirely.
+  var genreTreeSheetPresented = false
 
   /// Derived summary collections — **stored, input-driven state**, not
   /// per-`body` computed properties (Phase A spry fix; see
@@ -471,6 +491,26 @@ final class MusicController {
   func analyzeGenreMap() async {
     await runGenreAnalysis()
     await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel)
+  }
+
+  /// **Analyze Genre Tree** — Phase B of `plans/son-of-genre-map.md`.
+  /// User-facing rebuild of the trunk-tree view. Reuses the metro
+  /// substrate (community detection lives in `GenreMapService`) so the
+  /// Louvain pass runs at most once across both views.
+  ///
+  /// Sequence:
+  ///
+  /// 1. Run `runGenreAnalysis` (v6 + v7 substrate rebuild) — same as
+  ///    `analyzeGenreMap` because the tree reads the same evidence
+  ///    rows.
+  /// 2. Force a metro `GenreMapService.build` so the medium-resolution
+  ///    Louvain partition is fresh in `genreMapService.model`.
+  /// 3. Run `genreTreeService.build` — pure Phase A + Phase B pipeline,
+  ///    no SQL outside steps 1–2.
+  func analyzeGenreTree() async {
+    await runGenreAnalysis()
+    await genreMapService.build(measureLabel: GenreMapService.defaultMeasureLabel)
+    await genreTreeService.build()
   }
 
   /// Auto-rebuild hook for the map. **Phase 6 consolidation** of

@@ -138,24 +138,26 @@ struct PlaylistPlayerApp: App {
         // Sibling of "Reimport Everything": both rebuild derived state
         // wholesale from the library. ⌥⌘A — ⌘A/⇧⌘A are reserved
         // (Select All / Deselect); ⌥⌘A is free and mnemonic ("Analyze").
+        // Stays bound for the v6 genre-graph rebuild path; Phase B of
+        // the tree plan keeps the shortcut free for development-time
+        // manual graph rebuilds (the auto-rebuild hook on import covers
+        // the user-facing trigger).
         Button("Analyze Genre Graph") {
           Task { await controller.analyzeGenreGraph() }
         }
         .keyboardShortcut("a", modifiers: [.command, .option])
 
-        // Phase 1 of `plans/genre-metro-map.md`: a SIBLING (not
-        // replacement) of the v6 Analyze action. Always runs. Phase 6
-        // will consolidate the two actions; for now they live side by
-        // side so the new map can be live-verified against the existing
-        // graph without retiring either.
-        Button("Analyze Genre Map") {
-          Task { await controller.analyzeGenreMap() }
+        // Phase B of `plans/son-of-genre-map.md` re-points the
+        // ⌥⇧⌘A keystroke from "Analyze Genre Map" to the new
+        // "Show Genre Tree…" command — the user-facing default
+        // surface is now the trunk tree. The metro-side "Analyze
+        // Genre Map" action stays accessible for comparison builds
+        // under a Debug menu entry below (no shortcut by design —
+        // it's not a primary affordance).
+        Button("Show Genre Tree…") {
+          controller.genreTreeSheetPresented = true
         }
         .keyboardShortcut("a", modifiers: [.command, .option, .shift])
-
-        Button("Show Genre Map…") {
-          controller.genreMapSheetPresented = true
-        }
 
         // A `Toggle` in a menu is the native checkmark-menu-item idiom.
         // Bound through `Bindable` (the modern Observation binding —
@@ -206,6 +208,20 @@ struct PlaylistPlayerApp: App {
         }
         Button("Catalog Access Probe (Phase 0)") {
           Task { await controller.runCatalogAccessProbe() }
+        }
+        Divider()
+        // Phase B (`plans/son-of-genre-map.md`) — the retired metro
+        // panel is kept in-tree for A/B comparison builds. Wired here
+        // under Debug so the user-facing menu doesn't surface it.
+        // Phase E retires it entirely.
+        Button("Show Genre Map (Metro)…") {
+          controller.genreMapSheetPresented = true
+        }
+        Button("Re-Analyze Genre Map (Metro)") {
+          Task { await controller.analyzeGenreMap() }
+        }
+        Button("Re-Analyze Genre Tree") {
+          Task { await controller.analyzeGenreTree() }
         }
       }
     }

@@ -251,12 +251,20 @@ struct MainShellView: View {
     .sheet(isPresented: Bindable(controller).catalogSearchPresented) {
       CatalogSearchSheet(isPresented: Bindable(controller).catalogSearchPresented)
     }
-    // Phase 1 (`plans/genre-metro-map.md`) — the sibling map sheet.
-    // Reachable via the Playback ▸ Show Genre Map… menu item (the
-    // simplest live-verifiable surface; Phase 6 will rename / consolidate
-    // with the docked v6 panel).
+    // Phase 1 (`plans/genre-metro-map.md`) — the sibling map sheet,
+    // kept in-tree but unwired from the user menu in Phase B of the
+    // `son-of-genre-map.md` plan. Reachable via the Debug ▸ Show
+    // Genre Map (Metro)… entry for A/B comparison builds; Phase E
+    // retires it entirely.
     .sheet(isPresented: Bindable(controller).genreMapSheetPresented) {
       GenreMapPanel()
+    }
+    // Phase B (`plans/son-of-genre-map.md`) — the new user-visible
+    // surface. Replaces the metro sheet on the Playback ▸ menu
+    // (⌥⇧⌘A) + the toolbar / shortcut path; reads the same
+    // substrate via `genreTreeService`.
+    .sheet(isPresented: Bindable(controller).genreTreeSheetPresented) {
+      GenreTreeMapPanel()
     }
     // Document import/export (plans/snapshot-export-import.md). The
     // exporter's bytes are built off-main *before* its flag flips true
