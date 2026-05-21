@@ -32,7 +32,23 @@ struct GenreMapPanel: View {
     VStack(spacing: 0) {
       header
       Divider()
-      content
+      HStack(spacing: 0) {
+        content
+        if
+          let selectedGenre, let model = service.model,
+          let node = model.nodes.first(where: { $0.genre == selectedGenre })
+        {
+          Divider()
+          GenreMapEvidencePanel(
+            node: node,
+            model: model,
+            hullColour: Self.communityColour(for: node.communityID),
+            evidence: evidence,
+            isLoadingEvidence: isLoadingEvidence,
+            onDismiss: dismissEvidence,
+          )
+        }
+      }
       Divider()
       footer
     }
@@ -127,6 +143,16 @@ struct GenreMapPanel: View {
   @State private var offset = CGSize.zero
   @State private var dragging: DragState?
   @State private var fittedOnce = false
+  /// Phase 2's click-to-evidence selection. Set by tapping a transfer-
+  /// station or junction pill (ordinary pills are no-op for now), cleared
+  /// by tapping outside the panel (background) or pressing the panel's
+  /// close button. Drag MUST NOT spuriously set this — `StationLabel`'s
+  /// `Button(action:)` only fires for a click, not a drag, so the gesture
+  /// composition below keeps the two affordances separate.
+  @State private var selectedGenre: String?
+  @State private var evidence: GenreMapEvidenceOnDemand?
+  @State private var isLoadingEvidence = false
+  @State private var evidenceTask: Task<Void, Never>?
   /// Gesture deltas applied during an active pinch / pan, committed back
   /// onto `scale` / `offset` at gesture end (the standard SwiftUI
   /// gesture composition).
@@ -258,21 +284,30 @@ struct GenreMapPanel: View {
         }
     )
     .simultaneousGesture(
-      DragGesture(minimumDistance: 0)
+      // Pan only fires after a small motion threshold (4pt) so a
+      // bare click on the map can never start an empty-space pan and
+      // also can never starve a child `StationLabel`'s `.onTapGesture`.
+      DragGesture(minimumDistance: 4)
         .updating($gestureOffset) { value, state, _ in
-          // Only pan when we're not in a node-drag gesture.
           guard dragging == nil else { return }
           state = value.translation
         }
         .onEnded { value in
-          guard dragging == nil else {
-            // Node drag completed elsewhere; ignore.
-            return
-          }
+          guard dragging == nil else { return }
           offset = CGSize(
             width: offset.width + value.translation.width,
             height: offset.height + value.translation.height,
           )
+        }
+    )
+    .simultaneousGesture(
+      // Bare-click handler for the map background ⇒ dismiss the
+      // evidence panel. Separate from the pan DragGesture so the two
+      // never race for the same touch. Tap-gestures inside child
+      // `StationLabel`s consume the tap-up before it reaches here.
+      TapGesture()
+        .onEnded {
+          if selectedGenre != nil { dismissEvidence() }
         }
     )
     .accessibilityElement(children: .contain)
@@ -372,11 +407,18 @@ struct GenreMapPanel: View {
         node: node,
         community: community,
         hullColour: Self.communityColour(for: node.communityID),
-        onTap: { /* Phase 1: no-op (Phase 5 wires evidence) */ },
+        onTap: { selectNode(node) },
       )
       .position(position)
-      .gesture(
-        DragGesture(minimumDistance: 1)
+      // Use `.simultaneousGesture` (not `.gesture`) so the
+      // `StationLabel`'s inner Button still receives plain taps — a
+      // `.gesture(DragGesture(minimumDistance: 1))` was claiming the
+      // gesture sequence and starving the Button on a no-motion click,
+      // which left the click-to-evidence affordance silent. The drag
+      // path itself is gated on a non-trivial translation (>=2pt) so a
+      // pure click never spuriously starts dragging.
+      .simultaneousGesture(
+        DragGesture(minimumDistance: 2)
           .onChanged { value in
             if dragging?.genre != node.genre {
               dragging = DragState(genre: node.genre, initialPosition: node.position)
@@ -415,5 +457,37 @@ struct GenreMapPanel: View {
 
   private func clamp(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
     Swift.min(maxValue, Swift.max(minValue, value))
+  }
+
+  /// Open the evidence side panel for `node`. Ordinary stops are no-op
+  /// (Phase 5 will give them their own ego-network surface); junctions
+  /// and transfer stations both surface the evidence panel — junctions
+  /// because the inputs explain why the node is *almost* a transfer
+  /// station and that's useful debugging signal.
+  private func selectNode(_ node: GenreMapNode) {
+    // Phase 2 ships with click-to-evidence enabled for every kind —
+    // ordinary stops surface the same inputs panel (transferness will
+    // simply read low), and that makes the affordance discoverable
+    // before Phase 5 promotes its full ego-network mode for ordinary
+    // genres. Phase 5 will scope this back to junction + transfer-
+    // station only, with a richer per-kind detail surface.
+    evidenceTask?.cancel()
+    selectedGenre = node.genre
+    evidence = nil
+    isLoadingEvidence = true
+    evidenceTask = Task {
+      let loaded = await service.evidenceOnDemand(for: node.genre)
+      if Task.isCancelled { return }
+      evidence = loaded
+      isLoadingEvidence = false
+    }
+  }
+
+  private func dismissEvidence() {
+    evidenceTask?.cancel()
+    evidenceTask = nil
+    selectedGenre = nil
+    evidence = nil
+    isLoadingEvidence = false
   }
 }

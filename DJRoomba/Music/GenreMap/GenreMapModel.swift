@@ -1,5 +1,25 @@
 import Foundation
 
+// MARK: - GenreMapNodeKind
+
+/// Topological classification of a genre node (`plans/genre-metro-map.md`
+/// Phase 2). Derived from the composite transferness score on the layout
+/// graph; cached on the node so the renderer never re-classifies on its own.
+///
+/// - `ordinary`: a regular stop — the existing Phase-1 pill.
+/// - `junction`: a pill with a tick mark — modest topological breadth.
+/// - `transferStation`: larger pill with a multi-strand marker — a genuine
+///   bridge between neighbourhoods.
+///
+/// Thresholds (composite transferness in `[0, 1]`): `<0.35` ordinary,
+/// `<0.65` junction, `≥0.65` transfer station. Tuned to the live-library
+/// distribution; pinned in `GenreMapTransfernessTests`.
+enum GenreMapNodeKind: Int, Equatable, Sendable, CaseIterable {
+  case ordinary = 0
+  case junction = 1
+  case transferStation = 2
+}
+
 // MARK: - GenreMapModel
 
 /// The renderable, layout-ready model the `GenreMapPanel` binds to — the
@@ -51,10 +71,45 @@ struct GenreMapNode: Equatable, Sendable, Identifiable {
   /// drag re-approximate a different size, which let drag re-overlap
   /// labels the layout had separated.
   var labelSize: CGSize
+  /// Composite transferness score in `[0, 1]` (Phase 2). Sum of the
+  /// four normalised inputs at their spec weights, dampened for
+  /// generic giants. The renderer never recomputes this — it reads.
+  var transferness: Double
+  /// Cached topological classification (Phase 2). The drag affordance
+  /// must NOT change this: kind is purely layout-graph-derived,
+  /// not position-derived, so it stays stable while the user moves a
+  /// node around.
+  var nodeKind: GenreMapNodeKind
+  /// Per-input contributions to `transferness`, in `[0, 1]`. Used by
+  /// the evidence side panel to explain which inputs landed high/low.
+  /// (Stored on the node so the panel never re-derives a number that
+  /// disagrees with the classification.)
+  var transfernessInputs: GenreMapTransfernessInputs
 
   var id: String {
     genre
   }
+}
+
+// MARK: - GenreMapTransfernessInputs
+
+/// The four normalised inputs to the composite transferness score
+/// (`plans/genre-metro-map.md` Phase 2, step 1). All in `[0, 1]` at the
+/// node-cache point; the `membershipEntropy` slot is a placeholder until
+/// soft community detection lands (deliberately deferred).
+///
+/// `strandCount` stays at 0 until Phase 3 fills it; the composite reads
+/// the spec's 10 % weight on this slot today and it contributes nothing.
+struct GenreMapTransfernessInputs: Equatable, Sendable {
+  var betweenness: Double
+  var neighbourEntropy: Double
+  var crossCommunityFraction: Double
+  var membershipEntropy: Double
+  var strandCount: Double
+  /// Multiplicative dampening factor applied to the raw composite (`1.0`
+  /// = untouched, `<1.0` = generic-giant dampened). Surfaced so the
+  /// evidence panel can say "the score is lower because…".
+  var dampening: Double
 }
 
 // MARK: - GenreMapEdge

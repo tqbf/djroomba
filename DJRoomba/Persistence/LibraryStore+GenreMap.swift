@@ -304,4 +304,175 @@ extension LibraryStore {
     }
   }
 
+  /// **Evidence on demand** (`plans/genre-metro-map.md` Phase 2's click-
+  /// to-evidence side panel): for `selectedGenre` and a set of
+  /// `neighbourGenres`, return the top shared artists / albums / tracks
+  /// between the selected genre and the union of neighbours.
+  ///
+  /// Pure SQL, single read transaction, JIT (like `associatedPlaylists`)
+  /// — we deliberately do NOT materialise per-pair evidence onto the
+  /// `genre_edge_evidence` table; the persisted footprint stays small,
+  /// and only the one-genre's evidence is paid for. The CTE shape
+  /// mirrors `rebuildGenreMap`'s `song_genre` explode, so the keys here
+  /// (`TRIM(LOWER(artist_name))` + `TRIM(LOWER(album_title))`) match
+  /// the rebuild's intersection counts.
+  ///
+  /// Returns three lists, each already sorted by overlap-count desc:
+  /// shared artists (with the freight `artist_name` rendered back); the
+  /// same for albums (with `album_title`); the same for tracks (with
+  /// `song.title` rendered). All capped at `perChannelLimit`.
+  func genreMapEvidenceOnDemand(
+    selectedGenre: String,
+    neighbourGenres: [String],
+    perChannelLimit: Int = 8,
+  ) async throws -> GenreMapEvidenceOnDemand {
+    guard !neighbourGenres.isEmpty else {
+      return GenreMapEvidenceOnDemand(
+        sharedArtists: [],
+        sharedAlbums: [],
+        sharedTracks: [],
+      )
+    }
+    return try await database.dbQueue.read { db in
+      // Neighbour list as a JSON array argument; SQLite `json_each` lets
+      // us avoid hand-rolling an `IN (?, ?, ?)` placeholder list.
+      let neighboursJSON = try String(
+        data: JSONEncoder().encode(neighbourGenres),
+        encoding: .utf8,
+      ) ?? "[]"
+
+      // The CTE shape: song_genre rows for the selected genre + for each
+      // neighbour genre, with the same normalised keys the rebuild uses;
+      // intersection happens by joining selected and neighbour rows on
+      // the shared key.
+      let baseCTE = """
+        WITH
+          neighbour_set(name) AS (
+            SELECT value FROM json_each(?)
+          ),
+          song_genre(song_id, genre, artist_key, album_key, artist_disp, album_disp, title_disp) AS (
+            SELECT s.id,
+                   TRIM(je.value),
+                   NULLIF(TRIM(LOWER(s.artist_name)), ''),
+                   CASE
+                     WHEN NULLIF(TRIM(LOWER(s.artist_name)), '') IS NULL
+                       OR NULLIF(TRIM(LOWER(s.album_title)), '') IS NULL
+                     THEN NULL
+                     ELSE TRIM(LOWER(s.artist_name))
+                          || '|'
+                          || TRIM(LOWER(s.album_title))
+                   END,
+                   s.artist_name,
+                   s.album_title,
+                   s.title
+              FROM song s
+              JOIN json_each(s.genre_names) je
+             WHERE s.genre_names IS NOT NULL
+               AND json_valid(s.genre_names)
+               AND je.value IS NOT NULL
+               AND TRIM(je.value) <> ''
+               AND (TRIM(je.value) = ?
+                    OR TRIM(je.value) IN (SELECT name FROM neighbour_set))
+          ),
+          selected_rows AS (
+            SELECT * FROM song_genre WHERE genre = ?
+          ),
+          neighbour_rows AS (
+            SELECT * FROM song_genre
+             WHERE genre IN (SELECT name FROM neighbour_set)
+          )
+        """
+
+      // Artists: shared `artist_key`, surface display name from the
+      // selected side (more readable; same artist on both sides).
+      let artistsSQL = baseCTE + """
+        SELECT s.artist_disp AS display,
+               COUNT(DISTINCT n.song_id) AS overlap
+          FROM selected_rows s
+          JOIN neighbour_rows n
+            ON s.artist_key IS NOT NULL
+           AND s.artist_key = n.artist_key
+         GROUP BY s.artist_key
+         ORDER BY overlap DESC, display
+         LIMIT ?
+        """
+      let albumsSQL = baseCTE + """
+        SELECT s.artist_disp || ' — ' || s.album_disp AS display,
+               COUNT(DISTINCT n.song_id) AS overlap
+          FROM selected_rows s
+          JOIN neighbour_rows n
+            ON s.album_key IS NOT NULL
+           AND s.album_key = n.album_key
+         GROUP BY s.album_key
+         ORDER BY overlap DESC, display
+         LIMIT ?
+        """
+      // For shared tracks the join is on `song_id` — a track that has
+      // both the selected and a neighbour genre in its `genre_names`.
+      let tracksSQL = baseCTE + """
+        SELECT COALESCE(s.artist_disp, '') || ' — ' || COALESCE(s.title_disp, '') AS display,
+               COUNT(DISTINCT s.song_id) AS overlap
+          FROM selected_rows s
+          JOIN neighbour_rows n
+            ON s.song_id = n.song_id
+         GROUP BY s.song_id
+         ORDER BY overlap DESC, display
+         LIMIT ?
+        """
+      let args: StatementArguments = [
+        neighboursJSON,
+        selectedGenre,
+        selectedGenre,
+        perChannelLimit,
+      ]
+      let artists = try Row.fetchAll(db, sql: artistsSQL, arguments: args).map { row in
+        GenreMapEvidenceItem(
+          display: row["display"] ?? "",
+          overlapCount: row["overlap"] ?? 0,
+        )
+      }
+      let albums = try Row.fetchAll(db, sql: albumsSQL, arguments: args).map { row in
+        GenreMapEvidenceItem(
+          display: row["display"] ?? "",
+          overlapCount: row["overlap"] ?? 0,
+        )
+      }
+      let tracks = try Row.fetchAll(db, sql: tracksSQL, arguments: args).map { row in
+        GenreMapEvidenceItem(
+          display: row["display"] ?? "",
+          overlapCount: row["overlap"] ?? 0,
+        )
+      }
+      return GenreMapEvidenceOnDemand(
+        sharedArtists: artists,
+        sharedAlbums: albums,
+        sharedTracks: tracks,
+      )
+    }
+  }
+
+}
+
+// MARK: - GenreMapEvidenceOnDemand
+
+/// One pass of evidence-on-demand for a single node click
+/// (`plans/genre-metro-map.md` Phase 2 side panel). Three lists of the
+/// strongest shared artists / albums / tracks between the selected
+/// genre and the union of its neighbour genres in the layout graph.
+struct GenreMapEvidenceOnDemand: Equatable, Sendable {
+  var sharedArtists: [GenreMapEvidenceItem]
+  var sharedAlbums: [GenreMapEvidenceItem]
+  var sharedTracks: [GenreMapEvidenceItem]
+}
+
+// MARK: - GenreMapEvidenceItem
+
+/// One row in a `GenreMapEvidenceOnDemand` channel.
+struct GenreMapEvidenceItem: Equatable, Sendable, Identifiable {
+  var display: String
+  var overlapCount: Int
+
+  var id: String {
+    display
+  }
 }

@@ -113,8 +113,10 @@ struct GenreMapRebuildTests {
     // floor was loosened to `>= 1 OR pl >= 0.10`.)
     #expect(row != nil, "playlist channel ≥0.10 lets the row through")
     let totalWeight = row?.totalWeight ?? 0
-    #expect(abs(totalWeight - 0.05) < 1e-9,
-            "composite = 0.05 · 1.0 (playlist-only) = 0.05")
+    #expect(
+      abs(totalWeight - 0.05) < 1e-9,
+      "composite = 0.05 · 1.0 (playlist-only) = 0.05",
+    )
   }
 
   /// One shared track total (across artist/album/track channels combined)

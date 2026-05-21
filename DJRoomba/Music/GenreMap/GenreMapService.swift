@@ -46,17 +46,30 @@ final class GenreMapService {
   /// layout pipeline only needs an *approximate* AABB for repulsion, and
   /// approximation lets the rebuild stay pure / off-main / unit-testable
   /// without round-tripping to `NSAttributedString.size()` on the main
-  /// actor. Override from a view layer that wants pixel-exact metrics by
-  /// passing your own closure into `build` / `load`.
+  /// actor.
+  ///
+  /// `kind` shapes the AABB: junction + transferStation pills render a
+  /// leading SF Symbol inside the existing pill chrome, so their drawn
+  /// width is `fontSize * 0.85` (glyph) + 4pt (HStack spacing) wider
+  /// than an ordinary pill. The build path uses this same closure, so
+  /// the layout's label-AABB repulsion sees the rectangle the panel
+  /// will actually draw — no drift between layout-time and render-time.
   nonisolated static func defaultMeasureLabel(
     text: String,
     fontSize: CGFloat,
+    kind: GenreMapNodeKind,
   ) -> CGSize {
     // ~0.56 average glyph advance for system text at the target size,
     // plus 14pt horizontal + 6pt vertical padding for the pill chrome.
-    let estimatedWidth = CGFloat(max(1, text.count)) * fontSize * 0.56 + 18
+    let baseWidth = CGFloat(max(1, text.count)) * fontSize * 0.56 + 18
+    let leadingGlyphWidth: CGFloat =
+      switch kind {
+      case .ordinary: 0
+      case .junction,
+           .transferStation: fontSize * 0.85 + 4
+      }
     let estimatedHeight = fontSize + 12
-    return CGSize(width: estimatedWidth, height: estimatedHeight)
+    return CGSize(width: baseWidth + leadingGlyphWidth, height: estimatedHeight)
   }
 
   /// (Re)build the map from the live data. Idempotent under concurrent
@@ -64,7 +77,7 @@ final class GenreMapService {
   /// the SwiftUI panel — which owns the typography — can hand the
   /// pipeline real text metrics; tests pass a stub.
   func build(
-    measureLabel: @Sendable @escaping (_ text: String, _ fontSize: CGFloat) -> CGSize
+    measureLabel: @Sendable @escaping (_ text: String, _ fontSize: CGFloat, _ kind: GenreMapNodeKind) -> CGSize
   ) async {
     guard !isAnalyzing else { return }
     isAnalyzing = true
@@ -89,7 +102,7 @@ final class GenreMapService {
   /// SQL pass — the panel's `.task` calls this so a map populated in an
   /// earlier session shows immediately.
   func load(
-    measureLabel: @Sendable @escaping (_ text: String, _ fontSize: CGFloat) -> CGSize
+    measureLabel: @Sendable @escaping (_ text: String, _ fontSize: CGFloat, _ kind: GenreMapNodeKind) -> CGSize
   ) async {
     do {
       let nodes = try await store.genreMapNodes()
@@ -103,6 +116,42 @@ final class GenreMapService {
       model = built
     } catch {
       lastError = error.localizedDescription
+    }
+  }
+
+  /// Evidence-on-demand for the side panel (Phase 2). Reads `selectedGenre`'s
+  /// 1-hop neighbours from the current `model` and asks the store for the
+  /// top shared artists / albums / tracks across them. Pure read; JIT —
+  /// the call site renders a `ProgressView` while this is in flight.
+  func evidenceOnDemand(
+    for selectedGenre: String,
+    perChannelLimit: Int = 8,
+  ) async -> GenreMapEvidenceOnDemand? {
+    guard let model else { return nil }
+    var neighbours = Set<String>()
+    for edge in model.layoutEdges {
+      if edge.genreA == selectedGenre {
+        neighbours.insert(edge.genreB)
+      } else if edge.genreB == selectedGenre {
+        neighbours.insert(edge.genreA)
+      }
+    }
+    guard !neighbours.isEmpty else {
+      return GenreMapEvidenceOnDemand(
+        sharedArtists: [],
+        sharedAlbums: [],
+        sharedTracks: [],
+      )
+    }
+    do {
+      return try await store.genreMapEvidenceOnDemand(
+        selectedGenre: selectedGenre,
+        neighbourGenres: Array(neighbours),
+        perChannelLimit: perChannelLimit,
+      )
+    } catch {
+      lastError = error.localizedDescription
+      return nil
     }
   }
 

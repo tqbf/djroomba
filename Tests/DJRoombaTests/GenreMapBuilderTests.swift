@@ -11,7 +11,7 @@ struct GenreMapBuilderTests {
     let model = GenreMapBuilder.build(
       nodes: [],
       evidence: [],
-      measureLabel: { _, _ in CGSize(width: 60, height: 24) },
+      measureLabel: { _, _, _ in CGSize(width: 60, height: 24) },
     )
     #expect(model.nodes.isEmpty)
     #expect(model.layoutEdges.isEmpty)
@@ -50,7 +50,7 @@ struct GenreMapBuilderTests {
     let model = GenreMapBuilder.build(
       nodes: nodes,
       evidence: evidence,
-      measureLabel: { text, _ in CGSize(width: CGFloat(text.count * 7), height: 22) },
+      measureLabel: { text, _, _ in CGSize(width: CGFloat(text.count * 7), height: 22) },
     )
     #expect(model.nodes.count == 8)
     for node in model.nodes {
@@ -114,7 +114,7 @@ struct GenreMapBuilderTests {
         totalWeight: 0.2,
       ),
     ]
-    let measure: (String, CGFloat) -> CGSize = { text, _ in
+    let measure: (String, CGFloat, GenreMapNodeKind) -> CGSize = { text, _, _ in
       CGSize(width: CGFloat(text.count * 8), height: 22)
     }
     let first = GenreMapBuilder.build(
@@ -204,8 +204,10 @@ struct GenreMapBuilderTests {
     // stand on" bar — Louvain on a 115-node graph with ~120+ edges
     // converges into ≤25 communities, not into 90+ singletons. Lower
     // this number and the fragmentation defect comes back.
-    #expect(filtered.count >= 120,
-            "candidate filter too aggressive: only \(filtered.count) edges survived (need ≥120)")
+    #expect(
+      filtered.count >= 120,
+      "candidate filter too aggressive: only \(filtered.count) edges survived (need ≥120)",
+    )
   }
 
   @Test

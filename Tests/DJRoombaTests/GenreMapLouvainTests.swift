@@ -81,6 +81,45 @@ struct GenreMapLouvainTests {
     #expect(Set(partition.values).count == nodes.count)
   }
 
+  /// Phase 2's first carry-forward task: the medium-resolution γ retune
+  /// from 1.0 → 0.85. On the same fixture the lower-γ partition must
+  /// have ≤ communities than the higher-γ partition (the modularity-vs-
+  /// resolution sweep is monotone non-increasing in γ over a connected
+  /// component). This pins the *direction* of the retune, not an exact
+  /// number — the real library is a perceptual check, not a unit-test
+  /// invariant.
+  @Test
+  func `gamma 0_85 yields no more communities than gamma 1_0 on the same fixture`() {
+    // Five triangles weakly bridged in a chain — at γ=1.0 they tend to
+    // sit as ~5 communities; at γ=0.85 the modularity preference for
+    // larger communities folds neighbouring triangles together.
+    var edges = [GenreMapLouvain.Edge]()
+    var nodes = [String]()
+    for cluster in 0 ..< 5 {
+      let names = (0 ..< 3).map { "C\(cluster)_N\($0)" }
+      nodes.append(contentsOf: names)
+      edges.append(.init(a: names[0], b: names[1], weight: 1.0))
+      edges.append(.init(a: names[0], b: names[2], weight: 1.0))
+      edges.append(.init(a: names[1], b: names[2], weight: 1.0))
+    }
+    // Weak inter-cluster bridges between successive clusters.
+    for cluster in 0 ..< 4 {
+      edges.append(.init(
+        a: "C\(cluster)_N0",
+        b: "C\(cluster + 1)_N0",
+        weight: 0.20,
+      ))
+    }
+    let unity = GenreMapLouvain.detect(nodes: nodes, edges: edges, gamma: 1.0)
+    let eightyFive = GenreMapLouvain.detect(nodes: nodes, edges: edges, gamma: 0.85)
+    let unityCount = Set(unity.values).count
+    let eightyFiveCount = Set(eightyFive.values).count
+    #expect(
+      eightyFiveCount <= unityCount,
+      "γ=0.85 yielded \(eightyFiveCount) communities; γ=1.0 yielded \(unityCount)",
+    )
+  }
+
   @Test
   func `coarser gamma produces fewer or equal communities`() {
     // Three triangles with stronger bridges — at γ=1.0 they should split;

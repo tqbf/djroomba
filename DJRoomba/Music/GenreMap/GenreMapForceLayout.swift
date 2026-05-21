@@ -68,6 +68,15 @@ enum GenreMapForceLayout {
     var settleWindow = 8
     /// Seed for the deterministic initial scatter.
     var rngSeed: UInt64 = 0xD9_C1_57_2A_3C_22_77_77
+    /// Post-settle label-collision compaction pass (Phase 2 carry-forward
+    /// from the Phase-1 gate's "labels-don't-collide PARTIAL"). After
+    /// the main settle the layout has reached a community-gravity vs.
+    /// label-repulsion equilibrium that can still leave overlapping
+    /// labels in the dense centre. We run a short repulsion-only polish
+    /// pass with gravity disabled: labels can slide apart along the
+    /// existing geographic axes without the community/macro pulls
+    /// fighting them back together. Bounded, deterministic, runs once.
+    var compactionIterations = 40
   }
 
   struct InputNode: Sendable {
@@ -318,6 +327,46 @@ enum GenreMapForceLayout {
       }
     }
 
+    // Post-settle compaction polish pass (Phase 2 carry-forward).
+    // Gravity disabled; only the label-AABB repulsion runs. The settled
+    // geography is preserved (each node moves at most by the overlap it
+    // needs to clear), but labels that were still touching at the end
+    // of the equilibrium step slide apart along the short overlap axis.
+    // Inner-pass macro layouts (`skipMacroAnchors = true`) skip this —
+    // they're tiny graphs at scaled-up ideal lengths where polish would
+    // just churn.
+    if !configuration.skipMacroAnchors, configuration.compactionIterations > 0 {
+      for _ in 0 ..< configuration.compactionIterations {
+        var anyOverlap = false
+        for lhs in 0 ..< n {
+          for rhs in (lhs + 1) ..< n {
+            let dx = positionX[rhs] - positionX[lhs]
+            let dy = positionY[rhs] - positionY[lhs]
+            let overlapX = (halfBoxX[lhs] + halfBoxX[rhs]) - abs(dx)
+            let overlapY = (halfBoxY[lhs] + halfBoxY[rhs]) - abs(dy)
+            guard overlapX > 0, overlapY > 0 else { continue }
+            anyOverlap = true
+            // Slide apart along whichever axis has the smaller overlap
+            // (the shorter way out of the collision). Half the overlap
+            // goes to each side, so neither gets pushed all the way
+            // through the other.
+            if overlapX < overlapY {
+              let sign: Double = dx >= 0 ? 1 : -1
+              let push = overlapX * 0.55
+              positionX[lhs] -= push * sign * 0.5
+              positionX[rhs] += push * sign * 0.5
+            } else {
+              let sign: Double = dy >= 0 ? 1 : -1
+              let push = overlapY * 0.55
+              positionY[lhs] -= push * sign * 0.5
+              positionY[rhs] += push * sign * 0.5
+            }
+          }
+        }
+        if !anyOverlap { break }
+      }
+    }
+
     var positions = [String: CGPoint](minimumCapacity: n)
     for index in 0 ..< n {
       positions[nameByIndex[index]] = CGPoint(
@@ -513,9 +562,13 @@ enum GenreMapForceLayout {
 /// same inputs. SplitMix64 is the canonical 64-bit splittable generator.
 struct SplitMix64 {
 
+  // MARK: Lifecycle
+
   init(seed: UInt64) {
     state = seed
   }
+
+  // MARK: Internal
 
   mutating func next() -> UInt64 {
     state &+= 0x9E37_79B9_7F4A_7C15
@@ -530,6 +583,8 @@ struct SplitMix64 {
     // 53 bits of mantissa precision; everything else is wasted.
     Double(next() &>> 11) / Double(1 << 53)
   }
+
+  // MARK: Private
 
   private var state: UInt64
 }

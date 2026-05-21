@@ -50,8 +50,22 @@ enum GenreMapBuilder {
     /// Minimum kept candidates per node, regardless of `topFractionPerNode`.
     var minPerNodeFloor = 6
     /// Louvain resolution for the medium-resolution community pass.
-    /// Phase 1's hulls + community gravity bind to this resolution.
-    var mediumGamma = 1.0
+    /// Phase 1's hulls + community gravity bind to this resolution; Phase
+    /// 2's transferness (neighbour-community entropy + cross-community
+    /// fraction) keys off the same partition.
+    ///
+    /// Lowered from 1.0 → 0.85 at the Phase-2 first-task pass: γ=1.0 on
+    /// the real 115-genre library produced 44 communities, still too
+    /// fragmented for Phase 2's perceptual bar (the gate review aimed at
+    /// ~20). γ=0.85 is the Reichardt–Bornholdt "slightly continent-
+    /// biased" sweet spot — it preserves the visible neighbourhoods from
+    /// Phase 1 (Alt-Indie cluster, Hip-Hop/Rap cluster, Latin cluster,
+    /// Country cluster) but folds the long-tailed singletons into their
+    /// nearest meaningful neighbour. **Do not** raise this back without
+    /// re-running the live-library count; the perceptual cost of over-
+    /// fragmentation is higher than the cost of slightly-too-coarse
+    /// communities at Phase 2's transferness scale.
+    var mediumGamma = 0.85
     /// Pixels per unit of `weight` for the label font sizing — keeps
     /// pills proportional without ever shrinking below `minLabelFont`.
     /// Matches `StationLabel.minFontSize`/`maxFontSize` at the Phase-1
@@ -66,11 +80,18 @@ enum GenreMapBuilder {
   /// function is provided because the panel — not the builder — knows
   /// SwiftUI text metrics; the builder consumes a closure so the
   /// pipeline stays Foundation-only and unit-testable on a stub.
+  ///
+  /// `measureLabel` is called once per node with the node's text, font
+  /// size, and `nodeKind` — junctions and transfer stations render a
+  /// leading SF Symbol inside the pill, so their AABB is wider than an
+  /// ordinary pill at the same font size. The builder hands the panel-
+  /// provided closure the kind so the same measurement function shapes
+  /// both the layout's repulsion AABB and the rendered pill.
   static func build(
     nodes: [GenreNode],
     evidence: [GenreEdgeEvidence],
     configuration: Configuration = Configuration(),
-    measureLabel: (_ text: String, _ fontSize: CGFloat) -> CGSize,
+    measureLabel: (_ text: String, _ fontSize: CGFloat, _ kind: GenreMapNodeKind) -> CGSize,
   ) -> GenreMapModel {
     guard !nodes.isEmpty else {
       return GenreMapModel(
@@ -121,14 +142,33 @@ enum GenreMapBuilder {
       gamma: configuration.mediumGamma,
     )
 
+    // 3a) Transferness (Phase 2). Runs after community detection and
+    // before layout — so a future iteration can let `kind` shape the
+    // layout (e.g. transfer-stations as soft anchors) and, more
+    // importantly, the result is part of the cached `GenreMapModel`. The
+    // drag affordance does NOT recompute this; classification must stay
+    // stable as the user moves a node around.
+    let transferEdges = layoutEdges.map {
+      (a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+    }
+    let transfernessResult = GenreMapTransferness.score(
+      nodes: nodes.map { (genre: $0.genre, weight: $0.weight) },
+      edges: transferEdges,
+      communities: partition,
+    )
+
     // 4) Per-node label rectangle sizes (the headline correctness item:
-    // repulsion is label-first, not radius-first).
+    // repulsion is label-first, not radius-first). The label closure
+    // is called with the node's classification so junction / transfer-
+    // station pills (which render a leading glyph) get a wider AABB —
+    // the layout sees the SAME rectangle the renderer will draw.
     var inputs = [GenreMapForceLayout.InputNode]()
     inputs.reserveCapacity(nodes.count)
     for node in nodes {
       let fontSize = configuration.labelFontMin
         + CGFloat(node.weight) * (configuration.labelFontMax - configuration.labelFontMin)
-      let size = measureLabel(node.genre, fontSize)
+      let kind = transfernessResult.kindByNode[node.genre] ?? .ordinary
+      let size = measureLabel(node.genre, fontSize, kind)
       inputs.append(GenreMapForceLayout.InputNode(
         id: node.genre,
         weight: node.weight,
@@ -168,6 +208,16 @@ enum GenreMapBuilder {
     for node in nodes {
       let position = layout.positions[node.genre] ?? .zero
       let labelSize = inputByID[node.genre]?.labelSize ?? .zero
+      let composite = transfernessResult.compositeByNode[node.genre] ?? 0
+      let inputs = transfernessResult.inputsByNode[node.genre] ?? GenreMapTransfernessInputs(
+        betweenness: 0,
+        neighbourEntropy: 0,
+        crossCommunityFraction: 0,
+        membershipEntropy: 0,
+        strandCount: 0,
+        dampening: 1,
+      )
+      let kind = transfernessResult.kindByNode[node.genre] ?? .ordinary
       mapNodes.append(GenreMapNode(
         genre: node.genre,
         weight: node.weight,
@@ -177,6 +227,9 @@ enum GenreMapBuilder {
         communityID: partition[node.genre] ?? 0,
         position: position,
         labelSize: labelSize,
+        transferness: composite,
+        nodeKind: kind,
+        transfernessInputs: inputs,
       ))
       minX = min(minX, position.x)
       minY = min(minY, position.y)
