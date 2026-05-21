@@ -5,6 +5,105 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — Son of Genre Map — Phase A: MST + trunk selection + tree construction (pure logic)
+
+**Branch `feature/genre-tree-map`** (fresh, off `main`). Phase A of
+`plans/son-of-genre-map.md` lands the pure substrate the new
+trunk-tree view will bind to. No view code, no schema changes, no
+deletions of metro-map code (Phase E does that). Everything pure,
+`nonisolated`, fixture-tested.
+
+### What landed
+
+Three new pure-logic files under `DJRoomba/Music/GenreTreeMap/`:
+
+- **`GenreTreeBuilder.swift`** — Kruskal MST over `genre_edge_evidence`
+  with edge cost `1 − totalWeight` (reuses the project-local
+  `UnionFind` scaffolding from `GenreMapLayoutGraph`). Trunk selection
+  via the pluggable `TrunkSelectionMetric` enum: one trunk per medium-
+  resolution Louvain community (γ = 0.85), capped at k ≤ 7; cross-
+  community tie-break is "highest community weight" (sum of per-genre
+  weights). Within a community the metric decides the trunk pick.
+  BFS forest from every trunk through the MST; first-claim wins,
+  ties broken by lowest cumulative MST cost, ultimate tie-break is
+  lex on the trunk genre name. Children inside each trunk's subtree
+  sort by per-genre weight desc with lex tie-break so Phase B's
+  radial layout can fan the heaviest branch nearest the parent's
+  local "12 o'clock".
+- **`TrunkSelectionMetric.swift`** — pluggable enum with three
+  variants: `.highestWeight`, `.highestTransferness`, `.highestCentrality`.
+  The user has explicitly deferred picking a default ("I won't know
+  what metric is best until I see it"); the enum + Debug menu lets
+  Phase B/C ship a live A/B toggle. `.highestTransferness` re-uses
+  `GenreMapTransferness.score` over the MST + community partition
+  (strand-count slot stays zero — strands retire in this plan).
+  `.highestCentrality` re-uses `GenreMapTransferness.normalisedBetweenness`
+  over each community's induced MST subgraph.
+- **`GenreTreeModel.swift`** — output types: `GenreTreeModel { trunks,
+  orphans }`, `GenreTreeTrunk { root, communityID }`, `GenreTreeNode {
+  genre, depth, children }`, `Genre { name, weight }`, `MSTEdge { genreA,
+  genreB, totalWeight }` (carries derived `cost = 1 − totalWeight`).
+  All `Equatable + Sendable`.
+
+### Tests
+
+New file `Tests/DJRoombaTests/GenreTreeBuilderTests.swift` — **12 new
+tests** in one new suite. Covers:
+
+- Kruskal correctness on a 5-node fixture with a deliberate cycle
+  (weakest edge dropped, n−1 edges kept).
+- Kruskal MST keeps the strongest composite-weight edges.
+- Kruskal silently drops edges referencing nodes outside the set
+  (defensive against substrate drift).
+- Trunk-cap behaviour at k > 7 communities (the 8th-heaviest
+  community loses its trunk slot).
+- Determinism: identical inputs ⇒ identical outputs on symmetric
+  fixtures.
+- Intra-community tie-break: equal-weight members ⇒ lex-smaller
+  name wins.
+- BFS first-claim: equidistant tie goes to lex-smaller trunk name.
+- BFS first-claim: cheaper cumulative cost wins over fewer hops.
+- Metric variants produce *different* trunks on a hand-crafted
+  fixture (Heavy ⇒ `.highestWeight`, Centre ⇒ `.highestCentrality`,
+  Bridge ⇒ `.highestTransferness`).
+- Empty input ⇒ empty model (no crashes).
+- Genre with no community + no MST path lands as an orphan
+  (defensive overflow surfaced, not silently swallowed).
+- Children are sorted by per-genre weight desc with lex tie-break.
+
+### Acceptance
+
+- **`swift test`: 369 / 55 green** (was 357 / 54 ⇒ +12 tests, +1 suite).
+- `swiftformat --lint` clean on the new files (full repo: only
+  pre-existing Vendor/ForceGraph findings, unrelated).
+- `swiftlint --strict` clean on the new files.
+- `make check` clean (compiles debug).
+- `make build` clean (signed `build/DJRoomba.app` produced).
+
+### What this enables
+
+Phase B (geometric layout + the trunk-tree view) consumes
+`GenreTreeModel` unchanged. The MST + trunk + forest are
+deterministic on identical inputs ⇒ Phase B's layout pass and
+Phase E's persistence repurpose can both pin their behaviour
+against the same fixtures.
+
+The metro-map substrate (`GenreMapBuilder`, `GenreMapTransferness`,
+`GenreMapPersistence`, the Louvain partition, the evidence reads)
+is untouched and continues to feed the metro view — both views live
+in-tree through Phase D; Phase E retires the metro side.
+
+### Deviations from the plan
+
+None. The plan asked for Kruskal + pluggable metric + BFS forest +
+fixture tests; that's exactly what landed. The plan's tests list
+("Kruskal correctness on a 5-node fixture; trunk-cap at k > 7;
+tie-break determinism; BFS first-claim correctness; metric variants
+produce different trunks") is covered point-for-point, plus the
+extra orphan/empty/child-ordering guards above.
+
+**GO for Phase B.**
+
 ## 2026-05-21 — ⏸ Genre Metro Map — programme paused at end of Phase 6 (Phase 7 intentionally deferred per user)
 
 **Phases 1–6 + every phase gate landed on `feature/genre-metro-map` (PR #5
