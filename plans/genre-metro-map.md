@@ -248,6 +248,23 @@ strands.
 
 ### Phase 3 — Infer metro strands
 
+> **Phase-3 ship (2026-05-20):** delivered as planned, with two
+> compositional notes that affect Phase 4. **(a) User directive
+> 2026-05-20:** "the whole map does not need to usefully fit on the
+> screen all at once — scrolling is fine!". This drops the implicit
+> fit-to-viewport pressure from Phases 1/2; the Phase-3 layout
+> widening (`worldSide` 2000 → 2800, `idealEdgeLength` 320 → 440,
+> `edgeAttraction` 0.06 → 0.045, `compactionIterations` 40 → 16) gives
+> labels more room *before* the polish pass. The panel still
+> fits-to-view on first appearance — Phase 4 should soften the
+> default zoom (cap ≤ 0.6×) so splines aren't routinely hidden under
+> dense pill clusters. **(b) `song_genre` materialised** lives in a
+> new migration `v8.songGenreMaterialised` (NOT inside v7) so
+> existing local DBs pick it up on next launch. CLAUDE.md "never
+> edit a shipped migration" — v7 is on `feature/genre-metro-map`
+> only, but the user's local DB already has v7 applied, so a new
+> migration name is the right call.
+
 Extract algorithmic corridors from the topology. **No human-curated
 labels anywhere.**
 

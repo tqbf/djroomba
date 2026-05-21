@@ -31,10 +31,26 @@ struct GenreMapMigrationTests {
     }
   }
 
+  /// Phase 3 carry-forward: `song_genre` materialised view + the three
+  /// indexes are part of v7 (`plans/genre-metro-map.md` Phase 3 step 9).
+  /// Pin the schema so a future regression surfaces here, not by a
+  /// 6-8 s evidence-on-demand latency in live verification.
   @Test
-  func `migrator ordering ends with v 7 genre map`() {
+  func `v 7 adds the song genre materialised view with all three indexes`() throws {
+    let db = try AppDatabase()
+    try db.dbQueue.read { db in
+      #expect(try db.tableExists("song_genre"))
+      let indexNames = try db.indexes(on: "song_genre").map(\.name)
+      #expect(indexNames.contains("song_genre_genre_song_idx"))
+      #expect(indexNames.contains("song_genre_genre_artist_idx"))
+      #expect(indexNames.contains("song_genre_genre_album_idx"))
+    }
+  }
+
+  @Test
+  func `migrator ordering ends with v 8 song genre materialised`() {
     let applied = LibraryMigrator.migrator.migrations
-    #expect(applied.last == "v7.genreMap")
+    #expect(applied.last == "v8.songGenreMaterialised")
     #expect(applied == [
       "v1.initialSchema",
       "v2.applePlaylistChangeToken",
@@ -42,6 +58,7 @@ struct GenreMapMigrationTests {
       "v4.songMetadata",
       "v6.genreGraph",
       "v7.genreMap",
+      "v8.songGenreMaterialised",
     ])
   }
 

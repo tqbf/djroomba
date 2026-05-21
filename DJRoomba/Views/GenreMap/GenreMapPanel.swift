@@ -83,6 +83,29 @@ struct GenreMapPanel: View {
     return palette[((id % palette.count) + palette.count) % palette.count]
   }
 
+  /// Strand palette — distinguishable hues, **offset from** the community
+  /// palette so a strand colour doesn't accidentally match the community
+  /// it traverses. The strand and its containing community can both be
+  /// on screen at once; matching hues confuse what carries semantic
+  /// weight (strand vs community).
+  static func strandColour(for colourID: Int) -> Color {
+    let palette: [Color] = [
+      .red,
+      .orange,
+      .yellow,
+      .green,
+      .mint,
+      .cyan,
+      .blue,
+      .indigo,
+      .purple,
+      .pink,
+      .brown,
+      .teal,
+    ]
+    return palette[((colourID % palette.count) + palette.count) % palette.count]
+  }
+
   // MARK: Private
 
   private struct DragState: Equatable {
@@ -153,6 +176,12 @@ struct GenreMapPanel: View {
   @State private var evidence: GenreMapEvidenceOnDemand?
   @State private var isLoadingEvidence = false
   @State private var evidenceTask: Task<Void, Never>?
+  /// Phase 3 strand hover (`plans/genre-metro-map.md` step 8). When set,
+  /// the corresponding strand renders opaque + member stations highlight,
+  /// every other strand fades to ~6 % opacity. Cleared on hover-exit.
+  /// The full Phase-5 discovery UX adds two-strand-compare + click-pin;
+  /// Phase 3 ships the minimal affordance for visual verification.
+  @State private var hoveredStrandID: Int?
   /// Gesture deltas applied during an active pinch / pan, committed back
   /// onto `scale` / `offset` at gesture end (the standard SwiftUI
   /// gesture composition).
@@ -227,30 +256,94 @@ struct GenreMapPanel: View {
   }
 
   private var footer: some View {
-    HStack {
-      Image(systemName: "hand.point.up.left")
-      Text("Drag to move a genre · Pinch to zoom · Drag empty space to pan")
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      Spacer()
-      Button {
-        scale = 1.0
-        offset = .zero
-        fittedOnce = false
-      } label: {
-        Label("Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+    VStack(spacing: 4) {
+      strandHoverRow
+      HStack {
+        Image(systemName: "hand.point.up.left")
+        Text("Drag to move a genre · Pinch to zoom · Hover a strand to highlight")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        Spacer()
+        Button {
+          scale = 1.0
+          offset = .zero
+          fittedOnce = false
+        } label: {
+          Label("Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+        }
+        .controlSize(.small)
+        Stepper(value: $scale, in: 0.25 ... 4.0, step: 0.1) {
+          Text(String(format: "%.0f%%", scale * 100))
+            .font(.caption.monospacedDigit())
+        }
+        .labelsHidden()
+        .controlSize(.small)
       }
-      .controlSize(.small)
-      Stepper(value: $scale, in: 0.25 ... 4.0, step: 0.1) {
-        Text(String(format: "%.0f%%", scale * 100))
-          .font(.caption.monospacedDigit())
-      }
-      .labelsHidden()
-      .controlSize(.small)
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 6)
     .background(.bar)
+  }
+
+  /// Phase 3 strand-hover affordance — a horizontal row of strand chips
+  /// (one per main strand; branches inherit the parent's hue and aren't
+  /// chips of their own). Hovering a chip highlights the corresponding
+  /// spline + member stations on the map. The full Phase-5 hover/click
+  /// discovery UX (compare two; pin one; rich evidence) wraps this; for
+  /// Phase 3, the chips are the minimum visual-verification affordance.
+  @ViewBuilder
+  private var strandHoverRow: some View {
+    if
+      let model = service.model,
+      !model.strands.filter({ !$0.isBranch }).isEmpty
+    {
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(spacing: 6) {
+          ForEach(model.strands.filter { !$0.isBranch }) { strand in
+            strandChip(strand)
+          }
+        }
+        .padding(.horizontal, 2)
+      }
+      .frame(maxHeight: 28)
+    }
+  }
+
+  private func strandChip(_ strand: GenreMapStrandInference.Strand) -> some View {
+    let colour = Self.strandColour(for: strand.colourID)
+    let isHovered = hoveredStrandID == strand.id
+    let chipLabel = strand.label.isEmpty
+      ? strand.representativeGenres.first ?? "Strand \(strand.id + 1)"
+      : strand.label
+    return HStack(spacing: 5) {
+      Circle()
+        .fill(colour)
+        .frame(width: 8, height: 8)
+      Text(chipLabel)
+        .font(.caption2)
+        .lineLimit(1)
+        .foregroundStyle(isHovered ? .primary : .secondary)
+    }
+    .padding(.horizontal, 8)
+    .padding(.vertical, 3)
+    .background(
+      Capsule(style: .continuous)
+        .fill(colour.opacity(isHovered ? 0.18 : 0.08))
+        .overlay(
+          Capsule(style: .continuous)
+            .strokeBorder(colour.opacity(isHovered ? 0.7 : 0.3), lineWidth: 1)
+        )
+    )
+    .onHover { isInside in
+      hoveredStrandID = isInside ? strand.id : (hoveredStrandID == strand.id ? nil : hoveredStrandID)
+    }
+    .help(strandTooltip(strand))
+  }
+
+  private func strandTooltip(_ strand: GenreMapStrandInference.Strand) -> String {
+    let members = strand.memberGenres.prefix(6).joined(separator: ", ")
+    let suffix = strand.memberGenres.count > 6 ? "…" : ""
+    return "\(strand.label.isEmpty ? "Strand" : strand.label) — \(members)\(suffix)"
   }
 
   @ViewBuilder
@@ -270,6 +363,7 @@ struct GenreMapPanel: View {
     ZStack {
       hullsCanvas(model: model, transform: viewTransform)
       edgesCanvas(model: model, transform: viewTransform)
+      strandsLayer(model: model, transform: viewTransform)
       labelsLayer(model: model, transform: viewTransform)
     }
     .contentShape(Rectangle())
@@ -399,14 +493,64 @@ struct GenreMapPanel: View {
     .allowsHitTesting(false)
   }
 
+  /// Phase 3 metro-strand overlay. One Catmull-Rom `StrandSpline` per
+  /// strand at low default opacity; the hovered strand (when any)
+  /// renders opaque + every other strand fades. No routing / bundling
+  /// — that's Phase 4. Splines may cross.
+  private func strandsLayer(model: GenreMapModel, transform: ViewTransform) -> some View {
+    let positionsByGenre = Dictionary(
+      uniqueKeysWithValues: model.nodes.map { ($0.genre, $0.position) }
+    )
+    return ZStack {
+      ForEach(model.strands) { strand in
+        StrandSpline(
+          positionsByGenre: positionsByGenre,
+          strand: strand,
+          colour: Self.strandColour(for: strand.colourID),
+          isHighlighted: hoveredStrandID == strand.id
+            || hoveredStrandID == strand.parentStrandID,
+          isFaded: hoveredStrandID != nil
+            && hoveredStrandID != strand.id
+            && hoveredStrandID != strand.parentStrandID,
+          project: transform.project,
+        )
+      }
+    }
+  }
+
+  /// Per-station strand-tick colours. Ticks render per strand serving
+  /// the station; branches share the parent strand's hue so the eye
+  /// reads the corridor, not the branch. Deduped + colour-sorted for
+  /// deterministic rendering.
+  private func tickColours(
+    for genre: String,
+    in model: GenreMapModel,
+  ) -> [Color] {
+    var seenColourIDs = Set<Int>()
+    var colours = [(colourID: Int, colour: Color)]()
+    for strand in model.strands where strand.memberGenres.contains(genre) {
+      // Branches contribute the parent's colour so the eye reads the
+      // strand as one corridor, not a branched mess.
+      let canonicalColourID = strand.isBranch
+        ? (strand.parentStrandID ?? strand.colourID)
+        : strand.colourID
+      if seenColourIDs.insert(canonicalColourID).inserted {
+        colours.append((canonicalColourID, Self.strandColour(for: canonicalColourID)))
+      }
+    }
+    return colours.sorted { $0.colourID < $1.colourID }.map(\.colour)
+  }
+
   private func labelsLayer(model: GenreMapModel, transform: ViewTransform) -> some View {
     ForEach(model.nodes) { node in
       let position = transform.project(node.position)
       let community = model.communities.first { $0.id == node.communityID }
+      let ticks = tickColours(for: node.genre, in: model)
       StationLabel(
         node: node,
         community: community,
         hullColour: Self.communityColour(for: node.communityID),
+        strandTickColours: ticks,
         onTap: { selectNode(node) },
       )
       .position(position)

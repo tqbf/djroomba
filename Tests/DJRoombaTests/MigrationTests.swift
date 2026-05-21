@@ -30,6 +30,7 @@ struct MigrationTests {
       // column, no schema). The next schema change is v6.
       "v6.genreGraph",
       "v7.genreMap",
+      "v8.songGenreMaterialised",
     ])
   }
 
@@ -131,6 +132,7 @@ struct MigrationTests {
       "v4.songMetadata",
       "v6.genreGraph",
       "v7.genreMap",
+      "v8.songGenreMaterialised",
     ])
     #expect(appliedAfterSecond == appliedAfterFirst)
     #expect(songExists)

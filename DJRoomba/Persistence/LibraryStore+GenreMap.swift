@@ -39,6 +39,33 @@ extension LibraryStore {
     try await database.dbQueue.write { db in
       try db.execute(sql: "DELETE FROM genre_node")
       try db.execute(sql: "DELETE FROM genre_edge_evidence")
+      try db.execute(sql: "DELETE FROM song_genre")
+
+      // Phase 3: materialise `song_genre`. One INSERT, indexed; collapses
+      // strand-inference cost AND evidence-on-demand latency. The keys
+      // here match the rebuild's inline CTEs exactly so JIT queries can
+      // join on the indexed table instead of re-exploding `json_each`
+      // against `song.genre_names` every time.
+      try db.execute(sql: """
+        INSERT INTO song_genre (song_id, genre, artist_key, album_key)
+        SELECT s.id,
+               TRIM(je.value) AS genre,
+               NULLIF(TRIM(LOWER(s.artist_name)), '') AS artist_key,
+               CASE
+                 WHEN NULLIF(TRIM(LOWER(s.artist_name)), '') IS NULL
+                   OR NULLIF(TRIM(LOWER(s.album_title)), '') IS NULL
+                 THEN NULL
+                 ELSE TRIM(LOWER(s.artist_name))
+                      || '|'
+                      || TRIM(LOWER(s.album_title))
+               END AS album_key
+          FROM song s
+          JOIN json_each(s.genre_names) je
+         WHERE s.genre_names IS NOT NULL
+           AND json_valid(s.genre_names)
+           AND je.value IS NOT NULL
+           AND TRIM(je.value) <> ''
+        """)
 
       // 1) Per-(genre, song) explode: one row per (TRIM'd, non-blank,
       // case-folded-for-keys) genre + its underlying song. `LOWER` is only
@@ -341,45 +368,37 @@ extension LibraryStore {
         encoding: .utf8,
       ) ?? "[]"
 
-      // The CTE shape: song_genre rows for the selected genre + for each
-      // neighbour genre, with the same normalised keys the rebuild uses;
-      // intersection happens by joining selected and neighbour rows on
-      // the shared key.
+      // Phase 3: the JIT CTE is gone — the materialised `song_genre`
+      // table joins on the indexed `(genre, song_id)`, `(genre, artist_key)`,
+      // and `(genre, album_key)` columns. The selected-rows CTE picks
+      // up the per-row display freight (artist / album / title) by
+      // joining `song_genre` to `song`; the index makes that join hit
+      // a single row per `(genre, song_id)` pair instead of re-exploding
+      // `json_each` over the entire `song` table.
       let baseCTE = """
         WITH
           neighbour_set(name) AS (
             SELECT value FROM json_each(?)
           ),
-          song_genre(song_id, genre, artist_key, album_key, artist_disp, album_disp, title_disp) AS (
-            SELECT s.id,
-                   TRIM(je.value),
-                   NULLIF(TRIM(LOWER(s.artist_name)), ''),
-                   CASE
-                     WHEN NULLIF(TRIM(LOWER(s.artist_name)), '') IS NULL
-                       OR NULLIF(TRIM(LOWER(s.album_title)), '') IS NULL
-                     THEN NULL
-                     ELSE TRIM(LOWER(s.artist_name))
-                          || '|'
-                          || TRIM(LOWER(s.album_title))
-                   END,
-                   s.artist_name,
-                   s.album_title,
-                   s.title
-              FROM song s
-              JOIN json_each(s.genre_names) je
-             WHERE s.genre_names IS NOT NULL
-               AND json_valid(s.genre_names)
-               AND je.value IS NOT NULL
-               AND TRIM(je.value) <> ''
-               AND (TRIM(je.value) = ?
-                    OR TRIM(je.value) IN (SELECT name FROM neighbour_set))
-          ),
           selected_rows AS (
-            SELECT * FROM song_genre WHERE genre = ?
+            SELECT sg.song_id,
+                   sg.genre,
+                   sg.artist_key,
+                   sg.album_key,
+                   s.artist_name AS artist_disp,
+                   s.album_title AS album_disp,
+                   s.title       AS title_disp
+              FROM song_genre sg
+              JOIN song s ON s.id = sg.song_id
+             WHERE sg.genre = ?
           ),
           neighbour_rows AS (
-            SELECT * FROM song_genre
-             WHERE genre IN (SELECT name FROM neighbour_set)
+            SELECT sg.song_id,
+                   sg.genre,
+                   sg.artist_key,
+                   sg.album_key
+              FROM song_genre sg
+             WHERE sg.genre IN (SELECT name FROM neighbour_set)
           )
         """
 
@@ -421,7 +440,6 @@ extension LibraryStore {
         """
       let args: StatementArguments = [
         neighboursJSON,
-        selectedGenre,
         selectedGenre,
         perChannelLimit,
       ]

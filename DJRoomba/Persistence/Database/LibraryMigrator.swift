@@ -394,6 +394,42 @@ enum LibraryMigrator {
       }
     }
 
+    // v8: the materialised `song_genre` view + its three indexes —
+    // Phase-3 carry-forward from the Phase 2 gate (`plans/genre-metro-
+    // map.md` Phase 3 step 9). Lives in its own migration so existing
+    // local DBs (which already applied v7 during Phase 1) pick it up
+    // on the next launch without re-running v7. The table is rebuilt
+    // (DELETE + INSERT) by `LibraryStore.rebuildGenreMap` — same
+    // wholesale-rebuild posture as `genre_node` / `genre_edge_evidence`.
+    // Indexes on `(genre, song_id)`, `(genre, artist_key)`, and
+    // `(genre, album_key)` collapse both the strand-inference adjacency
+    // build cost AND the previously-6-8 s evidence-on-demand CTE
+    // latency — the queries now hit indexed columns instead of
+    // re-exploding `json_each(song.genre_names)` on every read.
+    migrator.registerMigration("v8.songGenreMaterialised") { db in
+      try db.create(table: "song_genre") { t in
+        t.column("song_id", .text).notNull()
+        t.column("genre", .text).notNull()
+        t.column("artist_key", .text)
+        t.column("album_key", .text)
+      }
+      try db.create(
+        index: "song_genre_genre_song_idx",
+        on: "song_genre",
+        columns: ["genre", "song_id"]
+      )
+      try db.create(
+        index: "song_genre_genre_artist_idx",
+        on: "song_genre",
+        columns: ["genre", "artist_key"]
+      )
+      try db.create(
+        index: "song_genre_genre_album_idx",
+        on: "song_genre",
+        columns: ["genre", "album_key"]
+      )
+    }
+
     return migrator
   }
 }

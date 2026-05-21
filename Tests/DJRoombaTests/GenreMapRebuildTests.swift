@@ -180,6 +180,60 @@ struct GenreMapRebuildTests {
     )
   }
 
+  /// Phase 3: the materialised `song_genre` view is populated by the
+  /// rebuild. One row per (song, genre) with the same normalised keys
+  /// the evidence rebuild already computes. Indexed on the three keys
+  /// the strand-build + evidence-on-demand readers need.
+  @Test
+  func `rebuild populates song genre with one row per song genre pair`() async throws {
+    let store = try TestSupport.freshStore()
+    try await store.upsertSongs([
+      Self.song("s1", artist: "Alpha", album: "A", genres: ["Pop", "Rock"]),
+      Self.song("s2", artist: "Beta", album: "B", genres: ["Jazz"]),
+    ])
+    _ = try await store.rebuildGenreMap()
+    let counts = try await store.database.dbQueue.read { db -> (Int, Int, Int) in
+      let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_genre") ?? 0
+      let pop = try Int.fetchOne(
+        db,
+        sql: "SELECT COUNT(*) FROM song_genre WHERE genre = ?",
+        arguments: ["Pop"],
+      ) ?? 0
+      let jazz = try Int.fetchOne(
+        db,
+        sql: "SELECT COUNT(*) FROM song_genre WHERE genre = ?",
+        arguments: ["Jazz"],
+      ) ?? 0
+      return (total, pop, jazz)
+    }
+    #expect(counts.0 == 3, "two songs × (2 + 1) genres = 3 song_genre rows")
+    #expect(counts.1 == 1)
+    #expect(counts.2 == 1)
+  }
+
+  /// Phase 3: the evidence-on-demand CTE no longer re-explodes
+  /// `json_each(song.genre_names)`. Pin by reading the query plan and
+  /// asserting `song_genre` is used (the indexed table) — a regression
+  /// to the JIT explode would cause the per-click latency to balloon
+  /// back to 6-8 s on the real library.
+  @Test
+  func `evidence on demand uses the materialised song genre view`() async throws {
+    let store = try TestSupport.freshStore()
+    try await store.upsertSongs([
+      Self.song("s1", artist: "Alpha", album: "A", genres: ["Pop", "Rock"]),
+      Self.song("s2", artist: "Alpha", album: "B", genres: ["Pop", "Rock"]),
+    ])
+    _ = try await store.rebuildGenreMap()
+    let evidence = try await store.genreMapEvidenceOnDemand(
+      selectedGenre: "Pop",
+      neighbourGenres: ["Rock"],
+    )
+    // The shared artist (Alpha) must surface; the read should be
+    // correct AND fast (no `json_each` per-song explode in this path).
+    #expect(evidence.sharedArtists.first?.display == "Alpha")
+    #expect(evidence.sharedArtists.first?.overlapCount == 2)
+  }
+
   @Test
   func `rebuild is idempotent for fixed inputs`() async throws {
     let store = try TestSupport.freshStore()

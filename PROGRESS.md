@@ -5,6 +5,278 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-20 — ✅ Genre Metro Map — Phase 3 — algorithmic metro strands (`feature/genre-metro-map`)
+
+Phase 3 of `plans/genre-metro-map.md`: algorithmic corridor extraction
+from the layout graph (no human-curated labels) + faint Catmull-Rom
+spline overlay + per-station coloured strand ticks + minimal hover
+affordance + materialised `song_genre` (collapses evidence-on-demand
+latency 6–8 s → <100 ms) + strand_count fed back into transferness.
+**Live-verified on the real library**: 12 strands extracted from 117
+layout edges across 43 communities, all 12 with sensible TF-IDF
+labels. **GO for Phase 4.**
+
+- **User directive 2026-05-20 absorbed**: "the whole map does not need
+  to usefully fit on the screen all at once — scrolling is fine!".
+  Concretely applied to the force layout — `worldSide` 2000 → 2800,
+  `idealEdgeLength` 320 → 440, `edgeAttraction` 0.06 → 0.045,
+  `compactionIterations` 40 → 16. Spread instead of compaction polish.
+  The panel still fits-to-view on first appearance (carry-forward —
+  the user explicitly approved scrolling; Phase 4 will reduce the
+  fit-to-view default-zoom so the wider world doesn't auto-collapse).
+- **Pure pipeline (`GenreMapStrandInference.swift`, new, ~700 LOC).**
+  Per-community heavy paths (induced subgraph → MST → weighted tree
+  diameter; `length ≥ 3` and per-edge mean weight ≥ adaptive τ =
+  overall median edge weight). Branch promotion from spine
+  side-walks (max 2 per heavy path). Cross-community bridge strands
+  (heaviest crossing per community pair → Dijkstra over `1 − weight`
+  through the original graph). Rank by `node-weight-sum + length +
+  edge-support + transfer-station count`. Member-Jaccard cull at
+  `≥ 0.6` (loser absorbed as branch). TF-IDF labels with the plan's
+  junk-token blacklist (`misc`, `other`, `genre`, `music`, …). All
+  `nonisolated` + pure; fixture-tested end-to-end.
+- **Builder wiring (`GenreMapBuilder.swift`).** Strand inference runs
+  AFTER initial transferness, then transferness is RE-SCORED with
+  `strand_count` populated; the absolute classifier
+  (`classify(composite:)`) gets preferred IFF it surfaces ≥ 4
+  transfer stations, otherwise the Phase-2 rank classifier
+  (`classifyByRank`) remains. On the live library the absolute path
+  doesn't surface 4 yet (the strand slot is only 10 % of the
+  composite, ceiling still far below 1.0), so rank stays live —
+  documented and pinned. Strands persisted on `GenreMapModel.strands`
+  for the renderer.
+- **Store side — materialised `song_genre`** (`LibraryStore+GenreMap.swift`
+  + new migration `v8.songGenreMaterialised`). The `(song_id, genre,
+  artist_key, album_key)` explode now lives in its own SQLite table,
+  rebuilt wholesale by `rebuildGenreMap`, with three indexes
+  (`(genre, song_id)`, `(genre, artist_key)`, `(genre, album_key)`)
+  the strand-inference adjacency + evidence-on-demand readers need.
+  Lives in v8 (not v7) so existing local DBs that already ran v7
+  pick it up on next launch without re-running v7 (per CLAUDE.md
+  "never edit a shipped migration"). The `genreMapEvidenceOnDemand`
+  CTE no longer re-explodes `json_each(s.genre_names)` — the join
+  hits the indexed table.
+- **View — `StrandSpline.swift` (new) + extended `StationLabel.swift`
+  + extended `GenreMapPanel.swift`.** Spline renderer is a SwiftUI
+  `Canvas` over a uniform Catmull-Rom curve through projected world
+  positions; opacity 0.22 (default) / 0.9 (hovered) / 0.06 (faded).
+  `StationLabel` ditches the Phase-2 neutral multi-strand glyph for
+  transferStations and adds a strand-tick row UNDER the pill (one
+  dot per strand serving the station, coloured per-strand; branches
+  share the parent's hue). Junctions keep their `diamond.fill` glyph
+  inside the pill — they signal topology, not strand membership.
+  `GenreMapPanel` gains a horizontal strand-chip ScrollView at the
+  footer (one chip per main strand; hover-highlight via `.onHover`)
+  + a `strandsLayer` ZStack of `StrandSpline`s above the layout
+  backbone, below the labels.
+- **Live verification (computer-use, real library, signed build).**
+  - `make build` + `make install` + relaunch + Playback → Analyze
+    Genre Map (~14 s rebuild on the real library) + Show Genre Map…
+  - Header reads **115 genres · 117 layout edges · 43 neighbourhoods**
+    — unchanged from Phase 2 (Phase 3 doesn't widen the substrate;
+    the user's "spread instead of compact" directive only widens
+    *world space*, not the layout graph itself).
+  - **Strand inventory — 12 strands** with TF-IDF labels, in chip
+    order (red → orange → … → teal):
+    1. Alternative · Bristol · Britpop · Electronic
+    2. Folk · 60s · 70s · Classic
+    3. Rap · Soul · Hip · Hop
+    4. Dance · Electro · Experimental · Glitch
+    5. Indie · Aor · Mor · Tribute
+    6. Industrial · New · Wave · Goth
+    7. Celtic · Soft · Contemporary
+    8. Adult · Disco · Soft · Contemporary
+    9. Punk · Ska · Tone
+    10. Hip · Hop · Crossover · Electro
+    11. Rap · Hip · Hop · Motown
+    12. Blues · Classical · Jazz · Soul
+    Exactly the plan's upper bound (5–12 strands at default zoom).
+  - **Sensible-corridor spot-check.** Strand 1
+    (Alternative/Bristol/Britpop/Electronic) tooltip lists "Alt/BritPop,
+    Alt/Laptop/Bristol, Alternative, Electronic, International, Pop…"
+    — a genuine British alt-electronic corridor. Strand 5
+    (Indie/Aor/Mor/Tribute) lists "80s, Alt/Indie, Alt/MOR/AOR, Indie
+    Rock, Tribute" — the Alt/Indie cluster's main spine. Strand 6
+    (Industrial/New/Wave/Goth) maps the 80s industrial corridor. The
+    labels are recognisable as genuine corridors, not arbitrary tree
+    branches.
+  - **Click Pop/Rock/60s-70s/Classic** (junction, transferness 17 %):
+    panel opened **instantly** (visually <100 ms; no spinner). Side
+    panel shows **real shared library evidence**: David Bowie ×29,
+    The Beach Boys ×4, Simon & Garfunkel ×3, Big Star ×1. The 6–8 s
+    Phase-2 latency is **gone** — the materialised view + indexes
+    landed the win the brief targeted.
+  - **Strand-chip hover**: hovering the first chip ("Alternative ·
+    Bristol · Britpop · Electronic") highlighted the chip (saturated
+    background) and surfaced the help tooltip "— Alt/BritPop,
+    Alt/Laptop/Bristol, Alternative, Electronic, International,
+    Pop…". The spline-highlight path is wired (the corresponding
+    spline goes opaque while others fade to 6 %); visible above the
+    dense centre because the user's fit-to-view squashes the wider
+    world into the available pane area — addressed in the carry-
+    forward.
+  - **Strand ticks** visible under multiple pills: "80s" (cyan),
+    "Indie" (orange), "Tribute" (mint), "Glam Rock" (cyan), "Vocal
+    Pop" (yellow), "Alt/Punk" (purple), "Pop/Rock/60s" (red, plus
+    the red diamond glyph for junction — a junction that ALSO serves
+    a strand).
+  - **Junction glyphs preserved** — Pop/Rock/60s, Alt/Laptop,
+    Hip-Hop/Rap, Alt/Punk all show the `diamond.fill` glyph inside
+    the pill at the correct hull colour.
+  - **Transfer-station multi-strand glyph removed** per the brief —
+    transferStations now signal membership purely through 2+
+    coloured ticks under the pill.
+  - **Drag-a-node**: position changes only; classification + strand
+    set unchanged (strand inference runs once per rebuild, not per
+    drag) — verified by dragging Pop/Rock/60s on screen and watching
+    the header / chip count stay constant.
+  - **Screenshot saved**: `/tmp/genre-metro-map-phase3-final.png`,
+    surfaced via `SendUserFile` — Pop/Rock/60s panel + strand chips
+    + spline overlay all visible.
+- **Transferness reclassification with `strand_count` wired in.**
+  - **Before Phase 3** (strand-count slot = 0; rank classifier; live
+    on the same library): 4 transfer stations (Electronic, R&B/Soul,
+    Pop, Alt/Indie) + 5 junctions (Hard Rock, Pop/Rock/60s,
+    Soundtrack, Hip-Hop/Rap, Punk) + 106 ordinary.
+  - **After Phase 3** (strand-count slot filled by the 12 strands;
+    rank classifier still live): kindCounts unchanged in COUNT
+    (same shape — strand_count adds modest signal but doesn't shift
+    nodes across the rank-decile boundary on this library). Pop/Rock/60s
+    (the screenshot's panel) still classifies as Junction at 17 %
+    composite. The plan's expectation — strand_count fills toward
+    the ceiling so absolute thresholds re-engage — did NOT
+    materialise on this library (the slot is 10 % of the composite
+    and most strand members carry strand_count = 1; the contribution
+    is ~10 % × 1/max(count) which is small). **Decision: keep rank
+    classifier live, do NOT flip to absolute.** The Builder picks
+    absolute IFF it surfaces ≥ 4 transfer stations; with the strand
+    slot filled it still doesn't (the absolute cuts at 0.35 / 0.65
+    remain mathematically above the live composite distribution).
+    Pinned in code as a single boolean check on the rescored result.
+- **Tests** (+13 net new, **286/44 → 299/45 green**).
+  - `GenreMapStrandInferenceTests` (new suite, 9 tests): MST + heavy
+    path on a uniform path; mean-weight floor blocks weak chains;
+    min-length floor blocks 2-node chains; weighted shortest path
+    recovers the strongest bridge between cliques; Jaccard ≥ 0.6
+    culls; TF-IDF drops junk + chooses distinguishing tokens; stable
+    across runs; `strand_count` rewires transferness composite end-
+    to-end; barbell fixture produces both heavy paths and bridge
+    strands.
+  - `GenreMapRebuildTests` (+2): `rebuild populates song_genre with
+    one row per song-genre pair`; `evidence on demand uses the
+    materialised song_genre view`.
+  - `GenreMapMigrationTests` (+1, +1 updated): v8 adds the
+    materialised view with all three indexes; the existing v7
+    ordering test updated to include v8 as the new tail.
+  - `MigrationTests` (updated, ×2): the migration list pinned in
+    `migrator registers migrations in order` + `rerunning migrator is
+    idempotent` now ends with `v8.songGenreMaterialised`.
+- **Build gates.** `make check` clean. `swift test` **286/44 →
+  299/45** (+13 net new). `make build` clean (signed Apple
+  Development). `make install` deployed. `swiftformat --lint` clean
+  on every touched file. `swiftlint --strict` clean.
+- **Files added** (3).
+  - `DJRoomba/Music/GenreMap/GenreMapStrandInference.swift` —
+    pure pipeline (MST, heavy paths, branch promotion, bridge paths,
+    rank + cull, TF-IDF).
+  - `DJRoomba/Views/GenreMap/StrandSpline.swift` — Canvas Catmull-
+    Rom renderer for one strand.
+  - `Tests/DJRoombaTests/GenreMapStrandInferenceTests.swift` —
+    9 fixture-driven tests.
+- **Files changed** (10).
+  - `DJRoomba/Music/GenreMap/GenreMapModel.swift` — `+strands:
+    [GenreMapStrandInference.Strand]` on the model.
+  - `DJRoomba/Music/GenreMap/GenreMapBuilder.swift` — strand
+    inference pass + strand-count → transferness rescore + absolute
+    vs rank classifier decision.
+  - `DJRoomba/Music/GenreMap/GenreMapForceLayout.swift` — Phase-3
+    widening (`worldSide` 2000 → 2800, `idealEdgeLength` 320 → 440,
+    `edgeAttraction` 0.06 → 0.045, `compactionIterations` 40 → 16)
+    per the user's scrolling-is-fine directive.
+  - `DJRoomba/Persistence/Database/LibraryMigrator.swift` — new
+    `v8.songGenreMaterialised` migration with three indexes.
+  - `DJRoomba/Persistence/LibraryStore+GenreMap.swift` — populate
+    `song_genre` during `rebuildGenreMap`; rewrite
+    `genreMapEvidenceOnDemand` to read the indexed table (no more
+    `json_each` per-click).
+  - `DJRoomba/Views/GenreMap/StationLabel.swift` — strand-tick row
+    under the pill; transferStation glyph removed; junction glyph
+    preserved.
+  - `DJRoomba/Views/GenreMap/GenreMapPanel.swift` — strands layer +
+    strand chip ScrollView + hover affordance + hovered-strand
+    propagation through the spline renderer.
+  - `Tests/DJRoombaTests/GenreMapMigrationTests.swift` — v8 schema
+    + index pin; ordering test updated.
+  - `Tests/DJRoombaTests/GenreMapRebuildTests.swift` — populate +
+    indexed-read tests.
+  - `Tests/DJRoombaTests/MigrationTests.swift` — list pin updated.
+- **Phase-3 critique against the plan's success criteria** (lines
+  282–286 of `plans/genre-metro-map.md`).
+  - **"Lines feel like meaningful corridors, not arbitrary tree
+    branches"** — MET. The British alt-electronic strand, the
+    Alt/Indie spine, the 80s industrial corridor all read as genuine
+    library structure. The TF-IDF labels surface the right top-k
+    distinguishing tokens.
+  - **"Transfer stations visibly replace the cross-edge bursts"** —
+    MET BY CONSTRUCTION (Phase 1 already eliminated cross-edge
+    bursts in the metro view by virtue of being a different
+    rendering grammar). Transfer-station status is now signalled
+    purely by 2+ coloured ticks under the pill; the Phase-2 neutral
+    multi-strand glyph is gone.
+  - **"Cycling strand hover walks distinct regions of the map"** —
+    PARTIAL. The strand-chip hover + spline highlight is wired and
+    works (verified visually on the first chip); strand member sets
+    cover distinct regions of the cluster (verified by reading
+    member-genre tooltips). The dense fit-to-view collapses the
+    wider world layout into a tight blob, so the SPLINES THEMSELVES
+    are partially hidden behind the labels in the dense centre.
+    Splines visible cleanly above and to the sides of the cluster.
+    Carry-forward to Phase 4.
+- **Carry-forward to Phase 4** (the routing + bundling phase).
+  - **Routing genuinely needed** — Phase 3 splines may pass through
+    label rectangles in the dense centre; that's Phase 4's job. The
+    underlying strand identity + path is correct; only the
+    presentation needs the obstacle-aware routing.
+  - **Spline crossing minimisation** — currently splines cross
+    freely (Phase 3 explicitly forbids routing/bundling). Phase 4
+    introduces the routing graph + the A* + spline relaxation.
+  - **Fit-to-view default zoom** — Phase 4 should default to a
+    less-aggressive fit (the user explicitly said "scrolling is
+    fine"); the wider world is now properly produced by the
+    physics, the panel just auto-shrinks it back to fit. A simple
+    fix: cap the fit scale at e.g. 0.6× so the user starts already
+    "zoomed in" and the splines breathe.
+  - **Sheet ⇒ WindowGroup** — still Phase 5; do NOT entrench the
+    sheet further. The strand-chip ScrollView + strand-hover are
+    sheet-compatible; no entrenchment introduced.
+  - **`GenreMapPanel.body` extraction** — still `DESIGN-TODO.md`
+    Phase D; Phase 3 added a `strandsLayer` + `strandHoverRow` +
+    `strandChip(_:)` computed properties / methods, growing the
+    extraction surface. Land Phase D before Phase 5.
+- **GO/NO-GO for Phase 4: GO.** The substrate (strands + ticks +
+  evidence latency) is in place; the visual debt (splines through
+  labels in the dense centre, fit-to-view too aggressive) is
+  precisely what Phase 4 exists to address. The user's "scrolling
+  is fine" directive opens Phase 4 to a wider world without a
+  viewport-fit constraint.
+- **Guidance for Phase 4.**
+  - Inherit a wide world (`worldSide=2800`, `idealEdgeLength=440`);
+    don't fight it. The routing has space to breathe.
+  - The fit-to-view default needs softening (cap scale ≤ 0.6×) so
+    splines aren't routinely hidden under dense pill clusters.
+  - Branch strands inherit the parent's spline path in the current
+    model — re-evaluate at Phase 4 whether branches should route
+    *off* the parent's routed spline (more interpretable) or get
+    their own routing pass (more accurate but more crossings).
+  - The strand-count slot contributes only ~5 % of composite
+    transferness on this library (small numbers). Don't expect it to
+    re-engage absolute classification by itself; that's a Phase 6
+    / multi-resolution-community concern, not a Phase 4 one.
+- **PR #5 unchanged on disk; commit pushed.** Per CLAUDE.md the agent
+  must never merge to `main`.
+
+---
+
 ## 2026-05-20 — ✅ Genre Metro Map — Phase 2 gate — GO for Phase 3 (`feature/genre-metro-map`)
 
 Phase 2 gate per the brief at the top of the previous Phase 2 entry.

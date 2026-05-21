@@ -185,11 +185,64 @@ enum GenreMapBuilder {
     let transferEdges = layoutEdges.map {
       (a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
     }
-    let transfernessResult = GenreMapTransferness.score(
+    let initialTransferness = GenreMapTransferness.score(
       nodes: nodes.map { (genre: $0.genre, weight: $0.weight) },
       edges: transferEdges,
       communities: partition,
     )
+
+    // 3b) Strand inference (Phase 3). Runs against the layout graph +
+    // partition + initial transferness; produces algorithmic corridors
+    // (per-community heavy paths + cross-community bridge paths +
+    // TF-IDF labels). Strand membership feeds the next transferness
+    // pass via `strand_count(v)` — the 10 % composite slot that was
+    // zero in Phase 2.
+    let strandInputs = nodes.map { node in
+      GenreMapStrandInference.InputNode(
+        genre: node.genre,
+        weight: node.weight,
+        transferness: initialTransferness.compositeByNode[node.genre] ?? 0,
+        communityID: partition[node.genre] ?? 0,
+      )
+    }
+    let strandEdges = layoutEdges.map {
+      GenreMapStrandInference.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+    }
+    let strands = GenreMapStrandInference.infer(
+      nodes: strandInputs,
+      edges: strandEdges,
+    )
+
+    // 3c) Re-score transferness with `strand_count` populated. After
+    // this, decide whether to keep the rank classifier (Phase 2 ship)
+    // or flip back to the absolute `classify(composite:)` per the plan's
+    // Phase-3 guidance. The decision: prefer absolute IFF it produces
+    // ≥ 4 transfer stations (the live-library expectation). Otherwise
+    // keep the rank classifier as a robustness fallback.
+    let strandCountByNode = GenreMapStrandInference.strandCountByNode(strands: strands)
+    let rescored = GenreMapTransferness.score(
+      nodes: nodes.map { (genre: $0.genre, weight: $0.weight) },
+      edges: transferEdges,
+      communities: partition,
+      strandCountByNode: strandCountByNode,
+    )
+    // Absolute-classifier preference rule (Phase 3): use the absolute
+    // `classify(composite:)` if it surfaces ≥ 4 transfer stations on
+    // this distribution; else fall back to the rank classifier.
+    let absoluteKinds = Dictionary(uniqueKeysWithValues: rescored.compositeByNode.map {
+      ($0.key, GenreMapTransferness.classify(composite: $0.value))
+    })
+    let absoluteTransferCount = absoluteKinds.values.count(where: { $0 == .transferStation })
+    let transfernessResult: GenreMapTransferness.Result =
+      if absoluteTransferCount >= 4 {
+        GenreMapTransferness.Result(
+          compositeByNode: rescored.compositeByNode,
+          inputsByNode: rescored.inputsByNode,
+          kindByNode: absoluteKinds,
+        )
+      } else {
+        rescored
+      }
 
     // 4) Per-node label rectangle sizes (the headline correctness item:
     // repulsion is label-first, not radius-first). The label closure
@@ -306,6 +359,7 @@ enum GenreMapBuilder {
       layoutEdges: layoutEdges,
       communities: communities,
       worldBounds: bounds,
+      strands: strands,
     )
   }
 

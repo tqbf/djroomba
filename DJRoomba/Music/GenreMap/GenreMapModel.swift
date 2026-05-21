@@ -3,13 +3,19 @@ import Foundation
 // MARK: - GenreMapNodeKind
 
 /// Topological classification of a genre node (`plans/genre-metro-map.md`
-/// Phase 2). Derived from the composite transferness score on the layout
-/// graph; cached on the node so the renderer never re-classifies on its own.
+/// Phase 2 + Phase 3). Derived from the composite transferness score on
+/// the layout graph; cached on the node so the renderer never
+/// re-classifies on its own.
 ///
 /// - `ordinary`: a regular stop — the existing Phase-1 pill.
-/// - `junction`: a pill with a tick mark — modest topological breadth.
-/// - `transferStation`: larger pill with a multi-strand marker — a genuine
-///   bridge between neighbourhoods.
+/// - `junction`: a pill with a `diamond.fill` glyph inside it — modest
+///   topological breadth, AND not necessarily a strand member (the
+///   classification is layout-graph-derived, not strand-derived).
+/// - `transferStation`: a pill that serves 2+ metro strands. From
+///   Phase 3 the signal is communicated **purely via the per-strand
+///   coloured tick row under the pill** — the Phase-2 neutral multi-
+///   strand glyph is removed (it was a placeholder for the strand
+///   colours that didn't exist yet).
 ///
 /// Thresholds (composite transferness in `[0, 1]`): `<0.35` ordinary,
 /// `<0.65` junction, `≥0.65` transfer station. Pinned in
@@ -47,6 +53,15 @@ struct GenreMapModel: Equatable, Sendable {
   /// World-space bounding box of the laid-out nodes (label centres,
   /// pre-zoom). The panel uses it to fit-to-view on first appearance.
   var worldBounds: CGRect
+  /// Phase 3 (`plans/genre-metro-map.md`): algorithmic metro strands
+  /// extracted from the layout graph + community partition (heavy paths
+  /// inside communities + cross-community bridge strands). Empty before
+  /// Phase 3; in-memory only (Phase 6 persists). Each strand renders as
+  /// a faint Catmull-Rom spline over its `pathStations`; the renderer
+  /// draws coloured ticks on every station serving a strand and uses
+  /// `colourID` to keep the same hue stable across the strand's spline
+  /// + station ticks.
+  var strands = [GenreMapStrandInference.Strand]()
 }
 
 // MARK: - GenreMapNode

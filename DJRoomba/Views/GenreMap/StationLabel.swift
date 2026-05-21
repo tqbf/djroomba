@@ -42,12 +42,41 @@ struct StationLabel: View {
   /// fill on the pill, so the eye groups same-coloured pills together
   /// even at small font sizes.
   var hullColour: Color
+  /// **Phase 3 strand ticks** — one coloured dot per strand serving this
+  /// station, rendered below the pill. Ordinary stations on one strand
+  /// get one tick; junctions still show the leading diamond glyph in the
+  /// pill *and* a tick; transfer stations get 2+ ticks (one per
+  /// serving strand) coloured per-strand. **Replaces** the neutral
+  /// multi-strand marker Phase 2 shipped — strand colours now exist.
+  var strandTickColours = [Color]()
 
   /// The label is wrapped in a `Button` so accessibility + selection
   /// behaviour are native; the action is set by the parent.
   var onTap: () -> Void
 
   var body: some View {
+    VStack(spacing: 2) {
+      pill
+      if !strandTickColours.isEmpty {
+        HStack(spacing: 2) {
+          ForEach(Array(strandTickColours.enumerated()), id: \.offset) { _, colour in
+            Circle()
+              .fill(colour)
+              .frame(width: 5, height: 5)
+          }
+        }
+      }
+    }
+    .contentShape(Rectangle())
+    .onTapGesture(perform: onTap)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(accessibilityDescription)
+    .accessibilityAddTraits(.isButton)
+  }
+
+  // MARK: Private
+
+  private var pill: some View {
     HStack(spacing: 4) {
       if let glyph = leadingGlyph {
         Image(systemName: glyph)
@@ -74,20 +103,14 @@ struct StationLabel: View {
         )
     )
     .foregroundStyle(.primary)
-    // Tap-gesture on the pill body (instead of a Button) so the parent
-    // panel can attach a `.simultaneousGesture(DragGesture)` for node
-    // drag without a Button's internal gesture stack starving simple
-    // taps. `.contentShape(Capsule())` makes the entire pill rectangle
-    // a click target — pre-shape clips were letting clicks fall through
-    // the pill outside the capsule's bounds.
-    .contentShape(Capsule(style: .continuous))
-    .onTapGesture(perform: onTap)
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel(accessibilityDescription)
-    .accessibilityAddTraits(.isButton)
+    // Tap/drag posture lives on the outer VStack (which contains the
+    // pill + the optional Phase-3 strand ticks underneath) so the
+    // click target covers the whole composed station label, not just
+    // the capsule. The same `.contentShape(Rectangle())` +
+    // `.onTapGesture` posture on the outer VStack composes correctly
+    // with the parent's `.simultaneousGesture(DragGesture)` — taps
+    // route to `onTap`; non-trivial drags route to the parent.
   }
-
-  // MARK: Private
 
   private var fontSize: CGFloat {
     Self.minFontSize
@@ -110,10 +133,16 @@ struct StationLabel: View {
   }
 
   private var leadingGlyph: String? {
+    // Phase 3 (`plans/genre-metro-map.md` step 7): the neutral multi-
+    // strand marker Phase 2 used for transfer stations is **replaced**
+    // by per-strand coloured ticks (rendered as a row under the pill).
+    // Junctions keep their diamond glyph — they don't yet carry strand
+    // ticks (the strand-count signal that promotes a node to junction
+    // doesn't imply membership in a heavy path).
     switch node.nodeKind {
-    case .ordinary: nil
+    case .ordinary,
+         .transferStation: nil
     case .junction: "diamond.fill"
-    case .transferStation: "point.3.connected.trianglepath.dotted"
     }
   }
 

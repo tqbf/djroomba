@@ -33,15 +33,24 @@ enum GenreMapForceLayout {
 
   struct Configuration: Sendable {
     /// Outer area's nominal world-space side (pre-zoom). Drives the
-    /// initial spread + the macro anchor offsets.
-    var worldSide: CGFloat = 2000
+    /// initial spread + the macro anchor offsets. Phase 3 widening
+    /// (`plans/genre-metro-map.md` user directive 2026-05-20: "the
+    /// whole map does not need to usefully fit on the screen all at
+    /// once — scrolling is fine"): 2000 → 2800 so the dense centre
+    /// can spread instead of compaction-pushing labels apart after
+    /// the fact.
+    var worldSide: CGFloat = 2800
     /// Edge spring strength. Multiplied by `totalWeight` per edge.
-    var edgeAttraction = 0.06
+    /// Phase 3: 0.06 → 0.045 to take some of the inward pull off the
+    /// dense centre — preferring "more room" over post-settle
+    /// compaction polish (the user's scrolling-is-fine directive).
+    var edgeAttraction = 0.045
     /// Target edge length (pre-weight). Bigger ⇒ more spread. Tuned up
-    /// after the first live verification — the original 220 produced
-    /// readable communities but heavy label collisions at the cluster
-    /// centres on a real ~120-genre library.
-    var idealEdgeLength: Double = 320
+    /// after the first live verification (220 → 320), and again at
+    /// Phase 3 (320 → 440) per the user's scrolling-is-fine directive:
+    /// give labels more room in the first place so the compaction
+    /// polish becomes optional, not load-bearing.
+    var idealEdgeLength: Double = 440
     /// Strength of the soft community-centroid pull.
     var communityGravity = 0.008
     /// Strength of the macro-anchor pull (seeded from the coarse pass).
@@ -68,15 +77,16 @@ enum GenreMapForceLayout {
     var settleWindow = 8
     /// Seed for the deterministic initial scatter.
     var rngSeed: UInt64 = 0xD9_C1_57_2A_3C_22_77_77
-    /// Post-settle label-collision compaction pass (Phase 2 carry-forward
-    /// from the Phase-1 gate's "labels-don't-collide PARTIAL"). After
-    /// the main settle the layout has reached a community-gravity vs.
-    /// label-repulsion equilibrium that can still leave overlapping
-    /// labels in the dense centre. We run a short repulsion-only polish
-    /// pass with gravity disabled: labels can slide apart along the
-    /// existing geographic axes without the community/macro pulls
-    /// fighting them back together. Bounded, deterministic, runs once.
-    var compactionIterations = 40
+    /// Post-settle label-collision compaction pass. **Phase 3 reduces
+    /// 40 → 16** per the user's 2026-05-20 directive ("the whole map
+    /// does not need to usefully fit on the screen all at once —
+    /// scrolling is fine"). The Phase-2 polish was load-bearing because
+    /// the layout was tuned for a small viewport; Phase 3 widens the
+    /// substrate (`worldSide` 2000 → 2800, `idealEdgeLength` 320 → 440,
+    /// `edgeAttraction` 0.06 → 0.045) so labels rarely approach overlap
+    /// in the first place. The 16 polish steps remain as a final
+    /// resolver for the residual dense-centre pairs.
+    var compactionIterations = 16
   }
 
   struct InputNode: Sendable {
