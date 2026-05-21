@@ -44,12 +44,44 @@ struct GenreTreeMapPanel: View {
     VStack(spacing: 0) {
       header
       Divider()
-      content
-      Divider()
-      footer
+      HStack(spacing: 0) {
+        VStack(spacing: 0) {
+          content
+          Divider()
+          footer
+        }
+        if inspectorPresented {
+          Divider()
+          GenreTreeInspector(
+            selection: inspectorSelection,
+            model: controller.genreMapService.model ?? Self.emptyMapModel,
+            representativeEvidence: representativeEvidence,
+            isLoadingRepresentative: isLoadingRepresentative,
+            comparePaths: comparePaths,
+            compareEvidence: compareEvidence,
+            isLoadingCompare: isLoadingCompare,
+            twoHopNeighbours: twoHopNeighboursForSelection(),
+            onSelectNeighbour: selectByName,
+            onListen: selectedGenre.map { genre in { triggerListen(for: genre) } },
+            onSaveAsPlaylist: selectedGenre.map { genre in { triggerSaveAsPlaylist(for: genre) } },
+            isListenInFlight: isListenInFlight,
+            onExitCompare: endCompare,
+          )
+          .frame(width: 340)
+          .background(Color(nsColor: .windowBackgroundColor))
+          .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
+      }
     }
-    .frame(minWidth: 720, minHeight: 540)
-    .frame(idealWidth: 1140, idealHeight: 760)
+    .animation(.easeInOut(duration: 0.18), value: inspectorPresented)
+    // Phase D — bump minWidth to host both the canvas + the 340 pt
+    // inspector + the header's three pickers without the subtitle
+    // wrapping vertically. Phase C documented the < 1140 wrap as
+    // "acceptable but unsightly"; Phase D adds the Inspector toggle
+    // button to the header, which gets clipped at the smaller widths,
+    // forcing a hard minimum.
+    .frame(minWidth: 1140, minHeight: 540)
+    .frame(idealWidth: 1240, idealHeight: 760)
     .task {
       if controller.genreTreeService.renderModel == nil {
         await controller.genreTreeService.build()
@@ -87,6 +119,12 @@ struct GenreTreeMapPanel: View {
     var translation: CGSize
   }
 
+  /// Canonical-half edge key for compare-mode path bookkeeping.
+  private struct EdgeKey: Hashable {
+    var a: String
+    var b: String
+  }
+
   private struct ViewTransform {
     var fitted: FitTransform
     var scale: CGFloat
@@ -104,6 +142,16 @@ struct GenreTreeMapPanel: View {
     }
   }
 
+  /// Fallback empty `GenreMapModel` so the inspector can be hosted
+  /// even before the substrate finishes loading. Same posture as
+  /// `GenreMapPanel.emptyModel`.
+  private static let emptyMapModel = GenreMapModel(
+    nodes: [],
+    layoutEdges: [],
+    communities: [],
+    worldBounds: .zero,
+  )
+
   @Environment(MusicController.self) private var controller
   @Environment(\.dismiss) private var dismiss
 
@@ -116,6 +164,37 @@ struct GenreTreeMapPanel: View {
   /// Phase C — `nil` ⇒ trunk-tree mode, non-nil ⇒ radial-focus mode
   /// centred on this genre.
   @State private var selectedGenre: String?
+
+  /// Phase D — second-genre slot for compare mode. Set by a ⇧-click on
+  /// a pill while `selectedGenre` is non-nil; cleared by Exit Compare,
+  /// by an unmodified click, or by clearing the selection. Never equal
+  /// to `selectedGenre`.
+  @State private var compareGenre: String?
+
+  /// Phase D — Yen-k paths between `selectedGenre` and `compareGenre`,
+  /// recomputed when either changes. Empty in single-genre / trunk-tree
+  /// mode.
+  @State private var comparePaths = [GenreMapDiscovery.Path]()
+
+  /// Phase D — single-genre evidence (top artists / top albums) for
+  /// the inspector. Loaded asynchronously on each new `selectedGenre`.
+  @State private var representativeEvidence: GenreMapRepresentativeEvidence?
+  @State private var isLoadingRepresentative = false
+  @State private var representativeTask: Task<Void, Never>?
+
+  /// Phase D — compare-mode evidence rollup. Three lists; loaded
+  /// asynchronously when the second genre is picked.
+  @State private var compareEvidence: GenreMapCompareEvidence?
+  @State private var isLoadingCompare = false
+  @State private var compareTask: Task<Void, Never>?
+
+  /// Phase D — Listen / Save-as-Playlist in-flight flag. Disables
+  /// repeat clicks while the SQLite read + resolver hop runs.
+  @State private var isListenInFlight = false
+
+  /// Phase D — inspector visibility. AppStorage to match the metro
+  /// panel's posture so the user's preference persists across sessions.
+  @AppStorage("genreTreeInspectorPresented") private var inspectorPresented = true
 
   @GestureState private var gestureScale: CGFloat = 1.0
   @GestureState private var gestureOffset = CGSize.zero
@@ -142,6 +221,30 @@ struct GenreTreeMapPanel: View {
     controller.genreTreeService
   }
 
+  /// Resolve the inspector mode from the current selection state +
+  /// the substrate's loaded `GenreMapModel`. The substrate is
+  /// guaranteed loaded by the time `selectedGenre` is non-nil
+  /// (`GenreTreeService.build` loads it as a prerequisite), so the
+  /// lookup is expected to succeed; a defensive `.empty` covers the
+  /// rare interleaving where the substrate failed to load.
+  private var inspectorSelection: GenreTreeInspectorSelection {
+    guard let mapModel = controller.genreMapService.model else { return .empty }
+    if
+      let selectedGenre, let second = compareGenre,
+      let lhs = mapModel.nodes.first(where: { $0.genre == selectedGenre }),
+      let rhs = mapModel.nodes.first(where: { $0.genre == second })
+    {
+      return .compare(lhs, rhs)
+    }
+    if
+      let selectedGenre,
+      let node = mapModel.nodes.first(where: { $0.genre == selectedGenre })
+    {
+      return .single(node)
+    }
+    return .empty
+  }
+
   private var header: some View {
     HStack(spacing: 12) {
       Text("Genre Tree")
@@ -161,6 +264,8 @@ struct GenreTreeMapPanel: View {
         )
         .font(.subheadline)
         .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .fixedSize()
       } else if let error = service.lastError {
         Text(error)
           .font(.subheadline)
@@ -186,18 +291,25 @@ struct GenreTreeMapPanel: View {
 
       // Phase C — animation-duration A/B toggle. Picks the eventual
       // ship default after live verification on the real library.
-      // Surfaces as compact segmented "ms" tags so the header doesn't
-      // crowd; the labels read as durations rather than ordinals.
-      Picker("Animation duration", selection: Bindable(service).animationDurationSeconds) {
-        Text("200").tag(0.2)
-        Text("300").tag(0.3)
-        Text("400").tag(0.4)
-        Text("500").tag(0.5)
+      // Phase D collapses this from segmented (180 pt) to a Menu (~80 pt)
+      // because the header gained the Inspector toggle button and the
+      // metric picker (320 pt) — at the sheet's natural width all three
+      // pickers + the inspector button + Re-Analyze + Done would overflow
+      // the right edge, clipping the Inspector button and silently
+      // killing its ⌘⌥I shortcut delivery.
+      Menu {
+        Picker("Animation duration", selection: Bindable(service).animationDurationSeconds) {
+          Text("200 ms").tag(0.2)
+          Text("300 ms").tag(0.3)
+          Text("400 ms").tag(0.4)
+          Text("500 ms").tag(0.5)
+        }
+      } label: {
+        Label("\(Int(service.animationDurationSeconds * 1000)) ms", systemImage: "timer")
       }
-      .pickerStyle(.segmented)
-      .frame(maxWidth: 180)
-      .labelsHidden()
-      .help("Radial-focus animation duration in milliseconds")
+      .menuStyle(.borderlessButton)
+      .fixedSize()
+      .help("Radial-focus animation duration")
 
       Button("Re-Analyze", systemImage: "arrow.clockwise") {
         Task {
@@ -206,6 +318,15 @@ struct GenreTreeMapPanel: View {
       }
       .labelStyle(.titleAndIcon)
       .disabled(service.isBuilding)
+
+      Button {
+        inspectorPresented.toggle()
+      } label: {
+        Label("Inspector", systemImage: "sidebar.trailing")
+      }
+      .labelStyle(.iconOnly)
+      .help("Show or hide the inspector (⌘⌥I)")
+      .keyboardShortcut("i", modifiers: [.command, .option])
 
       Button("Done") { dismiss() }
         .keyboardShortcut(.defaultAction)
@@ -302,6 +423,62 @@ struct GenreTreeMapPanel: View {
     .background(.bar)
   }
 
+  /// Current `genre_edge_evidence` rows from the render model. Empty
+  /// when the build hasn't run yet.
+  private func currentEvidence() -> [GenreEdgeEvidence] {
+    service.renderModel?.evidence ?? []
+  }
+
+  /// Two-hop neighbours of `selectedGenre`. Reuses the radial-plan's
+  /// classification — every genre whose ring is `.twoHop` for the
+  /// current focus. Sorted alphabetically for stable inspector
+  /// rendering (the radial plan sorts geometrically; the inspector
+  /// list sorts by name).
+  private func twoHopNeighboursForSelection() -> [String] {
+    guard let selectedGenre, let renderModel = service.renderModel else { return [] }
+    guard
+      let plan = GenreTreeRadialPlan.plan(
+        selectedGenre: selectedGenre,
+        layout: renderModel.layout,
+        evidence: renderModel.evidence,
+      )
+    else { return [] }
+    let twoHop = plan.targetsByGenre.compactMap { name, target in
+      target.ring == .twoHop ? name : nil
+    }
+    return twoHop.sorted()
+  }
+
+  /// Genre set highlighted in compare mode — the two endpoints plus
+  /// every station on every Yen-k path. Used by the canvas to keep
+  /// these pills at full opacity while the rest dim.
+  private func compareHighlightGenres() -> Set<String> {
+    guard let selectedGenre, let compareGenre else { return [] }
+    var set: Set<String> = [selectedGenre, compareGenre]
+    for path in comparePaths {
+      for station in path.stations {
+        set.insert(station)
+      }
+    }
+    return set
+  }
+
+  /// Canonical-half edge keys for every consecutive pair along every
+  /// Yen-k path. The canvas uses this to raise compare-mode edge
+  /// opacity for path edges while the rest dim.
+  private func comparePathEdgeKeys() -> Set<EdgeKey> {
+    var keys = Set<EdgeKey>()
+    for path in comparePaths {
+      guard path.stations.count >= 2 else { continue }
+      for index in 0..<(path.stations.count - 1) {
+        let lhs = path.stations[index]
+        let rhs = path.stations[index + 1]
+        keys.insert(EdgeKey(a: min(lhs, rhs), b: max(lhs, rhs)))
+      }
+    }
+    return keys
+  }
+
   private func canvas(model: GenreTreeRenderModel, in size: CGSize) -> some View {
     let fitted = baseTransform(model: model, into: size)
     let viewTransform = ViewTransform(
@@ -323,6 +500,15 @@ struct GenreTreeMapPanel: View {
     // real library. The plan is `nil` in trunk-tree mode.
     let radialPlan = currentRadialPlan(model: model)
 
+    // Phase D — in compare mode the visual treatment overrides the
+    // radial-focus opacity scheme: only the two endpoints + the Yen-k
+    // path stations stay at full opacity; everything else dims to a
+    // single uniform background tier so the two-genre comparison is
+    // visually unambiguous. Computed once per frame.
+    let compareHighlights = compareGenre != nil ? compareHighlightGenres() : Set<String>()
+    let comparePathEdges = compareGenre != nil ? comparePathEdgeKeys() : Set<EdgeKey>()
+    let inCompareMode = compareGenre != nil
+
     return ZStack {
       // The empty-canvas tap layer. `contentShape(Rectangle())`
       // makes the clear background hit-testable so a click that lands
@@ -339,18 +525,23 @@ struct GenreTreeMapPanel: View {
         model: model,
         transform: viewTransform,
         radialPlan: radialPlan,
+        inCompareMode: inCompareMode,
       )
       branchEdgesLayer(
         model: model,
         colourByGenre: colourByGenre,
         transform: viewTransform,
         radialPlan: radialPlan,
+        comparePathEdges: comparePathEdges,
+        inCompareMode: inCompareMode,
       )
       pillsLayer(
         model: model,
         colourByGenre: colourByGenre,
         transform: viewTransform,
         radialPlan: radialPlan,
+        compareHighlights: compareHighlights,
+        inCompareMode: inCompareMode,
       )
     }
     .contentShape(Rectangle())
@@ -389,8 +580,19 @@ struct GenreTreeMapPanel: View {
     model: GenreTreeRenderModel,
     transform: ViewTransform,
     radialPlan: GenreTreeRadialPlan.Plan?,
+    inCompareMode: Bool,
   ) -> some View {
-    let multiplier: Double = radialPlan == nil ? 1.0 : 0.25
+    // Compare mode wins over radial-focus: back-edges dim to a single
+    // low tier so the path-edge layer reads cleanly above them. Outside
+    // compare mode the existing Phase-C scheme applies.
+    let multiplier =
+      if inCompareMode {
+        0.15
+      } else if radialPlan != nil {
+        0.25
+      } else {
+        1.0
+      }
     return BackEdgeLayer(
       segments: model.backEdges,
       project: transform.project,
@@ -403,6 +605,8 @@ struct GenreTreeMapPanel: View {
     colourByGenre: [String: Color],
     transform: ViewTransform,
     radialPlan: GenreTreeRadialPlan.Plan?,
+    comparePathEdges: Set<EdgeKey>,
+    inCompareMode: Bool,
   ) -> some View {
     // One sub-canvas per branch edge. ~115 edges on the real library —
     // a `Canvas` with a single big path would be marginally cheaper but
@@ -413,13 +617,24 @@ struct GenreTreeMapPanel: View {
     //
     // Phase C: in radial-focus mode every tree edge fades unless one
     // of its endpoints is the selected genre or a 1-hop neighbour.
+    // Phase D: compare mode wins — every tree edge fades unless it
+    // sits on a Yen-k path between the two compared genres.
     ForEach(branchPlacedNodes(model: model), id: \.genre.name) { placed in
       if let edge = placed.edge, let parent = placed.parentGenre {
-        let edgeOpacity = edgeOpacityFor(
-          a: parent,
-          b: placed.genre.name,
-          radialPlan: radialPlan,
-        )
+        let edgeOpacity: Double = {
+          if inCompareMode {
+            let key = EdgeKey(
+              a: min(parent, placed.genre.name),
+              b: max(parent, placed.genre.name),
+            )
+            return comparePathEdges.contains(key) ? 1.0 : 0.08
+          }
+          return edgeOpacityFor(
+            a: parent,
+            b: placed.genre.name,
+            radialPlan: radialPlan,
+          )
+        }()
         // World endpoints, projected through the radial plan if active
         // so the curve follows pills as they animate to their target
         // positions.
@@ -442,6 +657,10 @@ struct GenreTreeMapPanel: View {
       .easeInOut(duration: service.animationDurationSeconds),
       value: selectedGenre,
     )
+    .animation(
+      .easeInOut(duration: service.animationDurationSeconds),
+      value: compareGenre,
+    )
   }
 
   private func pillsLayer(
@@ -449,14 +668,22 @@ struct GenreTreeMapPanel: View {
     colourByGenre: [String: Color],
     transform: ViewTransform,
     radialPlan: GenreTreeRadialPlan.Plan?,
+    compareHighlights: Set<String>,
+    inCompareMode: Bool,
   ) -> some View {
     ForEach(model.layout.placedNodes, id: \.genre.name) { placed in
       let target = radialPlan?.targetsByGenre[placed.genre.name]
       let worldPosition = target?.position ?? placed.position
-      let opacity = target?.opacity ?? 1.0
+      // Compare mode overrides the radial opacity scheme: highlights
+      // stay at 1.0, everything else dims to a single low tier.
+      let opacity: Double = inCompareMode
+        ? (compareHighlights.contains(placed.genre.name) ? 1.0 : 0.12)
+        : (target?.opacity ?? 1.0)
       let projected = transform.project(worldPosition)
       let colour = colourByGenre[placed.genre.name] ?? .secondary
-      let isSelected = target?.ring == .selected
+      let isSelected = inCompareMode
+        ? compareHighlights.contains(placed.genre.name)
+        : (target?.ring == .selected)
       Group {
         if placed.depth == 0 {
           TrunkPill(
@@ -483,6 +710,10 @@ struct GenreTreeMapPanel: View {
     .animation(
       .easeInOut(duration: service.animationDurationSeconds),
       value: selectedGenre,
+    )
+    .animation(
+      .easeInOut(duration: service.animationDurationSeconds),
+      value: compareGenre,
     )
   }
 
@@ -584,23 +815,150 @@ struct GenreTreeMapPanel: View {
     model.layout.placedNodes.filter { $0.depth > 0 }
   }
 
-  /// Enter radial-focus mode on `genre`. Wrapped in a single
-  /// `withAnimation` block so SwiftUI interpolates every
-  /// `.position()` + `.opacity()` from current to target across the
-  /// duration. No per-frame work beyond the SwiftUI interpolation
-  /// itself — the radial plan's targets are computed once and held
-  /// in `currentRadialPlan` for the rest of the frame.
+  /// Enter radial-focus mode on `genre`, or enter compare mode if the
+  /// click landed with ⇧ held and a primary focus already exists.
+  /// Reads the actual click event's modifier flags rather than the
+  /// global `NSEvent.modifierFlags` (same pattern the metro panel
+  /// uses — by the time a SwiftUI closure runs the key may already
+  /// have been released, but the dispatched event still carries the
+  /// modifier state). Loads single-genre or compare evidence on each
+  /// new focus.
   private func select(_ genre: String) {
+    let eventShift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+    if eventShift, let first = selectedGenre, first != genre {
+      withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
+        compareGenre = genre
+      }
+      ensureInspectorVisible()
+      loadCompareEvidence(from: first, to: genre)
+      return
+    }
+    // Fresh single-genre focus — drop any pending compare + reset
+    // evidence state, kick off the representative load.
+    representativeTask?.cancel()
+    compareTask?.cancel()
     withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
       selectedGenre = genre
+      compareGenre = nil
+    }
+    comparePaths = []
+    compareEvidence = nil
+    isLoadingCompare = false
+    representativeEvidence = nil
+    isLoadingRepresentative = true
+    ensureInspectorVisible()
+    representativeTask = Task {
+      let loaded = await controller.genreMapService.representativeEvidence(for: genre)
+      if Task.isCancelled { return }
+      await MainActor.run {
+        representativeEvidence = loaded
+        isLoadingRepresentative = false
+      }
     }
   }
 
-  /// Leave radial-focus mode. Same animation in reverse.
+  /// Leave radial-focus mode (and compare mode, if active). Same
+  /// animation in reverse.
   private func clearSelection() {
-    guard selectedGenre != nil else { return }
+    guard selectedGenre != nil || compareGenre != nil else { return }
+    representativeTask?.cancel()
+    compareTask?.cancel()
     withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
       selectedGenre = nil
+      compareGenre = nil
+    }
+    comparePaths = []
+    compareEvidence = nil
+    isLoadingCompare = false
+    representativeEvidence = nil
+    isLoadingRepresentative = false
+  }
+
+  /// Exit compare mode but keep the primary focus.
+  private func endCompare() {
+    guard compareGenre != nil else { return }
+    compareTask?.cancel()
+    withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
+      compareGenre = nil
+    }
+    comparePaths = []
+    compareEvidence = nil
+    isLoadingCompare = false
+  }
+
+  /// Pop the inspector open if it's hidden — every fresh selection in
+  /// the metro panel does this, same posture here so the user's first
+  /// click after an explicit hide still surfaces the new evidence.
+  private func ensureInspectorVisible() {
+    if !inspectorPresented { inspectorPresented = true }
+  }
+
+  /// Click from inside the inspector's 1-hop list — re-focus the
+  /// canvas on the clicked neighbour. Same posture as the metro
+  /// panel's `selectByName`.
+  private func selectByName(_ genre: String) {
+    select(genre)
+  }
+
+  /// Phase D — Yen-k paths over the layout graph (`genre_edge_evidence`),
+  /// then a paginated SQL rollup of shared artists/albums/tracks. The
+  /// path search itself is pure + sub-millisecond; the SQL rollup is
+  /// the async hop.
+  private func loadCompareEvidence(from genreA: String, to genreB: String) {
+    let evidenceEdges = currentEvidence().map {
+      GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
+    }
+    comparePaths = GenreMapDiscovery.kShortestPaths(
+      from: genreA,
+      to: genreB,
+      edges: evidenceEdges,
+      k: 5,
+    )
+    compareEvidence = nil
+    isLoadingCompare = true
+    compareTask?.cancel()
+    compareTask = Task {
+      let loaded = await controller.genreMapService.compareEvidence(
+        between: genreA,
+        and: genreB,
+      )
+      if Task.isCancelled { return }
+      await MainActor.run {
+        compareEvidence = loaded
+        isLoadingCompare = false
+      }
+    }
+  }
+
+  /// Phase D — start a transient queue from the deterministic Top-N
+  /// pick for `genre`. Fire-and-forget; the in-flight flag disables
+  /// the button so a repeated click can't queue twice.
+  private func triggerListen(for genre: String) {
+    guard !isListenInFlight else { return }
+    isListenInFlight = true
+    Task {
+      await controller.listenToGenre(genre)
+      await MainActor.run {
+        isListenInFlight = false
+      }
+    }
+  }
+
+  /// Phase D — create the "Genre Tree: <name>" app playlist with the
+  /// same Top-N pick. Selects the new playlist in the sidebar so the
+  /// user lands on it after the sheet dismisses; closes the sheet so
+  /// the new playlist is visible.
+  private func triggerSaveAsPlaylist(for genre: String) {
+    guard !isListenInFlight else { return }
+    isListenInFlight = true
+    Task {
+      let newID = await controller.saveListenAsAppPlaylist(genre: genre)
+      await MainActor.run {
+        isListenInFlight = false
+        if newID != nil {
+          dismiss()
+        }
+      }
     }
   }
 

@@ -5,6 +5,245 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-21 — Son of Genre Map — Phase D: Inspector + compare + listen-to-this
+
+**Branch `feature/genre-tree-map`.** Phase D of
+`plans/son-of-genre-map.md` adds the right-docked 340 pt inspector,
+⇧-click compare mode, and the **Listen / Save as Playlist** affordances
+that close the inspiration loop. The Phase 5 metro evidence reads +
+`GenreMapDiscovery.kShortestPaths` are re-used verbatim; what's new
+is the tree-specific inspector (`GenreTreeInspector`), the pure
+listen-picker (`GenreTreeListenPicker`), and two controller helpers
+that turn a picked top-N into either a transient queue or a saved
+app playlist.
+
+### What landed
+
+One new pure-logic module + one new view + two controller hooks.
+
+- **`DJRoomba/Music/GenreTreeMap/GenreTreeListenPicker.swift`** — pure
+  Top-N picker. Sorts candidates by `playCount` descending, ties broken
+  by `lastPlayedAt` descending then by `title` ascending then by
+  `songID` ascending for deterministic order. Admits songs while
+  respecting an **artist-diversity cap** (case-insensitive on artist
+  name); `defaultTargetCount = 30`, `defaultMaxPerArtist = 3`.
+  `nonisolated`, no I/O.
+- **`DJRoomba/Views/GenreTreeMap/GenreTreeInspector.swift`** — Phase D
+  inspector view. Three modes (`.empty / .single(GenreMapNode) /
+  .compare(GenreMapNode, GenreMapNode)`). Re-uses the metro plan's
+  Phase 5 `EvidenceHeader` + `EvidenceRepresentative` + `EvidenceCompare`
+  subviews verbatim. **Intentionally does NOT re-use** `EvidenceStrands`
+  or `EvidenceConnectedNeighbourhoods` — Son of Genre Map retires the
+  strand grammar; the "1-hop + 2-hop" reading the radial focus trains
+  the user on replaces "connected neighbourhoods via intersecting
+  strands." Single-genre mode shows: header (name + community swatch +
+  ordinary/junction/transfer-station chip + transferness% + tracks /
+  albums / artists counts) → **Listen** + **Save as Playlist** buttons →
+  nearest-neighbours (click-to-navigate) → two-hop neighbourhood (also
+  click-to-navigate) → top artists / top albums (paginated reads via
+  `LibraryStore+GenreMap`). Compare mode shows: header with both
+  community swatches → Yen-k highest-weight paths → transfer stations
+  along the way → shared artists / albums / tracks.
+- **`MusicController.listenToGenre(_:)`** — fetches songs for the
+  genre via `songsWithStats(matchingGenre:)`, runs the picker, builds a
+  synthetic `PlaylistDetail` with id `"genretree:<name>"` + `isGenre =
+  true`, routes through the existing `resolveAndPlay` path. The
+  synthetic id keeps `recent_playlist` clean (same posture as the
+  Phase-3 genre-browsing path). Returns the picks for caller display.
+- **`MusicController.saveListenAsAppPlaylist(genre:)`** — runs the
+  same picker, creates a `Genre Tree: <name>` app playlist via
+  `appPlaylistService.create + addSongs`, selects it in the sidebar.
+  Returns the new playlist id (sheet dismisses on success).
+
+Panel additions (`GenreTreeMapPanel.swift`):
+
+- **Inspector dock** — right-docked 340 pt side column inside the
+  sheet, matching the metro panel's pattern verbatim. Toolbar button
+  with `sidebar.trailing` glyph + ⌘⌥I shortcut; visibility persists
+  via `@AppStorage("genreTreeInspectorPresented")` (defaults true).
+- **Shift-click compare** — `NSApp.currentEvent?.modifierFlags.contains
+  (.shift)` read inside the pill's tap closure, same pattern the metro
+  panel uses (SwiftUI's `.onTapGesture` doesn't expose modifier flags
+  on macOS 14; AppKit's event chain still does). ⇧-click on a non-
+  selected pill while a primary focus exists sets `compareGenre`,
+  runs `GenreMapDiscovery.kShortestPaths(..., k: 5)`, kicks off
+  `compareEvidence`. Inspector header `Done` button (re-used from
+  the Phase 5 subviews) exits compare and returns to single-genre
+  focus.
+- **Compare-mode visual treatment** — when `compareGenre != nil`,
+  the canvas's pill + edge opacity scheme overrides Phase C's radial
+  one: the two selected pills + every Yen-k path station stay at
+  full opacity (highlight set = `{selectedGenre, compareGenre} ∪ each
+  station on each path`); everything else dims to 0.12. Tree edges
+  whose canonical-half key is in the compare-path edge set stay at
+  full opacity; the rest dim to 0.08. Back-edges drop to 0.15. The
+  transition is animated via two `.animation(value:)` modifiers (one
+  for `selectedGenre`, one for `compareGenre`).
+- **Evidence loading orchestration** — three `@State` task handles
+  (`representativeTask`, `compareTask`, `isListenInFlight`) so a
+  rapid sequence of clicks doesn't leave a stale evidence load
+  fighting the current focus. Pattern lifted verbatim from
+  `GenreMapPanel`.
+- **Inspector visibility on every fresh selection** — `ensureInspector
+  Visible()` pops the inspector open if it was hidden, same posture
+  as the metro panel: the user's first click after an explicit hide
+  surfaces the new evidence rather than getting silently swallowed.
+
+Header layout fixes that fell out of the visual pass:
+
+- **Inspector toggle button was being clipped** at the sheet's natural
+  width because the Phase C animation-duration segmented picker (180
+  pt) + the trunk-metric segmented picker (320 pt) + Re-Analyze + Done
+  already crowded the header. Toggle button being clipped silently
+  killed ⌘⌥I delivery (SwiftUI doesn't deliver shortcuts attached to
+  un-rendered buttons). **Two fixes:** (1) collapsed the animation-
+  duration segmented picker into a compact `Menu` (timer glyph +
+  "300 ms" label, ~80 pt), and (2) bumped the sheet's `minWidth`
+  from 720 to 1140 and `idealWidth` from 1140 to 1240 so the canvas
+  + inspector + the four header buttons + three pickers all fit at
+  the natural opening width. Also added `.lineLimit(1).fixedSize()`
+  to the subtitle so it never vertical-wraps at the minimum width.
+
+### Tests
+
+New `Tests/DJRoombaTests/GenreTreeListenPickerTests.swift` — **11 new
+tests** in one new suite. Covers:
+
+- Empty candidate list returns empty pick.
+- Top-N sorts by play count descending.
+- Artist diversity cap (max-3) blocks a single artist from monopolising.
+- Picker respects the target-count cap.
+- Defaults match the plan (`N = 30`, `maxPerArtist = 3`).
+- Identical inputs produce identical pick order (determinism).
+- Ties on play count broken by lastPlayed descending then title ascending.
+- Songs with no `lastPlayedAt` sort after songs with one when play counts tie.
+- Zero or negative bounds produce an empty pick.
+- Artist diversity uses case-insensitive matching.
+- Picks return in admission order, preserving the heavy-and-diverse
+  front-load.
+
+### Live verification (real 84-genre / 180-back-edge library)
+
+Signed `build/DJRoomba.app` driven via computer-use:
+
+- **Single-genre inspector** (`/tmp/phase-d-1-inspector-single.png`):
+  Pop/Rock focused — header shows "Ordinary · Transferness 11% · 25
+  Tracks / 11 Albums / 11 Artists"; Listen + Save as Playlist buttons
+  rendered; Nearest neighbours: Soft Rock 0.079, Adult Contemporary
+  0.073, Disco 0.073, Music 0.067, Contemporary Celtic 0.041, Hard
+  Rock 0.022; Two-hop neighbourhood: 2 Tone, 80s, Alt/Goth/Industrial,
+  Alt/Indie, Alt/Laptop, Alt/Laptop/Bristol, Alt/Laptop/NYC,
+  Alt/MOR/AOR, Alt/Psych/Shoegaze, Alt/Punk, Alt/Punk/Pixies-Related,
+  Alt/Worldy. Radial-focus canvas rendering correct (Pop/Rock anchored
+  centre, 1-hop fanned around).
+- **Compare mode** (`/tmp/phase-d-2-compare-mode.png`): ⇧-click R&B/Soul
+  while Pop/Rock focused. Inspector switches to "Pop/Rock ↔ R&B/Soul"
+  with both community-colour swatches; Highest-weight paths: 1.
+  Pop/Rock → R&B/Soul Σ0.01, 2. Pop/Rock → Soft Rock → R&B/Soul Σ0.09,
+  3. Pop/Rock → Adult Contemporary → R&B/Soul Σ0.08, 4. Pop/Rock →
+  Disco → R&B/Soul Σ0.08, 5. Pop/Rock → Music → R&B/Soul Σ0.08;
+  Transfer stations: R&B/Soul; Shared evidence: Artists ABBA ×1,
+  Albums ABBA — ABBA Gold: Greatest Hits ×1, Tracks ABBA — Dancing
+  Queen ×1. Canvas treatment: Pop/Rock + R&B/Soul + Soft Rock + Adult
+  Contemporary + Disco + Music stay highlighted; Alternative, Rock,
+  Pop, Contemporary Celtic, Alt/BritPop, Hard Rock all dimmed to 12%.
+- **Listen-to-this** (`/tmp/phase-d-3-listen-playback.png`): clicked
+  Listen on Pop/Rock; now-playing bar reads "'12 I Won't Back Down"
+  by Tom Petty at 0:08 / 2:57. Playback confirmed via the transport.
+- **Save as Playlist** (`/tmp/phase-d-4-save-as-playlist.png`):
+  clicked Save as Playlist on Pop/Rock; sheet dismissed, new
+  "Genre Tree: Pop/Rock" (19 tracks) playlist appears under My
+  Playlists + selected. Track listing visible: Dancing Queen (ABBA,
+  4 plays), '12 I Won't Back Down (Tom Petty, 2 plays), This Is a Low
+  (Blur, 1), Running Up That Hill (Kate Bush, 1), '02 Breakdown (Tom
+  Petty), '03 Something's Always Wrong (Toad the Wet Sprocket), '09
+  Fall Down (Toad the Wet Sprocket), '13 Runnin' Down a Dream (Tom
+  Petty), (Don't Fear) the Reaper (Blue Öyster Cult), Carnival
+  (Natalie Merchant). **Artist-diversity cap visible in action**: Tom
+  Petty contributes exactly 3 tracks (positions 2, 5, 8) — the
+  `maxPerArtist = 3` cap holding on the heaviest contributor.
+
+### Decisions documented
+
+- **Default N = 30** + **maxPerArtist = 3**. Front-loads enough variety
+  for a curated-feeling listen without album-length commitment; three
+  per artist lets a heavy contributor's best three tracks lead without
+  monopolising the listen. The live verification on Pop/Rock confirms
+  the cap reads naturally — Tom Petty gets three, Toad the Wet
+  Sprocket gets two, no single artist dominates.
+- **Synthetic id `"genretree:<name>"` with `isGenre = true`** for the
+  transient queue. Re-uses the Phase-3 genre-browsing posture: the
+  synthetic id never lands in `recent_playlist`, but `song_stat`
+  recording still fires because the resolver path is unchanged. The
+  user gets a Listen-driven play count bump without polluting recents.
+- **`AppStorage("genreTreeInspectorPresented")` default true** so the
+  first-time user sees the inspector hint and the click-to-discover
+  affordance immediately. Toggle is preserved across sessions; user
+  hides via ⌘⌥I or the toolbar button. Independent of the metro's
+  `genreMapInspectorPresented` key (the two views can have different
+  preferences).
+- **Inspector content over animation timing for Phase D** — the
+  animation-duration Picker collapsed to a Menu is a Phase-C carry-
+  over decision the user defers; the Menu still surfaces the four
+  Phase-C options for live A/B but doesn't compete for header space
+  with the new Inspector + the compare button.
+- **`Done` in the inspector compare card** is the exit affordance; the
+  panel doesn't add a separate compare-mode footer button (the inspector
+  is where the compare evidence reads, so the exit affordance lives
+  there too — fewer affordances scattered around the chrome).
+- **Compare-mode pill opacity 1.0 / 0.12** + **edge opacity 1.0 /
+  0.08** + **back-edges 0.15**. The eye finds the path immediately;
+  everything else functions as visual noise to suppress. Phase B/C
+  visual hierarchy held under the live walkthrough.
+
+### UI issues observed (carry-forward)
+
+- **Sheet `minWidth = 720` (Phase B/C value) was no longer viable** with
+  Phase D's added Inspector toggle button + compare button + collapsing
+  the segmented animation picker into a Menu. The bumped 1140 minWidth
+  is now mandatory for the inspector dock to render correctly. Side
+  effect: the sheet opens proportionally larger; the standing user
+  directive "scrolling is fine; the map need not fit on one screen"
+  still applies to the canvas content, but the sheet chrome itself
+  expanded. Acceptable per macos-design: the inspector hosts genuinely
+  more content now.
+- **No path-edge rendering in compare mode for back-edges** — only the
+  MST/tree edges get the bright path highlight. A back-edge that
+  happens to lie on a Yen-k path won't visually highlight (it stays at
+  the uniform 0.15 back-edge dim). This is a minor regression vs. the
+  metro plan's compare visual; defensible because the Yen-k paths are
+  almost always tree edges (the MST keeps the heaviest composite-weight
+  edges) and the inspector lists the full path. Carry-forward as a
+  potential Phase-E polish.
+- **No "Listen" overlay button on the selected pill** — the plan
+  listed this as one of three placements; landed on inspector-header
+  only because it's the single visual home for "what is this pill" +
+  "what should I do next." A toolbar "Play this neighbourhood"
+  variant + a per-pill overlay are both deferred Phase-E follow-ups
+  if the inspector affordance proves under-discovered.
+
+### Acceptance
+
+- **`swift test`: 405 / 58 green** (was 394 / 57 ⇒ **+11 tests, +1
+  suite**).
+- `make check` clean (compiles debug).
+- `make build` clean (signed `build/DJRoomba.app` produced).
+- `swiftformat --lint` clean on all new + modified files.
+- `swiftlint --strict` clean on all new + modified files.
+
+### Files added / modified
+
+- **NEW** `DJRoomba/Music/GenreTreeMap/GenreTreeListenPicker.swift`
+- **NEW** `DJRoomba/Views/GenreTreeMap/GenreTreeInspector.swift`
+- **NEW** `Tests/DJRoombaTests/GenreTreeListenPickerTests.swift`
+- **MOD** `DJRoomba/Music/MusicController.swift` (+ `listenToGenre`,
+  + `saveListenAsAppPlaylist`)
+- **MOD** `DJRoomba/Views/GenreTreeMap/GenreTreeMapPanel.swift`
+  (inspector dock + compare state/visuals + listen wiring +
+  header re-layout)
+
+**GO for Phase E.**
+
 ## 2026-05-21 — Son of Genre Map — Phase C: Radial focus + animated transition
 
 **Branch `feature/genre-tree-map`.** Phase C of
