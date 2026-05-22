@@ -72,7 +72,12 @@ struct GenreTreeMapPanel: View {
             footer
           }
           if inspectorPresented {
-            Divider()
+            // Drag handle on the inspector's leading edge — narrow it to
+            // give the graph more width, widen it for the evidence lists.
+            GenreTreeInspectorResizeHandle(
+              width: $inspectorWidth,
+              range: Self.minInspectorWidth ... Self.maxInspectorWidth,
+            )
             GenreTreeInspector(
               selection: inspectorSelection,
               model: controller.genreMapService.model ?? Self.emptyMapModel,
@@ -88,7 +93,7 @@ struct GenreTreeMapPanel: View {
               isListenInFlight: isListenInFlight,
               onExitCompare: endCompare,
             )
-            .frame(width: 340)
+            .frame(width: CGFloat(inspectorWidth))
             .background(Color(nsColor: .windowBackgroundColor))
             .transition(.move(edge: .trailing).combined(with: .opacity))
           }
@@ -198,12 +203,20 @@ struct GenreTreeMapPanel: View {
   private static let minBodyHeight: Double = 240
   private static let maxBodyHeight: Double = 900
 
+  /// Inspector width bounds. Narrow gives the graph more room; wide
+  /// gives the evidence lists more room.
+  private static let minInspectorWidth: Double = 260
+  private static let maxInspectorWidth: Double = 460
+
   @Environment(MusicController.self) private var controller
 
   /// Pane body height — view-layer concern, scene-persisted so a
   /// resize survives relaunch (scene state must not live inside an
   /// `@Observable`).
   @SceneStorage("genreTreePanelHeight") private var panelHeight = 440.0
+
+  /// Inspector column width — scene-persisted like the body height.
+  @SceneStorage("genreTreeInspectorWidth") private var inspectorWidth = 320.0
 
   @State private var scale: CGFloat = 1.0
   @State private var offset = CGSize.zero
@@ -317,19 +330,20 @@ struct GenreTreeMapPanel: View {
       Text("Genre Tree")
         .font(.headline)
       if let model = service.renderModel {
-        Text(
-          "\(model.topology.trunks.count) trunks · \(model.layout.placedNodes.count) genres"
-        )
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
+        Text("\(model.layout.placedNodes.count) genres")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
       }
       Spacer()
-      Button("Re-Analyze", systemImage: "arrow.clockwise") {
+      Button {
         Task { await controller.analyzeGenreTree() }
+      } label: {
+        Label("Re-Analyze", systemImage: "arrow.clockwise")
       }
-      .labelStyle(.titleAndIcon)
-      .controlSize(.small)
+      .labelStyle(.iconOnly)
+      .buttonStyle(.borderless)
+      .help("Rebuild the genre tree from the current library")
       .disabled(service.isBuilding)
     }
     .padding(.horizontal, 16)
@@ -364,68 +378,28 @@ struct GenreTreeMapPanel: View {
           .font(.subheadline)
           .foregroundStyle(.secondary)
       } else if let model = service.renderModel {
-        let trunkCount = model.topology.trunks.count
-        let nodeCount = model.layout.placedNodes.count
-        let backEdgeCount = model.backEdges.count
-        Text(
-          "\(trunkCount) trunks · \(nodeCount) genres · \(backEdgeCount) back-edges"
-        )
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-        .fixedSize()
+        Text("\(model.layout.placedNodes.count) genres")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+          .fixedSize()
       } else if let error = service.lastError {
         Text(error)
           .font(.subheadline)
           .foregroundStyle(.red)
       }
       Spacer()
-      // The live A/B controls + inspector toggle only matter when the
-      // canvas is showing — collapsed, the bar stays slim (chevron +
-      // title + count + Re-Analyze), the native debug-area idiom.
-      if !collapsed {
-        // Trunk-selection metric — live A/B toggle per the plan's
-        // "user picks default after seeing all three" deferral. Picker
-        // not Menu because the three states are equally weighted; a
-        // segmented picker reads as "live A/B switch" not "preference".
-        // Narrowed to 240 pt for the docked pane (the detail column is
-        // narrower than the old sheet).
-        Picker("Trunk metric", selection: Bindable(service).metric) {
-          Text("Transferness")
-            .tag(TrunkSelectionMetric.highestTransferness)
-          Text("Weight")
-            .tag(TrunkSelectionMetric.highestWeight)
-          Text("Centrality")
-            .tag(TrunkSelectionMetric.highestCentrality)
-        }
-        .pickerStyle(.segmented)
-        .frame(maxWidth: 240)
-        .labelsHidden()
-        .help("Switch which member of each community gets the trunk slot")
-
-        // Phase C — animation-duration A/B toggle, a compact Menu so the
-        // header fits the narrower docked-pane width.
-        Menu {
-          Picker("Animation duration", selection: Bindable(service).animationDurationSeconds) {
-            Text("200 ms").tag(0.2)
-            Text("300 ms").tag(0.3)
-            Text("400 ms").tag(0.4)
-            Text("500 ms").tag(0.5)
-          }
-        } label: {
-          Label("\(Int(service.animationDurationSeconds * 1000)) ms", systemImage: "timer")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Radial-focus animation duration")
+      // Re-Analyze is a quiet, occasional action — icon-only so it
+      // doesn't shout (the auto-rebuild on import covers the common
+      // case; the dev-only metric A/B lives in the Debug menu).
+      Button {
+        Task { await controller.analyzeGenreTree() }
+      } label: {
+        Label("Re-Analyze", systemImage: "arrow.clockwise")
       }
-
-      Button("Re-Analyze", systemImage: "arrow.clockwise") {
-        Task {
-          await controller.analyzeGenreTree()
-        }
-      }
-      .labelStyle(.titleAndIcon)
+      .labelStyle(.iconOnly)
+      .buttonStyle(.borderless)
+      .help("Rebuild the genre tree from the current library")
       .disabled(service.isBuilding)
 
       if !collapsed {
@@ -435,6 +409,7 @@ struct GenreTreeMapPanel: View {
           Label("Inspector", systemImage: "sidebar.trailing")
         }
         .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
         .help("Show or hide the inspector (⌘⌥I)")
         .keyboardShortcut("i", modifiers: [.command, .option])
       }

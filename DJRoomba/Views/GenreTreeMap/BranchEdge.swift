@@ -75,15 +75,7 @@ struct BranchEdge: View {
     .allowsHitTesting(false)
   }
 
-  // MARK: Private
-
-  private var lineWidth: CGFloat {
-    switch childDepth {
-    case 1: 2.0
-    case 2: 1.5
-    default: 1.2
-    }
-  }
+  // MARK: Fileprivate
 
   /// L-shape from `start` to `end` with one rounded elbow. Travels
   /// the larger displacement axis first; the elbow sits at the
@@ -143,4 +135,15 @@ struct BranchEdge: View {
     path.addQuadCurve(to: departure, control: elbow)
     path.addLine(to: end)
   }
+
+  // MARK: Private
+
+  private var lineWidth: CGFloat {
+    switch childDepth {
+    case 1: 2.0
+    case 2: 1.5
+    default: 1.2
+    }
+  }
+
 }

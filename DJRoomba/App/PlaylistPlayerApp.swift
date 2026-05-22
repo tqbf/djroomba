@@ -215,6 +215,16 @@ struct PlaylistPlayerApp: App {
         Button("Re-Analyze Genre Tree") {
           Task { await controller.analyzeGenreTree() }
         }
+        // Trunk-selection metric A/B — a development comparison knob,
+        // not a user-facing control. Lived in the panel header as a
+        // segmented picker through Phase B; demoted here (2026-05-22)
+        // because it read as inscrutable jargon in the main UI. The
+        // shipping default is `.highestTransferness`.
+        Picker("Trunk Metric", selection: Bindable(controller.genreTreeService).metric) {
+          Text("Transferness").tag(TrunkSelectionMetric.highestTransferness)
+          Text("Weight").tag(TrunkSelectionMetric.highestWeight)
+          Text("Centrality").tag(TrunkSelectionMetric.highestCentrality)
+        }
       }
     }
 

@@ -30,9 +30,10 @@ enum GenreTreeInspectorSelection: Equatable {
 ///   (re-uses `GenreMapDiscovery.kShortestPaths`) + shared
 ///   artists/albums/tracks (re-uses `LibraryStore.genreMapShared*`).
 ///
-/// Reuses two of the metro plan's Phase 5 subviews verbatim
-/// (`EvidenceHeader`, `EvidenceRepresentative`); compare mode reuses
-/// `EvidenceCompare`. The metro `EvidenceStrands` /
+/// The single-genre header is a clean inline view (swatch + name +
+/// condensed counts); the representative artists/albums roll-up reuses
+/// the metro plan's `EvidenceRepresentative` subview verbatim, and
+/// compare mode reuses `EvidenceCompare`. The metro `EvidenceStrands` /
 /// `EvidenceConnectedNeighbourhoods` subviews are intentionally NOT
 /// reused — Son of Genre Map retires the strand grammar, replacing
 /// "connected neighbourhoods via intersecting strands" with the
@@ -81,8 +82,14 @@ struct GenreTreeInspector: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      inspectorTitleBar
-      Divider()
+      // The title bar repeats the genre name in single-genre mode (the
+      // big header below already carries it), so it only shows for the
+      // empty + compare modes — single mode lets the inline header be
+      // the title.
+      if showsTitleBar {
+        inspectorTitleBar
+        Divider()
+      }
       ScrollView {
         VStack(alignment: .leading, spacing: 18) {
           switch selection {
@@ -102,6 +109,13 @@ struct GenreTreeInspector: View {
   }
 
   // MARK: Private
+
+  private var showsTitleBar: Bool {
+    switch selection {
+    case .single: false
+    default: true
+    }
+  }
 
   private var title: String {
     switch selection {
@@ -183,12 +197,25 @@ struct GenreTreeInspector: View {
   @ViewBuilder
   private func singleSections(node: GenreMapNode) -> some View {
     let hullColour = GenreTreeMapPanel.communityColour(for: node.communityID)
-    EvidenceHeader(
-      node: node,
-      hullColour: hullColour,
-      onCompareToggle: nil,
-      compareSubtitle: nil,
-    )
+    // Clean inline header — colour swatch + name + a single condensed
+    // counts line. (Replaces the metro-era `EvidenceHeader`, which
+    // stacked the name, an "Ordinary / Junction / Transfer station ·
+    // Transferness N%" jargon line, and three boxed count tiles.)
+    VStack(alignment: .leading, spacing: 4) {
+      HStack(spacing: 8) {
+        Circle()
+          .fill(hullColour)
+          .frame(width: 10, height: 10)
+        Text(node.genre)
+          .font(.title2.weight(.bold))
+          .lineLimit(2)
+      }
+      Text(
+        "\(node.trackCount) tracks · \(node.albumCount) albums · \(node.artistCount) artists"
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
     listenActions
     Divider()
     oneHopSection(node: node, hullColour: hullColour)
@@ -208,13 +235,14 @@ struct GenreTreeInspector: View {
       GenreMapDiscovery.Edge(a: $0.genreA, b: $0.genreB, weight: $0.totalWeight)
     }
     let neighbours = GenreMapDiscovery.oneHopNeighbours(of: node.genre, edges: edges)
+    let maxWeight = neighbours.first?.weight ?? 0
     return VStack(alignment: .leading, spacing: 6) {
-      Text("Nearest neighbours")
+      Text("Most Similar")
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
         .textCase(.uppercase)
       if neighbours.isEmpty {
-        Text("No layout-graph edges incident to this node.")
+        Text("Nothing closely related to this genre yet.")
           .font(.caption)
           .foregroundStyle(.secondary)
       } else {
@@ -230,9 +258,10 @@ struct GenreTreeInspector: View {
                 .font(.caption)
                 .lineLimit(1)
               Spacer()
-              Text(String(format: "%.3f", row.weight))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+              // A relative-strength bar instead of the raw composite
+              // weight — the decimals (0.045 …) meant nothing at a
+              // glance. Normalised to the strongest neighbour shown.
+              strengthBar(value: row.weight, maxValue: maxWeight, colour: hullColour)
             }
             .contentShape(Rectangle())
           }
@@ -242,9 +271,27 @@ struct GenreTreeInspector: View {
     }
   }
 
+  /// Relative-strength capsule — a filled bar proportional to
+  /// `value / maxValue`, on a faint track. Conveys "how related" at a
+  /// glance without surfacing the opaque composite-weight number.
+  private func strengthBar(value: Double, maxValue: Double, colour: Color) -> some View {
+    let fraction = maxValue > 0 ? CGFloat(value / maxValue) : 0
+    let trackWidth: CGFloat = 44
+    return Capsule()
+      .fill(Color.primary.opacity(0.08))
+      .frame(width: trackWidth, height: 4)
+      .overlay(alignment: .leading) {
+        Capsule()
+          .fill(colour)
+          .frame(width: Swift.max(4, trackWidth * fraction), height: 4)
+      }
+      .accessibilityLabel("Relatedness")
+      .accessibilityValue("\(Int((fraction * 100).rounded())) percent of the strongest")
+  }
+
   private func twoHopSection(hullColour: Color) -> some View {
     VStack(alignment: .leading, spacing: 6) {
-      Text("Two-hop neighbourhood")
+      Text("Also Related")
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
         .textCase(.uppercase)
