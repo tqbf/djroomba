@@ -2,10 +2,13 @@ import SwiftUI
 
 // MARK: - GenreTreeMapPanel
 
-/// Phase B + C sheet content (`plans/son-of-genre-map.md`). The
-/// successor to `GenreMapPanel`. Renders the trunk-tree at default
-/// state: trunk pills along the diagonal, branches fanning radially,
-/// faint back-edges underneath. Phase C adds radial-focus mode:
+/// The genre-tree pane (`plans/son-of-genre-map.md`), docked below the
+/// track list in `DetailPaneView` (per user direction 2026-05-22 — it
+/// first shipped as a sheet, now lives inline). The successor to
+/// `GenreMapPanel`. Renders the trunk-tree at default state: trunk
+/// pills along the diagonal, branches fanning radially, faint
+/// back-edges underneath. Collapsible/resizable like the retired
+/// ForceGraph panel it replaced. Phase C adds radial-focus mode:
 /// clicking any pill animates the layout into a centred fan of 1-hop
 /// + 2-hop neighbours around the clicked genre; clicking empty
 /// canvas or pressing Escape animates back to the trunk-tree.
@@ -41,47 +44,61 @@ struct GenreTreeMapPanel: View {
   // MARK: Internal
 
   var body: some View {
+    // Bottom-docked pane below the track list (`DetailPaneView`). The
+    // top divider + resize handle + always-visible header bar are the
+    // native "debug area" idiom; collapsed, only the bar remains so the
+    // pane is always re-discoverable. Replaces the sheet the tree first
+    // shipped in (per user direction 2026-05-22 — "it needs to live in
+    // a pane below the track list, not a separate window").
     VStack(spacing: 0) {
-      header
       Divider()
-      HStack(spacing: 0) {
-        VStack(spacing: 0) {
-          content
-          Divider()
-          footer
+      if collapsed {
+        // Slim, fixed-height bar — the only thing left when collapsed,
+        // so the pane is always re-discoverable. Explicit height so the
+        // greedy track list above can't compress it to nothing.
+        collapsedBar
+          .frame(height: 36)
+      } else {
+        GenreTreePaneResizeHandle(
+          height: $panelHeight,
+          range: Self.minBodyHeight ... Self.maxBodyHeight,
+        )
+        header
+        Divider()
+        HStack(spacing: 0) {
+          VStack(spacing: 0) {
+            content
+            Divider()
+            footer
+          }
+          if inspectorPresented {
+            Divider()
+            GenreTreeInspector(
+              selection: inspectorSelection,
+              model: controller.genreMapService.model ?? Self.emptyMapModel,
+              representativeEvidence: representativeEvidence,
+              isLoadingRepresentative: isLoadingRepresentative,
+              comparePaths: comparePaths,
+              compareEvidence: compareEvidence,
+              isLoadingCompare: isLoadingCompare,
+              twoHopNeighbours: twoHopNeighboursForSelection(),
+              onSelectNeighbour: selectByName,
+              onListen: selectedGenre.map { genre in { triggerListen(for: genre) } },
+              onSaveAsPlaylist: selectedGenre.map { genre in { triggerSaveAsPlaylist(for: genre) } },
+              isListenInFlight: isListenInFlight,
+              onExitCompare: endCompare,
+            )
+            .frame(width: 340)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+          }
         }
-        if inspectorPresented {
-          Divider()
-          GenreTreeInspector(
-            selection: inspectorSelection,
-            model: controller.genreMapService.model ?? Self.emptyMapModel,
-            representativeEvidence: representativeEvidence,
-            isLoadingRepresentative: isLoadingRepresentative,
-            comparePaths: comparePaths,
-            compareEvidence: compareEvidence,
-            isLoadingCompare: isLoadingCompare,
-            twoHopNeighbours: twoHopNeighboursForSelection(),
-            onSelectNeighbour: selectByName,
-            onListen: selectedGenre.map { genre in { triggerListen(for: genre) } },
-            onSaveAsPlaylist: selectedGenre.map { genre in { triggerSaveAsPlaylist(for: genre) } },
-            isListenInFlight: isListenInFlight,
-            onExitCompare: endCompare,
-          )
-          .frame(width: 340)
-          .background(Color(nsColor: .windowBackgroundColor))
-          .transition(.move(edge: .trailing).combined(with: .opacity))
-        }
+        .frame(height: CGFloat(panelHeight))
       }
     }
+    .background(.background)
+    .animation(.easeOut(duration: 0.22), value: collapsed)
     .animation(.easeInOut(duration: 0.18), value: inspectorPresented)
-    // Phase D — bump minWidth to host both the canvas + the 340 pt
-    // inspector + the header's three pickers without the subtitle
-    // wrapping vertically. Phase C documented the < 1140 wrap as
-    // "acceptable but unsightly"; Phase D adds the Inspector toggle
-    // button to the header, which gets clipped at the smaller widths,
-    // forcing a hard minimum.
-    .frame(minWidth: 1140, minHeight: 540)
-    .frame(idealWidth: 1240, idealHeight: 760)
     .task {
       if controller.genreTreeService.renderModel == nil {
         await controller.genreTreeService.build()
@@ -89,61 +106,6 @@ struct GenreTreeMapPanel: View {
     }
     .onChange(of: selectedGenre) { _, newValue in
       applyFocusViewport(for: newValue)
-    }
-  }
-
-  /// On focus: animate pan + zoom so the radial-focus cluster (the
-  /// selected genre at centre, the 1-hop ring around it) fills the
-  /// viewport with comfortable padding. Without this the focus
-  /// cluster lands at the selected pill's *original* world position,
-  /// which is usually off-screen at default zoom; the labels then
-  /// stack visually because the canvas isn't recentred.
-  ///
-  /// On clear: restore the user's pre-focus pan/zoom (so the trunk-
-  /// tree view returns to where they were exploring), or to identity
-  /// if no prior state was captured.
-  private func applyFocusViewport(for newSelection: String?) {
-    guard
-      viewportSize.width > 0,
-      viewportSize.height > 0,
-      let model = service.renderModel
-    else { return }
-
-    if
-      let genre = newSelection,
-      let placed = model.layout.placedNodes.first(where: { $0.genre.name == genre })
-    {
-      if preFocusViewState == nil {
-        preFocusViewState = SavedViewState(scale: scale, offset: offset)
-      }
-      let fitted = baseTransform(model: model, into: viewportSize)
-      let fittedCentre = CGPoint(
-        x: fitted.scale * placed.position.x + fitted.translation.width,
-        y: fitted.scale * placed.position.y + fitted.translation.height,
-      )
-      // Target: fit the outer ring + a half-pill margin inside the
-      // shorter viewport axis. `r2` is the outer-ring radius in world
-      // coords; the fit scale converts it to a screen radius.
-      let r2: CGFloat = 820
-      let padding: CGFloat = 90
-      let availableHalf = min(viewportSize.width, viewportSize.height) / 2 - padding
-      let targetRingScreen = max(180, availableHalf)
-      let rawScale = targetRingScreen / max(1, fitted.scale * r2)
-      let targetScale = clamp(rawScale, min: 0.1, max: 6.0)
-      withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
-        scale = targetScale
-        offset = CGSize(
-          width: viewportSize.width / 2 - targetScale * fittedCentre.x,
-          height: viewportSize.height / 2 - targetScale * fittedCentre.y,
-        )
-      }
-    } else {
-      let restore = preFocusViewState
-      preFocusViewState = nil
-      withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
-        scale = restore?.scale ?? 1.0
-        offset = restore?.offset ?? .zero
-      }
     }
   }
 
@@ -171,21 +133,6 @@ struct GenreTreeMapPanel: View {
   }
 
   // MARK: Private
-
-  /// Canvas background — warm high-value low-saturation cream in
-  /// light mode; deep low-saturation blue in dark mode. Chosen to
-  /// give the strand / branch colour palette good legibility without
-  /// the canvas reading as "system grey." NSColor-backed so the
-  /// switch happens at the AppKit layer the moment the appearance
-  /// changes (no SwiftUI `colorScheme` plumbing required).
-  private static let canvasBackground = Color(
-    nsColor: NSColor(name: "GenreTreeCanvasBackground") { appearance in
-      let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-      return isDark
-        ? NSColor(red: 0.078, green: 0.094, blue: 0.122, alpha: 1)
-        : NSColor(red: 0.985, green: 0.972, blue: 0.928, alpha: 1)
-    }
-  )
 
   private struct FitTransform {
     var scale: CGFloat
@@ -215,6 +162,26 @@ struct GenreTreeMapPanel: View {
     }
   }
 
+  private struct SavedViewState: Equatable {
+    var scale: CGFloat
+    var offset: CGSize
+  }
+
+  /// Canvas background — warm high-value low-saturation cream in
+  /// light mode; deep low-saturation blue in dark mode. Chosen to
+  /// give the strand / branch colour palette good legibility without
+  /// the canvas reading as "system grey." NSColor-backed so the
+  /// switch happens at the AppKit layer the moment the appearance
+  /// changes (no SwiftUI `colorScheme` plumbing required).
+  private static let canvasBackground = Color(
+    nsColor: NSColor(name: "GenreTreeCanvasBackground") { appearance in
+      let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      return isDark
+        ? NSColor(red: 0.078, green: 0.094, blue: 0.122, alpha: 1)
+        : NSColor(red: 0.985, green: 0.972, blue: 0.928, alpha: 1)
+    }
+  )
+
   /// Fallback empty `GenreMapModel` so the inspector can be hosted
   /// even before the substrate finishes loading. Same posture as
   /// `GenreMapPanel.emptyModel`.
@@ -225,8 +192,18 @@ struct GenreTreeMapPanel: View {
     worldBounds: .zero,
   )
 
+  /// The docked body's resizable bounds. The min keeps the tree
+  /// readable; the max stops the pane from swallowing the track list
+  /// above it on a tall window (the user can still collapse it).
+  private static let minBodyHeight: Double = 240
+  private static let maxBodyHeight: Double = 900
+
   @Environment(MusicController.self) private var controller
-  @Environment(\.dismiss) private var dismiss
+
+  /// Pane body height — view-layer concern, scene-persisted so a
+  /// resize survives relaunch (scene state must not live inside an
+  /// `@Observable`).
+  @SceneStorage("genreTreePanelHeight") private var panelHeight = 440.0
 
   @State private var scale: CGFloat = 1.0
   @State private var offset = CGSize.zero
@@ -265,23 +242,18 @@ struct GenreTreeMapPanel: View {
   /// repeat clicks while the SQLite read + resolver hop runs.
   @State private var isListenInFlight = false
 
-  /// Phase D — inspector visibility. AppStorage to match the metro
-  /// panel's posture so the user's preference persists across sessions.
-  @AppStorage("genreTreeInspectorPresented") private var inspectorPresented = true
-
-  @GestureState private var gestureScale: CGFloat = 1.0
-  @GestureState private var gestureOffset = CGSize.zero
-
   /// Saved viewport state at the moment the user clicked into a
   /// focus. `clearSelection()` restores from this so the user lands
   /// back on the trunk-tree view they were exploring, not on the
   /// canvas-centre identity zoom.
   @State private var preFocusViewState: SavedViewState?
 
-  private struct SavedViewState: Equatable {
-    var scale: CGFloat
-    var offset: CGSize
-  }
+  /// Phase D — inspector visibility. AppStorage to match the metro
+  /// panel's posture so the user's preference persists across sessions.
+  @AppStorage("genreTreeInspectorPresented") private var inspectorPresented = true
+
+  @GestureState private var gestureScale: CGFloat = 1.0
+  @GestureState private var gestureOffset = CGSize.zero
 
   /// Visible "Clear Focus" affordance — appears in the footer in
   /// radial-focus mode and disappears in trunk-tree mode. Carries
@@ -303,6 +275,13 @@ struct GenreTreeMapPanel: View {
 
   private var service: GenreTreeService {
     controller.genreTreeService
+  }
+
+  /// Collapse state lives on the controller so the toolbar button,
+  /// the menu command, and this pane's header chevron all drive one
+  /// shared value.
+  private var collapsed: Bool {
+    controller.genreTreePaneCollapsed
   }
 
   /// Resolve the inspector mode from the current selection state +
@@ -329,8 +308,53 @@ struct GenreTreeMapPanel: View {
     return .empty
   }
 
+  /// The slim bar shown when the pane is collapsed: chevron + title +
+  /// count + Re-Analyze. Mirrors the docked debug-area idiom; clicking
+  /// the chevron re-expands.
+  private var collapsedBar: some View {
+    HStack(spacing: 12) {
+      collapseChevron
+      Text("Genre Tree")
+        .font(.headline)
+      if let model = service.renderModel {
+        Text(
+          "\(model.topology.trunks.count) trunks · \(model.layout.placedNodes.count) genres"
+        )
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+      }
+      Spacer()
+      Button("Re-Analyze", systemImage: "arrow.clockwise") {
+        Task { await controller.analyzeGenreTree() }
+      }
+      .labelStyle(.titleAndIcon)
+      .controlSize(.small)
+      .disabled(service.isBuilding)
+    }
+    .padding(.horizontal, 16)
+    .contentShape(Rectangle())
+  }
+
+  /// Shared collapse/expand chevron button.
+  private var collapseChevron: some View {
+    Button {
+      controller.genreTreePaneCollapsed.toggle()
+    } label: {
+      Image(systemName: collapsed ? "chevron.up" : "chevron.down")
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .frame(width: 16, height: 16)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .help(collapsed ? "Show the genre tree" : "Hide the genre tree")
+  }
+
   private var header: some View {
     HStack(spacing: 12) {
+      collapseChevron
+
       Text("Genre Tree")
         .font(.headline)
       if service.isBuilding {
@@ -356,44 +380,45 @@ struct GenreTreeMapPanel: View {
           .foregroundStyle(.red)
       }
       Spacer()
-      // Trunk-selection metric — live A/B toggle per the plan's
-      // "user picks default after seeing all three" deferral. Picker
-      // not Menu because the three states are equally weighted; a
-      // segmented picker reads as "live A/B switch" not "preference".
-      Picker("Trunk metric", selection: Bindable(service).metric) {
-        Text("Transferness")
-          .tag(TrunkSelectionMetric.highestTransferness)
-        Text("Weight")
-          .tag(TrunkSelectionMetric.highestWeight)
-        Text("Centrality")
-          .tag(TrunkSelectionMetric.highestCentrality)
-      }
-      .pickerStyle(.segmented)
-      .frame(maxWidth: 320)
-      .labelsHidden()
-      .help("Switch which member of each community gets the trunk slot")
-
-      // Phase C — animation-duration A/B toggle. Picks the eventual
-      // ship default after live verification on the real library.
-      // Phase D collapses this from segmented (180 pt) to a Menu (~80 pt)
-      // because the header gained the Inspector toggle button and the
-      // metric picker (320 pt) — at the sheet's natural width all three
-      // pickers + the inspector button + Re-Analyze + Done would overflow
-      // the right edge, clipping the Inspector button and silently
-      // killing its ⌘⌥I shortcut delivery.
-      Menu {
-        Picker("Animation duration", selection: Bindable(service).animationDurationSeconds) {
-          Text("200 ms").tag(0.2)
-          Text("300 ms").tag(0.3)
-          Text("400 ms").tag(0.4)
-          Text("500 ms").tag(0.5)
+      // The live A/B controls + inspector toggle only matter when the
+      // canvas is showing — collapsed, the bar stays slim (chevron +
+      // title + count + Re-Analyze), the native debug-area idiom.
+      if !collapsed {
+        // Trunk-selection metric — live A/B toggle per the plan's
+        // "user picks default after seeing all three" deferral. Picker
+        // not Menu because the three states are equally weighted; a
+        // segmented picker reads as "live A/B switch" not "preference".
+        // Narrowed to 240 pt for the docked pane (the detail column is
+        // narrower than the old sheet).
+        Picker("Trunk metric", selection: Bindable(service).metric) {
+          Text("Transferness")
+            .tag(TrunkSelectionMetric.highestTransferness)
+          Text("Weight")
+            .tag(TrunkSelectionMetric.highestWeight)
+          Text("Centrality")
+            .tag(TrunkSelectionMetric.highestCentrality)
         }
-      } label: {
-        Label("\(Int(service.animationDurationSeconds * 1000)) ms", systemImage: "timer")
+        .pickerStyle(.segmented)
+        .frame(maxWidth: 240)
+        .labelsHidden()
+        .help("Switch which member of each community gets the trunk slot")
+
+        // Phase C — animation-duration A/B toggle, a compact Menu so the
+        // header fits the narrower docked-pane width.
+        Menu {
+          Picker("Animation duration", selection: Bindable(service).animationDurationSeconds) {
+            Text("200 ms").tag(0.2)
+            Text("300 ms").tag(0.3)
+            Text("400 ms").tag(0.4)
+            Text("500 ms").tag(0.5)
+          }
+        } label: {
+          Label("\(Int(service.animationDurationSeconds * 1000)) ms", systemImage: "timer")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Radial-focus animation duration")
       }
-      .menuStyle(.borderlessButton)
-      .fixedSize()
-      .help("Radial-focus animation duration")
 
       Button("Re-Analyze", systemImage: "arrow.clockwise") {
         Task {
@@ -403,20 +428,19 @@ struct GenreTreeMapPanel: View {
       .labelStyle(.titleAndIcon)
       .disabled(service.isBuilding)
 
-      Button {
-        inspectorPresented.toggle()
-      } label: {
-        Label("Inspector", systemImage: "sidebar.trailing")
+      if !collapsed {
+        Button {
+          inspectorPresented.toggle()
+        } label: {
+          Label("Inspector", systemImage: "sidebar.trailing")
+        }
+        .labelStyle(.iconOnly)
+        .help("Show or hide the inspector (⌘⌥I)")
+        .keyboardShortcut("i", modifiers: [.command, .option])
       }
-      .labelStyle(.iconOnly)
-      .help("Show or hide the inspector (⌘⌥I)")
-      .keyboardShortcut("i", modifiers: [.command, .option])
-
-      Button("Done") { dismiss() }
-        .keyboardShortcut(.defaultAction)
     }
     .padding(.horizontal, 16)
-    .padding(.vertical, 10)
+    .padding(.vertical, 8)
   }
 
   @ViewBuilder
@@ -505,6 +529,61 @@ struct GenreTreeMapPanel: View {
     .padding(.horizontal, 16)
     .padding(.vertical, 6)
     .background(.bar)
+  }
+
+  /// On focus: animate pan + zoom so the radial-focus cluster (the
+  /// selected genre at centre, the 1-hop ring around it) fills the
+  /// viewport with comfortable padding. Without this the focus
+  /// cluster lands at the selected pill's *original* world position,
+  /// which is usually off-screen at default zoom; the labels then
+  /// stack visually because the canvas isn't recentred.
+  ///
+  /// On clear: restore the user's pre-focus pan/zoom (so the trunk-
+  /// tree view returns to where they were exploring), or to identity
+  /// if no prior state was captured.
+  private func applyFocusViewport(for newSelection: String?) {
+    guard
+      viewportSize.width > 0,
+      viewportSize.height > 0,
+      let model = service.renderModel
+    else { return }
+
+    if
+      let genre = newSelection,
+      let placed = model.layout.placedNodes.first(where: { $0.genre.name == genre })
+    {
+      if preFocusViewState == nil {
+        preFocusViewState = SavedViewState(scale: scale, offset: offset)
+      }
+      let fitted = baseTransform(model: model, into: viewportSize)
+      let fittedCentre = CGPoint(
+        x: fitted.scale * placed.position.x + fitted.translation.width,
+        y: fitted.scale * placed.position.y + fitted.translation.height,
+      )
+      // Target: fit the outer ring + a half-pill margin inside the
+      // shorter viewport axis. `r2` is the outer-ring radius in world
+      // coords; the fit scale converts it to a screen radius.
+      let r2: CGFloat = 820
+      let padding: CGFloat = 90
+      let availableHalf = min(viewportSize.width, viewportSize.height) / 2 - padding
+      let targetRingScreen = max(180, availableHalf)
+      let rawScale = targetRingScreen / max(1, fitted.scale * r2)
+      let targetScale = clamp(rawScale, min: 0.1, max: 6.0)
+      withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
+        scale = targetScale
+        offset = CGSize(
+          width: viewportSize.width / 2 - targetScale * fittedCentre.x,
+          height: viewportSize.height / 2 - targetScale * fittedCentre.y,
+        )
+      }
+    } else {
+      let restore = preFocusViewState
+      preFocusViewState = nil
+      withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
+        scale = restore?.scale ?? 1.0
+        offset = restore?.offset ?? .zero
+      }
+    }
   }
 
   /// Current `genre_edge_evidence` rows from the render model. Empty
@@ -1029,9 +1108,10 @@ struct GenreTreeMapPanel: View {
   }
 
   /// Phase D — create the "Genre Tree: <name>" app playlist with the
-  /// same Top-N pick. Selects the new playlist in the sidebar so the
-  /// user lands on it after the sheet dismisses; closes the sheet so
-  /// the new playlist is visible.
+  /// same Top-N pick. `saveListenAsAppPlaylist` selects the new
+  /// playlist in the sidebar; collapsing the docked pane then hands the
+  /// full detail height to the new playlist's track list so the user
+  /// lands on what they just saved.
   private func triggerSaveAsPlaylist(for genre: String) {
     guard !isListenInFlight else { return }
     isListenInFlight = true
@@ -1040,7 +1120,7 @@ struct GenreTreeMapPanel: View {
       await MainActor.run {
         isListenInFlight = false
         if newID != nil {
-          dismiss()
+          controller.genreTreePaneCollapsed = true
         }
       }
     }

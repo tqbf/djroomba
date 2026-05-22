@@ -213,17 +213,18 @@ struct MainShellView: View {
         .help("Refresh playlists (⌘R)")
         .disabled(controller.isLibraryBusy)
       }
-      // Genre Tree — the default genre visualization (replaces the
-      // older docked `GenreGraphPanel` ForceGraph). Opens the same
-      // sheet as the ⌥⇧⌘A menu shortcut so the toolbar and the menu
-      // are interchangeable entry points.
+      // Genre Tree — the default genre visualization, docked below the
+      // track list in the detail pane (replaces the older
+      // `GenreGraphPanel` ForceGraph). The button toggles the pane's
+      // collapse, mirroring the pane's own header chevron; both drive
+      // `controller.genreTreePaneCollapsed`.
       ToolbarItem(placement: .automatic) {
         Button {
-          controller.genreTreeSheetPresented = true
+          controller.genreTreePaneCollapsed.toggle()
         } label: {
           Label("Genre Tree", systemImage: "arrow.triangle.branch")
         }
-        .help("Show the genre tree (⌥⇧⌘A)")
+        .help(controller.genreTreePaneCollapsed ? "Show the genre tree" : "Hide the genre tree")
       }
       // Standard macOS inspector toggle placement (trailing edge of the
       // toolbar, the side the panel slides from) — the native idiom
@@ -248,14 +249,10 @@ struct MainShellView: View {
     .sheet(isPresented: Bindable(controller).catalogSearchPresented) {
       CatalogSearchSheet(isPresented: Bindable(controller).catalogSearchPresented)
     }
-    // The genre-tree sheet (`plans/son-of-genre-map.md` Phase B).
-    // Phase E retired the metro-era sibling sheet entirely; the tree
-    // view is now the sole genre-visualisation surface. Reads its
-    // substrate via `genreTreeService` and persists tree positions
-    // back to `v9.genreMapState` after every successful build.
-    .sheet(isPresented: Bindable(controller).genreTreeSheetPresented) {
-      GenreTreeMapPanel()
-    }
+    // The genre tree (`plans/son-of-genre-map.md`) is no longer a
+    // sheet — it lives docked below the track list in `DetailPaneView`
+    // (per user direction 2026-05-22). No presentation wiring needed
+    // here; the pane is part of the detail column.
     // Document import/export (plans/snapshot-export-import.md). The
     // exporter's bytes are built off-main *before* its flag flips true
     // (`beginSnapshotExport`), so the document is always ready here.

@@ -147,15 +147,13 @@ struct PlaylistPlayerApp: App {
         }
         .keyboardShortcut("a", modifiers: [.command, .option])
 
-        // Phase B of `plans/son-of-genre-map.md` re-points the
-        // ⌥⇧⌘A keystroke from "Analyze Genre Map" to the new
-        // "Show Genre Tree…" command — the user-facing default
-        // surface is now the trunk tree. The metro-side "Analyze
-        // Genre Map" action stays accessible for comparison builds
-        // under a Debug menu entry below (no shortcut by design —
-        // it's not a primary affordance).
-        Button("Show Genre Tree…") {
-          controller.genreTreeSheetPresented = true
+        // ⌥⇧⌘A reveals the genre-tree pane docked below the track
+        // list (per user direction 2026-05-22 it's an inline pane, not
+        // a sheet). Setting `collapsed = false` expands it; the pane's
+        // own header chevron + the toolbar button toggle the same
+        // shared `genreTreePaneCollapsed` flag.
+        Button("Show Genre Tree") {
+          controller.genreTreePaneCollapsed = false
         }
         .keyboardShortcut("a", modifiers: [.command, .option, .shift])
 

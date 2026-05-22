@@ -139,12 +139,14 @@ final class MusicController {
   /// app-level sheet state under `@Observable`).
   var catalogSearchPresented = false
 
-  /// Drives the genre-tree sheet's presentation flag from
-  /// `MainShellView` via `Bindable`. Phase B of
-  /// `plans/son-of-genre-map.md` introduced this as the new
-  /// user-visible surface; Phase E retired the metro sibling sheet
-  /// (`genreMapSheetPresented`) entirely.
-  var genreTreeSheetPresented = false
+  /// Collapse state of the genre-tree pane docked below the track
+  /// list in the detail column. `false` ⇒ expanded (visible). Lives
+  /// on the controller (not `@SceneStorage`) so the menu command, the
+  /// toolbar button, and the pane's own header chevron all drive one
+  /// shared value. Phase B of `plans/son-of-genre-map.md` first shipped
+  /// the tree as a sheet; per user direction (2026-05-22) it now lives
+  /// inline as a docked pane, matching the retired ForceGraph's home.
+  var genreTreePaneCollapsed = false
 
   /// Derived summary collections — **stored, input-driven state**, not
   /// per-`body` computed properties (Phase A spry fix; see
