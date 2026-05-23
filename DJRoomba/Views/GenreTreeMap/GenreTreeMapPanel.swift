@@ -853,6 +853,7 @@ struct GenreTreeMapPanel: View {
             isHighlighted: isSelected,
             isFaded: false,
             onTap: { select(placed.genre.name) },
+            onRename: { controller.beginRenameGenre(placed.genre.name) },
           )
         } else {
           BranchPill(
@@ -862,6 +863,7 @@ struct GenreTreeMapPanel: View {
             isHighlighted: isSelected,
             isFaded: false,
             onTap: { select(placed.genre.name) },
+            onRename: { controller.beginRenameGenre(placed.genre.name) },
           )
         }
       }

@@ -5,6 +5,46 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-22 — Genre Map — fold in genre editing + right-click-to-rename on the map
+
+**Branch `feature/genre-tree-map`.** Combined the genre rename/merge +
+multi-select assign work (PR #3, `feature/genre-rename-merge-assign`)
+into this branch via cherry-pick of both its commits (`4415738`
+genre-edit + `59138f0` row-select drag fix), so PR #6 is now a strict
+superset — **PR #3 can be closed with nothing orphaned**. Then added the
+genre-map entry point the user asked for: "right-click a genre in the map
+→ rename, and the map recomputes on every genre change."
+
+- **Cherry-pick conflict resolution** (all additive): `MusicController`
+  and `LibraryStore` both gained PR #3's genre-edit methods alongside the
+  tree work. The only real reconciliation: PR #3 predates the
+  `reanalyzeGenreGraphIfEnabled` → `runMapRebuildIfEnabled` collapse, so
+  its `reloadAfterGenreEdit` + import path were re-pointed at
+  `runMapRebuildIfEnabled` (which rebuilds v6 graph + v7 substrate + the
+  tree). A duplicate `private let database` from PR #3 was dropped (this
+  branch already declares it). `PROGRESS.md` kept both histories.
+- **Auto-recompute = free.** Genre edits already funnel through
+  `reloadAfterGenreEdit`, which now calls `runMapRebuildIfEnabled` — so
+  any rename/merge/assign rebuilds the map automatically (gated on
+  `autoReanalyzeGenreGraph`, default on). No new wiring.
+- **Right-click → Rename… on the map.** `TrunkPill` / `BranchPill` gain a
+  `.contextMenu` with **Rename…**; new `GenreNameRequest.Action
+  .renameGenre(from:)` + `MusicController.beginRenameGenre(_:)` open the
+  existing `GenreNameSheet` seeded with the clicked genre. The old
+  `renameBrowsedGenre(to:)` generalised to `renameGenreTag(from:to:)`
+  (only touches the nav stack / `selectedGenre` when the renamed tag IS
+  the browsed one). Rename-onto-an-existing-name still merges (literal-tag
+  rewrite + dedupe, in the store). The sheet is hosted on
+  `PlaylistDetailView` and binds to the shared `controller.genreNameRequest`,
+  so a map-pill trigger presents it at window level even though the pane
+  is a sibling, not a descendant.
+- **Verification.** `make build` (signed) + `swift test` (**367 / 53**) +
+  `swiftformat --lint` + `swiftlint --strict` clean. Live round-trip on
+  the real library via computer-use: right-clicked "Soft Rock" → renamed
+  to "Soft Rock Test" → pill + playlist genre-chips updated and the map
+  recomputed with no manual re-analyze → renamed back to "Soft Rock"
+  (library restored).
+
 ## 2026-05-22 — Genre Tree Map — "it's a map, let it breathe" layout pass
 
 **Branch `feature/genre-tree-map`.** Live-feedback pass on the tree

@@ -13,6 +13,10 @@ struct GenreNameRequest: Identifiable, Hashable, Sendable {
     /// Rename the genre currently shown in the top pane (the controller
     /// resolves which one — it owns `selectedGenre`). Merge is implicit.
     case renameBrowsedGenre
+    /// Rename a specific genre tag, named explicitly (the genre-map
+    /// right-click path — the target isn't necessarily the browsed
+    /// genre). Merge is implicit (rename onto an existing name merges).
+    case renameGenre(from: String)
     /// Assign the typed name to these `song.id`s (idempotent append).
     case assignToSongs([String])
   }

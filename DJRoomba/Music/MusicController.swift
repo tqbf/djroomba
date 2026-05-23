@@ -599,6 +599,21 @@ final class MusicController {
     )
   }
 
+  /// Right-click a genre pill in the genre map ▸ "Rename…". Opens the
+  /// modal sheet seeded with that genre's name. Unlike
+  /// `beginRenameBrowsedGenre`, the target is named explicitly (the
+  /// clicked pill), so it works regardless of what's in the track pane.
+  func beginRenameGenre(_ genre: String) {
+    let trimmed = genre.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    genreNameRequest = GenreNameRequest(
+      title: "Rename Genre",
+      prompt: "Genre Name",
+      initialText: trimmed,
+      action: .renameGenre(from: trimmed),
+    )
+  }
+
   /// "Add to Genre ▸ New Genre…" — open the sheet to type a new genre for
   /// the selected tracks.
   func beginAssignNewGenre(toSongs songIDs: [String]) {
@@ -622,7 +637,11 @@ final class MusicController {
     genreNameRequest = nil
     switch request.action {
     case .renameBrowsedGenre:
-      await renameBrowsedGenre(to: name)
+      guard let old = selectedGenre else { return }
+      await renameGenreTag(from: old, to: name)
+
+    case .renameGenre(let from):
+      await renameGenreTag(from: from, to: name)
 
     case .assignToSongs(let songIDs):
       await addGenre(name, toSongs: songIDs)
@@ -1236,20 +1255,25 @@ final class MusicController {
     )
   }
 
-  /// Rename the **currently browsed** genre in place. This is an edit, not
-  /// a navigation: the Back stack's `.genre(old)` entries are rewritten to
-  /// `.genre(new)` (so Back never lands on a now-empty genre) and the
-  /// genre view is re-pointed to `new` WITHOUT pushing history. No-op if
-  /// the trimmed name is unchanged. Merge is implicit in the store
-  /// (literal-tag rewrite + dedupe).
-  private func renameBrowsedGenre(to newName: String) async {
-    guard let store, let old = selectedGenre else { return }
+  /// Rename a genre tag `old → new` in place. This is an edit, not a
+  /// navigation. If `old` is the **currently browsed** genre, the Back
+  /// stack's `.genre(old)` entries are rewritten to `.genre(new)` (so
+  /// Back never lands on a now-empty genre) and the genre view re-points
+  /// to `new` WITHOUT pushing history; if `old` isn't the browsed genre
+  /// (the genre-map right-click case), only the tags + downstream
+  /// derivations change. No-op if the trimmed name is unchanged. Merge
+  /// is implicit in the store (literal-tag rewrite + dedupe). The
+  /// `reloadAfterGenreEdit` tail recomputes the genre map automatically.
+  private func renameGenreTag(from old: String, to newName: String) async {
+    guard let store else { return }
     let new = newName.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !new.isEmpty, new != old else { return }
     do {
       _ = try await store.renameGenre(from: old, to: new)
-      navBackStack.replacingGenre(old, with: new)
-      selectedGenre = new
+      if selectedGenre == old {
+        navBackStack.replacingGenre(old, with: new)
+        selectedGenre = new
+      }
       await reloadAfterGenreEdit()
     } catch {
       storeError = error.localizedDescription

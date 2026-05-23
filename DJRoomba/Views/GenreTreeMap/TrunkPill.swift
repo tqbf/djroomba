@@ -60,6 +60,8 @@ struct TrunkPill: View {
   /// Phase B click — Phase C will use this to enter radial-focus mode.
   /// Phase B owns the gesture for the inspector affordance only.
   var onTap: () -> Void = { }
+  /// Right-click ▸ "Rename…" (genre editing on the map). No-op by default.
+  var onRename: () -> Void = { }
 
   var body: some View {
     Text(genre.name)
@@ -83,6 +85,9 @@ struct TrunkPill: View {
       .foregroundStyle(.primary)
       .contentShape(Rectangle())
       .onTapGesture(perform: onTap)
+      .contextMenu {
+        Button("Rename…", systemImage: "pencil", action: onRename)
+      }
       .opacity(isFaded ? 0.18 : 1.0)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel("\(genre.name), trunk, weight \(weightPercent)")
