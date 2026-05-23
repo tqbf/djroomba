@@ -5,6 +5,39 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-22 — Detail-header Play button reflects + toggles play state
+
+**Branch context:** on `main` (working tree; not committed). User report: the
+big blue header Play button "doesn't change state — I have to watch the
+transport timer to know it's playing." It was a fixed `play.fill` "Play"
+*action* that never reflected state.
+
+Fix: the header button now mirrors Music.app — when its playlist/genre is the
+active playback context it shows **Pause** (and toggles pause/resume); when
+not, it shows **Play** (and starts that playlist). Live-verified via signed
+build + computer-use: Play → ⏸ Pause → ▶ Play round-trips correctly.
+
+- **`MusicController`** gains two **change-gated** `@Observable` mirrors —
+  `activePlaybackContextID` (the `playlistContextID` of the loaded context, or
+  nil when stopped) and `isPlaying` — written from the existing
+  `onSnapshotRefresh` hook via new `refreshPlaybackHeaderFlags()`, assigning
+  **only on change**. Deliberately separate from `playback.snapshot`: the
+  snapshot is reassigned every 0.5 s tick, so a header `body` reading it would
+  recompute every tick — the coupling `PlaybackService` /
+  `plans/memory-and-laziness.md` / swiftui-pro warn against. The gated mirrors
+  invalidate the header only on a real play/pause/stop/context change.
+  (`contextID == detail.id` always, set in `resolveAndPlay`, so the
+  per-detail comparison is exact — covers app playlists, imported playlists,
+  and `genre:` sentinels.)
+- **`PlaylistHeaderView`** reads `controller.activePlaybackContextID` /
+  `isPlaying` (not `snapshot`) → `isActiveContext` / `isPlayingThis`; the
+  button label/glyph + action switch on those, and the disable gate only
+  applies when it's *not* the active context (so Pause/resume is always
+  available on the playing one).
+- swiftui-pro guidance applied (no `body`/tick coupling; observable-mirror
+  pattern already used in `MusicController`). `swift build` clean,
+  `swift test` **367/53** green, swiftformat + swiftlint --strict clean.
+
 ## 2026-05-22 — Genre Map — fold in genre editing + right-click-to-rename on the map
 
 **Branch `feature/genre-tree-map`.** Combined the genre rename/merge +
