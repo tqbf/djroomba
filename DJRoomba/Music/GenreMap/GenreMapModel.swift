@@ -1,0 +1,154 @@
+import Foundation
+
+// MARK: - GenreMapNodeKind
+
+/// Topological classification of a genre node (`plans/genre-metro-map.md`
+/// Phase 2 + Phase 3). Derived from the composite transferness score on
+/// the layout graph; cached on the node so the renderer never
+/// re-classifies on its own.
+///
+/// - `ordinary`: a regular stop — the existing Phase-1 pill.
+/// - `junction`: a pill with a `diamond.fill` glyph inside it — modest
+///   topological breadth, AND not necessarily a strand member (the
+///   classification is layout-graph-derived, not strand-derived).
+/// - `transferStation`: a pill that serves 2+ metro strands. From
+///   Phase 3 the signal is communicated **purely via the per-strand
+///   coloured tick row under the pill** — the Phase-2 neutral multi-
+///   strand glyph is removed (it was a placeholder for the strand
+///   colours that didn't exist yet).
+///
+/// Thresholds (composite transferness in `[0, 1]`): `<0.35` ordinary,
+/// `<0.65` junction, `≥0.65` transfer station. Pinned in
+/// `GenreMapTransfernessTests`; matches the plan's headline values
+/// on the back of the Phase-2-gate substrate widening (`interCommunityBridges`).
+enum GenreMapNodeKind: Int, Equatable, Sendable, CaseIterable {
+  case ordinary = 0
+  case junction = 1
+  case transferStation = 2
+}
+
+// MARK: - GenreMapModel
+
+/// The renderable, layout-ready model the `GenreMapPanel` binds to — the
+/// output of `GenreMapBuilder` (`plans/genre-metro-map.md` Phase 1).
+///
+/// Three pieces:
+///
+/// - `nodes`: every analysed genre's label, normalised importance, raw
+///   counts, and current 2-D position (assigned by the constrained force
+///   layout). Phase 1 surfaces only **geography**: pills + community hulls.
+/// - `layoutEdges`: the **sparse** subset of edges that the physics sees —
+///   per-node mutual-kNN ∪ maximum spanning tree ∪ strongest inter-
+///   community bridges. The display knows about more edges (kept on each
+///   node for future hover-reveal) but they never enter the force kernel.
+/// - `communities`: medium-resolution Louvain partitions (`γ = 1.0`).
+///   Phase 1 uses them for centroid gravity + soft background hulls; later
+///   phases add coarse + fine resolutions on top.
+struct GenreMapModel: Equatable, Sendable {
+  var nodes: [GenreMapNode]
+  var layoutEdges: [GenreMapEdge]
+  /// Medium-resolution communities, keyed by community id.
+  var communities: [GenreMapCommunity]
+  /// World-space bounding box of the laid-out nodes (label centres).
+  /// Retained on the model for downstream code that reads it; the
+  /// tree view computes its own bounds from the geometric layout, so
+  /// this is informational under the Son-of-Genre-Map regime
+  /// (`plans/son-of-genre-map.md` Phase E).
+  var worldBounds: CGRect
+  /// World-space "default viewport centre" left over from the metro
+  /// renderer; the tree view does its own centring so this is a no-op
+  /// historical record under Phase E of `plans/son-of-genre-map.md`.
+  var defaultCentre = CGPoint.zero
+  /// Monotonically-increasing revision number bumped on every
+  /// rebuild. Retained for persistence bookkeeping (the v9 row's
+  /// `revision` column carries this value forward).
+  var layoutRevision = 0
+}
+
+// MARK: - GenreMapNode
+
+struct GenreMapNode: Equatable, Sendable, Identifiable {
+  var genre: String
+  /// Normalised importance from `genre_node.weight` (`[0, 1]`).
+  var weight: Double
+  var trackCount: Int
+  var albumCount: Int
+  var artistCount: Int
+  /// Algorithmic community id at the medium resolution (`γ = 1.0`). Stable
+  /// across rebuilds **within the same `GenreMapModel`**, but not across
+  /// rebuilds — community identity persistence is Phase 6.
+  var communityID: Int
+  /// World-space layout position. Mutated by `GenreMapBuilder.layout` and
+  /// the drag interaction; never persisted in Phase 1.
+  var position: CGPoint
+  /// Cached label rectangle size (world units, including pill padding)
+  /// from the `measureLabel` closure the builder consumed at build time.
+  /// Carried on the node so the drag-relaxation pass uses the SAME
+  /// rectangle the layout pass used — the original Phase-1 ship had
+  /// drag re-approximate a different size, which let drag re-overlap
+  /// labels the layout had separated.
+  var labelSize: CGSize
+  /// Composite transferness score in `[0, 1]` (Phase 2). Sum of the
+  /// four normalised inputs at their spec weights, dampened for
+  /// generic giants. The renderer never recomputes this — it reads.
+  var transferness: Double
+  /// Cached topological classification (Phase 2). The drag affordance
+  /// must NOT change this: kind is purely layout-graph-derived,
+  /// not position-derived, so it stays stable while the user moves a
+  /// node around.
+  var nodeKind: GenreMapNodeKind
+  /// Per-input contributions to `transferness`, in `[0, 1]`. Used by
+  /// the evidence side panel to explain which inputs landed high/low.
+  /// (Stored on the node so the panel never re-derives a number that
+  /// disagrees with the classification.)
+  var transfernessInputs: GenreMapTransfernessInputs
+
+  var id: String {
+    genre
+  }
+}
+
+// MARK: - GenreMapTransfernessInputs
+
+/// The four normalised inputs to the composite transferness score
+/// (`plans/genre-metro-map.md` Phase 2, step 1). All in `[0, 1]` at the
+/// node-cache point; the `membershipEntropy` slot is a placeholder until
+/// soft community detection lands (deliberately deferred).
+///
+/// `strandCount` stays at 0 until Phase 3 fills it; the composite reads
+/// the spec's 10 % weight on this slot today and it contributes nothing.
+struct GenreMapTransfernessInputs: Equatable, Sendable {
+  var betweenness: Double
+  var neighbourEntropy: Double
+  var crossCommunityFraction: Double
+  var membershipEntropy: Double
+  var strandCount: Double
+  /// Multiplicative dampening factor applied to the raw composite (`1.0`
+  /// = untouched, `<1.0` = generic-giant dampened). Surfaced so the
+  /// evidence panel can say "the score is lower because…".
+  var dampening: Double
+}
+
+// MARK: - GenreMapEdge
+
+/// One canonical-half edge in the **layout** graph — what the physics sees
+/// (the display graph is held inside `GenreMapBuilder` and not yet
+/// surfaced to the view in Phase 1).
+struct GenreMapEdge: Equatable, Sendable {
+  var genreA: String
+  var genreB: String
+  /// Composite weight from `genre_edge_evidence.totalWeight`, scaled into
+  /// the spring kernel by the layout pass.
+  var totalWeight: Double
+}
+
+// MARK: - GenreMapCommunity
+
+struct GenreMapCommunity: Equatable, Sendable, Identifiable {
+  /// Algorithmic id (small integer, stable within this model only).
+  var id: Int
+  /// Member genre names.
+  var members: [String]
+  /// World-space centroid of the members.
+  var centroid: CGPoint
+}

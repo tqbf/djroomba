@@ -276,7 +276,7 @@ struct PlaybackResolverTests {
     // in the user's storefront) — both classes of miss must drop into
     // `unresolved` and never break the queue (the risk-register
     // invariant: one bad id never breaks the whole queue).
-    let resolvedIDs: Set<String> = ["L1", "C1"]
+    let resolvedIDs: Set = ["L1", "C1"]
     var queueContext = [String]()
     var unresolved = [String]()
     for r in rows {
@@ -325,7 +325,7 @@ struct PlaybackResolverTests {
     let result = PlaybackResolver.reassemble(
       rows: rows,
       startRow: rows[1], // a catalog row
-      resolved: [:],     // nothing resolved (the unattributable extreme)
+      resolved: [:], // nothing resolved (the unattributable extreme)
     )
     // Everything misses ⇒ empty queue, unresolved is every id in order.
     #expect(result.songs.isEmpty)
@@ -342,8 +342,6 @@ struct PlaybackResolverTests {
     )
   }
 
-  // MARK: F1a — chunkByNamespace pure helper
-
   /// **F1a (`plans/catalog-playlists.md` Phase-3 followup) — pure chunking.**
   /// `chunkByNamespace` returns the **ranges of consecutive same-namespace
   /// runs** in input order. The `PlaybackService` then plays each chunk
@@ -357,12 +355,12 @@ struct PlaybackResolverTests {
 
     // Single row ⇒ one range.
     let oneLibrary = [
-      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library),
+      row(position: 1, songID: "s1", musicItemID: "L1", namespace: .library)
     ]
     #expect(PlaybackResolver.chunkByNamespace(oneLibrary) == [0..<1])
 
     let oneCatalog = [
-      row(position: 1, songID: "s1", musicItemID: "C1", namespace: .catalog),
+      row(position: 1, songID: "s1", musicItemID: "C1", namespace: .catalog)
     ]
     #expect(PlaybackResolver.chunkByNamespace(oneCatalog) == [0..<1])
 
@@ -439,8 +437,6 @@ struct PlaybackResolverTests {
     )
   }
 
-  // MARK: F1a — globalQueueIndex translation
-
   /// **F1a — translate player-local index → global.** After a chunk swap,
   /// `player.queue.entries`'s ordinals reset to 0 for the new chunk; the
   /// Phase-4 `advanceToRecord` detector must continue to see a **global**
@@ -455,7 +451,7 @@ struct PlaybackResolverTests {
         localIndex: 0,
         currentChunk: 1,
         chunkBoundaries: [0, 3],
-      ) == 3,
+      ) == 3
     )
 
     // Single-chunk: identity at every local index.
@@ -477,14 +473,14 @@ struct PlaybackResolverTests {
         localIndex: 0,
         currentChunk: 1,
         chunkBoundaries: [0, 2, 4],
-      ) == 2,
+      ) == 2
     )
     #expect(
       PlaybackResolver.globalQueueIndex(
         localIndex: 0,
         currentChunk: 2,
         chunkBoundaries: [0, 2, 4],
-      ) == 4,
+      ) == 4
     )
     // Mid-chunk: local 1 in chunk 1 = global 3.
     #expect(
@@ -492,7 +488,7 @@ struct PlaybackResolverTests {
         localIndex: 1,
         currentChunk: 1,
         chunkBoundaries: [0, 2, 4],
-      ) == 3,
+      ) == 3
     )
 
     // Edge cases: empty boundaries (no resolution loaded) ⇒ identity.
@@ -510,7 +506,7 @@ struct PlaybackResolverTests {
         localIndex: 1,
         currentChunk: 5,
         chunkBoundaries: [0, 2],
-      ) == 1,
+      ) == 1
     )
   }
 
@@ -658,33 +654,6 @@ struct PlaybackResolverTests {
     )
   }
 
-  // MARK: Private
-
-  private func row(
-    position: Int,
-    songID: String,
-    musicItemID: String,
-    namespace: Song.IDNamespace,
-  ) -> TrackRow {
-    TrackRow(
-      song: Song(
-        id: songID,
-        musicItemID: musicItemID,
-        idNamespace: namespace,
-        title: "T\(position)",
-        artistName: "A",
-        albumTitle: nil,
-        duration: nil,
-        isExplicit: false,
-        artworkURL: nil,
-        importedAt: .now,
-      ),
-      position: position,
-    )
-  }
-
-  // MARK: Phase 4 — chunkNamespaces
-
   /// **Phase 4 (`plans/catalog-playlists.md`) — `reassemble` tags every
   /// chunk with its homogeneous namespace, parallel to `chunkBoundaries`.**
   /// `PlayerStateSnapshot.nowPlayingNamespace` reads this so the now-playing
@@ -744,6 +713,31 @@ struct PlaybackResolverTests {
     #expect(
       result.chunkNamespaces.isEmpty,
       "Phase 4: parallel emptiness with chunkBoundaries",
+    )
+  }
+
+  // MARK: Private
+
+  private func row(
+    position: Int,
+    songID: String,
+    musicItemID: String,
+    namespace: Song.IDNamespace,
+  ) -> TrackRow {
+    TrackRow(
+      song: Song(
+        id: songID,
+        musicItemID: musicItemID,
+        idNamespace: namespace,
+        title: "T\(position)",
+        artistName: "A",
+        albumTitle: nil,
+        duration: nil,
+        isExplicit: false,
+        artworkURL: nil,
+        importedAt: .now,
+      ),
+      position: position,
     )
   }
 

@@ -96,7 +96,7 @@ final class CatalogSearchService {
     }
     let task = Task { @MainActor [weak self] in
       guard let self else { return }
-      await self.runSearch(trimmed)
+      await runSearch(trimmed)
     }
     searchTask = task
     await task.value
@@ -140,7 +140,7 @@ final class CatalogSearchService {
     searchTask?.cancel()
     let task = Task { @MainActor [weak self] in
       guard let self else { return }
-      await self.runLoadMore()
+      await runLoadMore()
     }
     searchTask = task
     await task.value

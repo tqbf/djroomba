@@ -41,6 +41,7 @@ struct CatalogSearchResultRow: View {
   // MARK: Internal
 
   let song: MusicKit.Song
+
   @Binding var isPresented: Bool
 
   var body: some View {

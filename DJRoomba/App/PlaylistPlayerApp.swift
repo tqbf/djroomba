@@ -138,10 +138,24 @@ struct PlaylistPlayerApp: App {
         // Sibling of "Reimport Everything": both rebuild derived state
         // wholesale from the library. ⌥⌘A — ⌘A/⇧⌘A are reserved
         // (Select All / Deselect); ⌥⌘A is free and mnemonic ("Analyze").
+        // Stays bound for the v6 genre-graph rebuild path; Phase B of
+        // the tree plan keeps the shortcut free for development-time
+        // manual graph rebuilds (the auto-rebuild hook on import covers
+        // the user-facing trigger).
         Button("Analyze Genre Graph") {
           Task { await controller.analyzeGenreGraph() }
         }
         .keyboardShortcut("a", modifiers: [.command, .option])
+
+        // ⌥⇧⌘A reveals the genre-tree pane docked below the track
+        // list (per user direction 2026-05-22 it's an inline pane, not
+        // a sheet). Setting `collapsed = false` expands it; the pane's
+        // own header chevron + the toolbar button toggle the same
+        // shared `genreTreePaneCollapsed` flag.
+        Button("Show Genre Map") {
+          controller.genreTreePaneCollapsed = false
+        }
+        .keyboardShortcut("a", modifiers: [.command, .option, .shift])
 
         // A `Toggle` in a menu is the native checkmark-menu-item idiom.
         // Bound through `Bindable` (the modern Observation binding —
@@ -192,6 +206,24 @@ struct PlaylistPlayerApp: App {
         }
         Button("Catalog Access Probe (Phase 0)") {
           Task { await controller.runCatalogAccessProbe() }
+        }
+        Divider()
+        // Manual rebuild affordance for the genre tree. The user-
+        // facing "Show Genre Tree…" command auto-rebuilds on demand;
+        // this entry is a developer escape hatch for re-running the
+        // pipeline without leaving the menu.
+        Button("Re-Analyze Genre Map") {
+          Task { await controller.analyzeGenreTree() }
+        }
+        // Trunk-selection metric A/B — a development comparison knob,
+        // not a user-facing control. Lived in the panel header as a
+        // segmented picker through Phase B; demoted here (2026-05-22)
+        // because it read as inscrutable jargon in the main UI. The
+        // shipping default is `.highestTransferness`.
+        Picker("Trunk Metric", selection: Bindable(controller.genreTreeService).metric) {
+          Text("Transferness").tag(TrunkSelectionMetric.highestTransferness)
+          Text("Weight").tag(TrunkSelectionMetric.highestWeight)
+          Text("Centrality").tag(TrunkSelectionMetric.highestCentrality)
         }
       }
     }

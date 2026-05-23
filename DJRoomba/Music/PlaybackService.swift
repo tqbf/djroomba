@@ -240,32 +240,6 @@ final class PlaybackService {
     refreshSnapshot()
   }
 
-  /// True iff the player is on the LAST entry of the current chunk AND a
-  /// next chunk is pending. Pure read-only check — no I/O.
-  private func shouldSwapChunkOnSkipNext() -> Bool {
-    guard !pendingChunks.isEmpty else { return false }
-    guard currentChunkIndex + 1 < pendingChunks.count else { return false }
-    guard let entry = player.queue.currentEntry else { return false }
-    guard let lastEntry = player.queue.entries.last else { return false }
-    return entry.id == lastEntry.id
-  }
-
-  /// User-initiated chunk swap (Next at chunk tail). Same shape as the
-  /// auto-detection swap (`advanceToNextChunkIfNeeded`) but always runs;
-  /// the re-entrancy gate still prevents an overlapping auto-swap from
-  /// double-firing.
-  private func performChunkSwapForSkipNext() async {
-    guard !chunkSwapInFlight else { return }
-    let nextIndex = currentChunkIndex + 1
-    guard pendingChunks.indices.contains(nextIndex) else { return }
-    chunkSwapInFlight = true
-    defer { chunkSwapInFlight = false }
-    await performChunkSwap(
-      toChunkIndex: nextIndex,
-      songs: pendingChunks[nextIndex].songs,
-    )
-  }
-
   func skipPrevious() async {
     do {
       try await player.skipToPreviousEntry()
@@ -278,29 +252,19 @@ final class PlaybackService {
 
   // MARK: Private
 
-  // MusicKit's ApplicationMusicPlayer is not Sendable-audited and its async
-  // transport methods are `nonisolated`, so calling them from this
-  // @MainActor service would "send" a non-Sendable value across actors
-  // under Swift 6. All our access is in fact serialized on the MainActor
-  // (this service + its monitor task), so opting the singleton out of
-  // isolation checking is sound. See plans/musickit-notes.md.
-  @ObservationIgnored nonisolated(unsafe) private let player = ApplicationMusicPlayer.shared
-  @ObservationIgnored private var monitorTask: Task<Void, Never>?
-  @ObservationIgnored private var playlistContextID: String?
-
-  // F1a sequential-sub-queue state.
-  //
-  // **Why `@ObservationIgnored`:** these are not view-bound state — the
-  // only thing the now-playing bar reads is `snapshot`, which already
-  // computes the **global** queueIndex below via `globalQueueIndex(...)`,
-  // so coupling a view body to a chunk swap is the wrong shape. swiftui-pro
-  // / `plans/memory-and-laziness.md`: never let the 0.5 s tick invalidate
-  // `body`.
-  //
-  // **Why a struct array instead of three parallel arrays:** the per-chunk
-  // tuple (songs, playContext) is set together, swapped together, and
-  // never mutated piecewise — keeping them in one type prevents the "two
-  // of three arrays got updated" bug class.
+  /// F1a sequential-sub-queue state.
+  ///
+  /// **Why `@ObservationIgnored`:** these are not view-bound state — the
+  /// only thing the now-playing bar reads is `snapshot`, which already
+  /// computes the **global** queueIndex below via `globalQueueIndex(...)`,
+  /// so coupling a view body to a chunk swap is the wrong shape. swiftui-pro
+  /// / `plans/memory-and-laziness.md`: never let the 0.5 s tick invalidate
+  /// `body`.
+  ///
+  /// **Why a struct array instead of three parallel arrays:** the per-chunk
+  /// tuple (songs, playContext) is set together, swapped together, and
+  /// never mutated piecewise — keeping them in one type prevents the "two
+  /// of three arrays got updated" bug class.
   /// Per-chunk view into a `Resolution` for sequential playback. `songs`
   /// is what the swapped `ApplicationMusicPlayer.Queue` gets; `playContext`
   /// is the parallel stored `song.id` slice (informational — the global
@@ -316,6 +280,16 @@ final class PlaybackService {
     /// (Phase 4 of `plans/catalog-playlists.md`).
     var namespace: Song.IDNamespace
   }
+
+  // MusicKit's ApplicationMusicPlayer is not Sendable-audited and its async
+  // transport methods are `nonisolated`, so calling them from this
+  // @MainActor service would "send" a non-Sendable value across actors
+  // under Swift 6. All our access is in fact serialized on the MainActor
+  // (this service + its monitor task), so opting the singleton out of
+  // isolation checking is sound. See plans/musickit-notes.md.
+  @ObservationIgnored nonisolated(unsafe) private let player = ApplicationMusicPlayer.shared
+  @ObservationIgnored private var monitorTask: Task<Void, Never>?
+  @ObservationIgnored private var playlistContextID: String?
 
   /// Empty unless the active resolution actually had ≥2 chunks. The
   /// `play(songs:startingAt:playlistContextID:)` single-shape overload
@@ -390,6 +364,44 @@ final class PlaybackService {
     case .seekingBackward: .seekingBackward
     @unknown default: .stopped
     }
+  }
+
+  /// F1a — locate which chunk a **global** queue index falls into. The
+  /// monotone search is fine for F1a's chunk counts (almost always 1, rarely
+  /// >5); a binary search would be premature here.
+  private static func chunkContaining(globalIndex: Int, in boundaries: [Int]) -> Int {
+    guard !boundaries.isEmpty else { return 0 }
+    var chosen = 0
+    for k in boundaries.indices where boundaries[k] <= globalIndex {
+      chosen = k
+    }
+    return chosen
+  }
+
+  /// True iff the player is on the LAST entry of the current chunk AND a
+  /// next chunk is pending. Pure read-only check — no I/O.
+  private func shouldSwapChunkOnSkipNext() -> Bool {
+    guard !pendingChunks.isEmpty else { return false }
+    guard currentChunkIndex + 1 < pendingChunks.count else { return false }
+    guard let entry = player.queue.currentEntry else { return false }
+    guard let lastEntry = player.queue.entries.last else { return false }
+    return entry.id == lastEntry.id
+  }
+
+  /// User-initiated chunk swap (Next at chunk tail). Same shape as the
+  /// auto-detection swap (`advanceToNextChunkIfNeeded`) but always runs;
+  /// the re-entrancy gate still prevents an overlapping auto-swap from
+  /// double-firing.
+  private func performChunkSwapForSkipNext() async {
+    guard !chunkSwapInFlight else { return }
+    let nextIndex = currentChunkIndex + 1
+    guard pendingChunks.indices.contains(nextIndex) else { return }
+    chunkSwapInFlight = true
+    defer { chunkSwapInFlight = false }
+    await performChunkSwap(
+      toChunkIndex: nextIndex,
+      songs: pendingChunks[nextIndex].songs,
+    )
   }
 
   private func setQueueAndPlay(
@@ -490,18 +502,6 @@ final class PlaybackService {
       )
     }
     return chunks
-  }
-
-  /// F1a — locate which chunk a **global** queue index falls into. The
-  /// monotone search is fine for F1a's chunk counts (almost always 1, rarely
-  /// >5); a binary search would be premature here.
-  private static func chunkContaining(globalIndex: Int, in boundaries: [Int]) -> Int {
-    guard !boundaries.isEmpty else { return 0 }
-    var chosen = 0
-    for k in boundaries.indices where boundaries[k] <= globalIndex {
-      chosen = k
-    }
-    return chosen
   }
 
   /// F1a — kick off (asynchronously) a swap to the next pending chunk **if**

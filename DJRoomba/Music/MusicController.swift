@@ -33,6 +33,8 @@ final class MusicController {
     importService = ImportService(store: safeStore)
     genreImportService = GenreImportService(store: safeStore)
     genreGraphService = GenreGraphService(store: safeStore)
+    genreMapService = GenreMapService(store: safeStore)
+    genreTreeService = GenreTreeService(store: safeStore, mapService: genreMapService)
     catalogIngestService = CatalogIngestService(store: safeStore)
     snapshotService = SnapshotService(store: safeStore)
     resolver = PlaybackResolver()
@@ -65,6 +67,21 @@ final class MusicController {
   /// automatically after a playlist change when `autoReanalyzeGenreGraph`
   /// is on.
   let genreGraphService: GenreGraphService
+  /// Phase 1 of `plans/genre-metro-map.md` — the genre **map** substrate
+  /// (sibling, not replacement, of `genreGraphService`). Driven by the
+  /// new "Analyze (Map)" action and a `runMapRebuildIfEnabled()` hook
+  /// alongside the existing genre-graph one. Phase 6 will consolidate.
+  let genreMapService: GenreMapService
+
+  /// Phase B of `plans/son-of-genre-map.md` — the genre **tree** view's
+  /// binding target. A thin observable that runs the pure Phase A
+  /// (`GenreTreeBuilder` MST + trunk selection + BFS forest) and
+  /// Phase B (`GenreTreeLayout` diagonal + radial fanning) pipelines
+  /// against the metro substrate. Reads `genre_node` +
+  /// `genre_edge_evidence` from the store; pulls the medium-resolution
+  /// Louvain partition out of `genreMapService.model` so community
+  /// detection runs once across both views. No schema change.
+  let genreTreeService: GenreTreeService
   /// `.djroomba` library snapshot export / import + revert
   /// (`plans/snapshot-export-import.md`). Non-MusicKit; the controller
   /// owns the post-op UI reload + genre reanalyze, exactly as it does for
@@ -85,11 +102,6 @@ final class MusicController {
   /// `results` / `isSearching` / `lastError` / `hasMore` directly. Stateless
   /// w.r.t. SQLite — ingest only happens when the user *acts on* a result.
   let catalogSearch = CatalogSearchService()
-
-  /// Phase-0 catalog access gate (`plans/catalog-playlists.md`). Internal —
-  /// views never read it; they read `catalogProbeResult`, exactly like the
-  /// genre-import notice. No store dependency, so it self-initializes.
-  private let catalogProbeService = CatalogProbeService()
 
   /// Observable mirrors of the persisted app state. SQLite is authoritative;
   /// these are refreshed from it after writes (no dual store).
@@ -127,6 +139,15 @@ final class MusicController {
   /// app-level sheet state under `@Observable`).
   var catalogSearchPresented = false
 
+  /// Collapse state of the genre-tree pane docked below the track
+  /// list in the detail column. `false` ⇒ expanded (visible). Lives
+  /// on the controller (not `@SceneStorage`) so the menu command, the
+  /// toolbar button, and the pane's own header chevron all drive one
+  /// shared value. Phase B of `plans/son-of-genre-map.md` first shipped
+  /// the tree as a sheet; per user direction (2026-05-22) it now lives
+  /// inline as a docked pane, matching the retired ForceGraph's home.
+  var genreTreePaneCollapsed = false
+
   /// Derived summary collections — **stored, input-driven state**, not
   /// per-`body` computed properties (Phase A spry fix; see
   /// `plans/memory-and-laziness.md`). `rebuildDerivedSummaries()` recomputes
@@ -142,6 +163,18 @@ final class MusicController {
   /// User-owned, SQLite-only playlists ("My Playlists" section, Phase 4),
   /// with `isFavorite` overlaid (the service leaves it false).
   private(set) var appPlaylists = [PlaylistSummary]()
+
+  /// Every distinct genre tag in the library, alphabetical (the
+  /// `appPlaylists`-style observable mirror — reloaded on session start
+  /// and after any genre edit / import). Backs the "Add to Genre ▸"
+  /// context submenu. `plans/genre-editing.md`.
+  private(set) var allGenres = [String]()
+
+  /// Drives the single modal genre-name `.sheet(item:)` (rename a browsed
+  /// genre, or assign a genre to selected tracks). Mutable so the view
+  /// binds it via `@Bindable` (swiftui-pro: `sheet(item:)` over
+  /// `isPresented`, no `Binding(get:set:)`); set to `nil` to dismiss.
+  var genreNameRequest: GenreNameRequest?
 
   /// Favorites span both libraries (a user playlist can be a favorite too).
   private(set) var favoritePlaylists = [PlaylistSummary]()
@@ -450,6 +483,49 @@ final class MusicController {
     await runGenreAnalysis()
   }
 
+  /// **Analyze Genre Tree** — Phase B of `plans/son-of-genre-map.md`.
+  /// User-facing rebuild of the trunk-tree view. Reuses the metro
+  /// substrate (community detection lives in `GenreMapService`) so the
+  /// Louvain pass runs at most once across both views.
+  ///
+  /// Sequence:
+  ///
+  /// 1. Run `runGenreAnalysis` (v6 + v7 substrate rebuild) — same as
+  ///    `analyzeGenreMap` because the tree reads the same evidence
+  ///    rows.
+  /// 2. Force a metro `GenreMapService.build` so the medium-resolution
+  ///    Louvain partition is fresh in `genreMapService.model`.
+  /// 3. Run `genreTreeService.build` — pure Phase A + Phase B pipeline,
+  ///    no SQL outside steps 1–2.
+  func analyzeGenreTree() async {
+    await runGenreAnalysis()
+    await genreMapService.build()
+    await genreTreeService.build()
+  }
+
+  /// Auto-rebuild hook for the genre tree. Single funnel called from
+  /// every mutation trigger (`runImport`, `addSongs`, `removeTracks`,
+  /// `setAppPlaylistTracks`, `deleteAppPlaylist`). Fire-and-forget on
+  /// the MainActor; gated on the `autoReanalyzeGenreGraph` UserDefaults
+  /// key (semantics preserved across the metro → tree pivot — the key
+  /// flips BOTH the v6 graph + the v7 substrate + the tree view).
+  ///
+  /// Sequence: v6 `rebuildGenreGraph` first (the map's playlist
+  /// channel reads from it), then v7 `rebuildGenreMap` substrate +
+  /// `GenreTreeService.build` (which persists tree positions back to
+  /// `v9.genreMapState`). Each service coalesces concurrent triggers
+  /// via its own `isAnalyzing` flag, so a burst of edits collapses
+  /// into one rebuild — the next trigger after it lands already
+  /// reflects every change in between.
+  func runMapRebuildIfEnabled() {
+    guard autoReanalyzeGenreGraph else { return }
+    Task { await runGenreAnalysis() }
+    Task {
+      await genreMapService.build()
+      await genreTreeService.build()
+    }
+  }
+
   /// File ▸ Export Library Snapshot…. Build the compressed `.djroomba`
   /// bytes off-main first, then present `.fileExporter` (only if the build
   /// succeeded — a failure surfaces via `libraryProblem`).
@@ -511,6 +587,81 @@ final class MusicController {
     }
   }
 
+  /// Header "Rename" affordance (only shown for a browsed genre). Opens
+  /// the modal sheet seeded with the current genre name, fully selected.
+  func beginRenameBrowsedGenre() {
+    guard let genre = selectedGenre else { return }
+    genreNameRequest = GenreNameRequest(
+      title: "Rename Genre",
+      prompt: "Genre Name",
+      initialText: genre,
+      action: .renameBrowsedGenre,
+    )
+  }
+
+  /// Right-click a genre pill in the genre map ▸ "Rename…". Opens the
+  /// modal sheet seeded with that genre's name. Unlike
+  /// `beginRenameBrowsedGenre`, the target is named explicitly (the
+  /// clicked pill), so it works regardless of what's in the track pane.
+  func beginRenameGenre(_ genre: String) {
+    let trimmed = genre.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    genreNameRequest = GenreNameRequest(
+      title: "Rename Genre",
+      prompt: "Genre Name",
+      initialText: trimmed,
+      action: .renameGenre(from: trimmed),
+    )
+  }
+
+  /// "Add to Genre ▸ New Genre…" — open the sheet to type a new genre for
+  /// the selected tracks.
+  func beginAssignNewGenre(toSongs songIDs: [String]) {
+    guard !songIDs.isEmpty else { return }
+    genreNameRequest = GenreNameRequest(
+      title: "Assign Genre",
+      prompt: "Genre Name",
+      initialText: "",
+      action: .assignToSongs(songIDs),
+    )
+  }
+
+  func cancelGenreNameSheet() {
+    genreNameRequest = nil
+  }
+
+  /// Commit the modal sheet. `name` is already trimmed/non-empty (the
+  /// sheet's default button is disabled otherwise). Renaming to the same
+  /// name (or an empty selection) is a safe no-op.
+  func commitGenreNameSheet(_ request: GenreNameRequest, name: String) async {
+    genreNameRequest = nil
+    switch request.action {
+    case .renameBrowsedGenre:
+      guard let old = selectedGenre else { return }
+      await renameGenreTag(from: old, to: name)
+
+    case .renameGenre(let from):
+      await renameGenreTag(from: from, to: name)
+
+    case .assignToSongs(let songIDs):
+      await addGenre(name, toSongs: songIDs)
+    }
+  }
+
+  /// Right-click "Add to Genre ▸ <existing>" — assign an existing genre to
+  /// the selected tracks (idempotent; merges naturally).
+  func addGenre(_ genre: String, toSongs songIDs: [String]) async {
+    guard let store, !songIDs.isEmpty else { return }
+    let trimmed = genre.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    do {
+      _ = try await store.addGenre(trimmed, toSongIDs: songIDs)
+      await reloadAfterGenreEdit()
+    } catch {
+      storeError = error.localizedDescription
+    }
+  }
+
   /// Debug menu action: seed `count` synthetic plays drawn at random from
   /// the user's playlist songs, then re-show the Recently Played surface so
   /// the result is immediately visible. Fire-and-forget-safe: a store
@@ -567,14 +718,14 @@ final class MusicController {
     )
     guard started else {
       catalogProbeResult = """
-      \(probe.verdict)
+        \(probe.verdict)
 
-      ❌ Playback FAILED — ApplicationMusicPlayer did not confirm `.playing` \
-      within the bounded wait. \
-      \(playback.lastError.map { "Player error: \($0)" } ?? "No player error reported.")
+        ❌ Playback FAILED — ApplicationMusicPlayer did not confirm `.playing` \
+        within the bounded wait. \
+        \(playback.lastError.map { "Player error: \($0)" } ?? "No player error reported.")
 
-      Phase 0 SEARCH PASSED, PLAYBACK FAILED.
-      """
+        Phase 0 SEARCH PASSED, PLAYBACK FAILED.
+        """
       return
     }
     // Audible window — long enough to be obviously playing (and to capture
@@ -582,13 +733,13 @@ final class MusicController {
     try? await Task.sleep(for: .milliseconds(1500))
     playback.pause()
     catalogProbeResult = """
-    \(probe.verdict)
+      \(probe.verdict)
 
-    ✅ Playback OK — ApplicationMusicPlayer confirmed `.playing` and was \
-    paused after ~1.5 s.
+      ✅ Playback OK — ApplicationMusicPlayer confirmed `.playing` and was \
+      paused after ~1.5 s.
 
-    Phase 0 FULLY PASSED.
-    """
+      Phase 0 FULLY PASSED.
+      """
   }
 
   func isFavorite(_ summary: PlaylistSummary) -> Bool {
@@ -682,14 +833,14 @@ final class MusicController {
     }
     // Removing a playlist drops its membership → the set of genres that
     // shared it can change. Reanalyze (if enabled).
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   func addSongs(_ songIDs: [String], toAppPlaylist playlistID: String) async {
     await mutateAppPlaylist(playlistID) {
       await appPlaylistService.addSongs(songIDs, to: playlistID)
     }
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   /// Phase 2 (`plans/catalog-playlists.md`) — Add Catalog Result to App
@@ -730,7 +881,7 @@ final class MusicController {
       await mutateAppPlaylist(playlistID) {
         await appPlaylistService.addSongs([songID], to: playlistID)
       }
-      reanalyzeGenreGraphIfEnabled()
+      runMapRebuildIfEnabled()
     } catch {
       storeError = error.localizedDescription
     }
@@ -740,7 +891,7 @@ final class MusicController {
     await mutateAppPlaylist(playlistID) {
       await appPlaylistService.removeTracks(at: oneBasedPositions, from: playlistID)
     }
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   /// Persist a reordered membership for an app playlist (the full ordered
@@ -753,7 +904,7 @@ final class MusicController {
     // latter changes which songs (genres) are in the playlist, so reanalyze
     // (a pure reorder is a cheap no-op for the graph — acceptable, and not
     // worth distinguishing here).
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   /// Persist a new sidebar order for the user playlists.
@@ -909,6 +1060,11 @@ final class MusicController {
     var lastRecordedQueueIndex: Int?
   }
 
+  /// Phase-0 catalog access gate (`plans/catalog-playlists.md`). Internal —
+  /// views never read it; they read `catalogProbeResult`, exactly like the
+  /// genre-import notice. No store dependency, so it self-initializes.
+  private let catalogProbeService = CatalogProbeService()
+
   /// The SQLite source of truth, and everything that reads/writes it. If
   /// the store can't be opened the app still runs (auth/empty states); the
   /// failure is surfaced via `storeError`.
@@ -971,7 +1127,7 @@ final class MusicController {
     rebuildDerivedSummaries()
     reconcileSelectionAfterImport()
     recentlyPlayed.reload()
-    reanalyzeGenreGraphIfEnabled()
+    runMapRebuildIfEnabled()
   }
 
   private func startAuthorizedSession() async {
@@ -1020,6 +1176,7 @@ final class MusicController {
     // before `restoreSelection()` (it reads `allSummaries`/`summariesByID`).
     rebuildDerivedSummaries()
     restoreSelection()
+    await loadAllGenres()
   }
 
   /// After any import, keep the selection coherent: drop it if the
@@ -1082,32 +1239,8 @@ final class MusicController {
     // and a full/first import is exactly the "new playlists added" case.
     // Reanalyze (if enabled). Runs after the genre pass so it derives from
     // the genres just (re)written, never a stale read.
-    reanalyzeGenreGraphIfEnabled()
-  }
-
-  /// Rebuild the genre graph in the background **iff** the user left
-  /// auto-reanalyze on (the default). Called after a change that can alter
-  /// which genres share a playlist: an import (new/changed playlists +
-  /// refreshed `genre_names`) or an app-playlist membership edit
-  /// (add / remove / set / delete). Deliberately NOT called for rename /
-  /// reorder-sidebar / empty-playlist *create* — none of those change any
-  /// genre↔playlist relationship, so a rebuild there is guaranteed wasted
-  /// work (a freshly created playlist has no songs, hence no genres, hence
-  /// no edges; the import path covers genuinely-new *populated* playlists).
-  ///
-  /// Fire-and-forget on the MainActor, mirroring `recordRecentlyPlayed` /
-  /// `detectAndRecordAdvance`: the graph backs no on-screen view yet, so a
-  /// moment of staleness is invisible and the rebuild must never block the
-  /// sidebar/detail refresh the caller just performed.
-  /// `GenreGraphService.analyze`'s `isAnalyzing` guard coalesces a burst of
-  /// edits into a single in-flight rebuild; because the rebuild is wholesale
-  /// (re-derived from the live data, not incremental), the next trigger
-  /// after it finishes already reflects everything that changed in between —
-  /// nothing is missed. The "Analyze Genre Graph" menu action is the
-  /// unconditional on-demand path (ignores this toggle).
-  private func reanalyzeGenreGraphIfEnabled() {
-    guard autoReanalyzeGenreGraph else { return }
-    Task { await runGenreAnalysis() }
+    runMapRebuildIfEnabled()
+    await loadAllGenres()
   }
 
   /// The single funnel into `GenreGraphService.analyze`, shared by the
@@ -1120,6 +1253,65 @@ final class MusicController {
       maxPlaylistTracks: preferences.genreAnalysisMaxPlaylistTracks,
       maxPairsPerPlaylist: preferences.genreAnalysisMaxPairsPerPlaylist,
     )
+  }
+
+  /// Rename a genre tag `old → new` in place. This is an edit, not a
+  /// navigation. If `old` is the **currently browsed** genre, the Back
+  /// stack's `.genre(old)` entries are rewritten to `.genre(new)` (so
+  /// Back never lands on a now-empty genre) and the genre view re-points
+  /// to `new` WITHOUT pushing history; if `old` isn't the browsed genre
+  /// (the genre-map right-click case), only the tags + downstream
+  /// derivations change. No-op if the trimmed name is unchanged. Merge
+  /// is implicit in the store (literal-tag rewrite + dedupe). The
+  /// `reloadAfterGenreEdit` tail recomputes the genre map automatically.
+  private func renameGenreTag(from old: String, to newName: String) async {
+    guard let store else { return }
+    let new = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !new.isEmpty, new != old else { return }
+    do {
+      _ = try await store.renameGenre(from: old, to: new)
+      if selectedGenre == old {
+        navBackStack.replacingGenre(old, with: new)
+        selectedGenre = new
+      }
+      await reloadAfterGenreEdit()
+    } catch {
+      storeError = error.localizedDescription
+    }
+  }
+
+  /// A genre edit rewrites `song.genre_names` in place (never playlist/app
+  /// /history structure). Playlist header genre chips can change, every
+  /// cached `PlaylistDetail` embeds song fields, the genre node set
+  /// changed, and the distinct-genre list moved — so reload library +
+  /// invalidate/re-select the on-screen detail (a genre view re-points to
+  /// the possibly-renamed `selectedGenre`), rebuild sidebar derivations,
+  /// refresh `allGenres`, and reanalyze the graph (its wholesale rebuild
+  /// collapses a merge automatically). Mirrors the post-`runImport`
+  /// reload, scoped to a metadata-only change.
+  private func reloadAfterGenreEdit() async {
+    await library.load()
+    detailService.invalidateAll()
+    if let genre = selectedGenre {
+      detailService.selectGenre(genre)
+    } else if let summary = selectedSummary {
+      detailService.select(summary)
+    }
+    rebuildDerivedSummaries()
+    runMapRebuildIfEnabled()
+    await loadAllGenres()
+  }
+
+  /// Refresh the observable `allGenres` mirror from SQLite (the
+  /// `appPlaylists`-style pattern). A read failure surfaces via
+  /// `storeError`, matching the codebase, and leaves the prior list.
+  private func loadAllGenres() async {
+    guard let store else { return }
+    do {
+      allGenres = try await store.distinctGenres()
+    } catch {
+      storeError = error.localizedDescription
+    }
   }
 
   /// Recompute the derived summary collections + the O(1) id index from the

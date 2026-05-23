@@ -52,4 +52,19 @@ struct DetailNavStack: Equatable {
   mutating func pop() -> DetailDestination? {
     entries.popLast()
   }
+
+  /// After a genre rename/merge, rewrite any `.genre(old)` history entry
+  /// to `.genre(new)` so Back doesn't return to a now-empty genre. Pure
+  /// in-place rewrite (no reordering / capacity change); `.playlist`
+  /// entries are untouched. No-op when `old == new`.
+  mutating func replacingGenre(_ old: String, with new: String) {
+    guard old != new else { return }
+    entries = entries.map { entry in
+      if case .genre(old) = entry {
+        .genre(new)
+      } else {
+        entry
+      }
+    }
+  }
 }

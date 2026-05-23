@@ -29,8 +29,6 @@ import Foundation
 /// long enough that an idle middle keystroke doesn't fire its own request.
 enum CatalogSearchDebouncer {
 
-  // MARK: Internal
-
   /// What the view layer should do next for the user's current query state.
   /// All three cases carry only `Sendable` values so the decider stays
   /// nonisolated and trivially testable across actors.

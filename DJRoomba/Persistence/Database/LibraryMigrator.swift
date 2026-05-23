@@ -346,6 +346,142 @@ enum LibraryMigrator {
       }
     }
 
+    // v7: the genre **metro map** substrate (plans/genre-metro-map.md
+    // Phase 1). TWO new tables alongside `genre_edge`, both derived /
+    // wholesale-rebuilt — the v6 `genre_edge` table + `rebuildGenreGraph`
+    // are unchanged (kept as one input *channel* of the richer model). The
+    // genre name is `TEXT` and free-form (same posture as `genre_edge` —
+    // a genre is not an entity row), so neither table has a FK; the rebuild
+    // is one CTE-driven write transaction that re-derives both tables from
+    // the live data, exactly the posture of `rebuildGenreGraph`. Purely
+    // additive — v1–v6 stay frozen and an existing DB migrates
+    // non-destructively (both tables start empty until the first map
+    // rebuild populates them).
+    //
+    // `genre_node` carries the per-genre cardinalities + normalised weight
+    // (the size input for the layout pills; computed in SQL over
+    // `song.genre_names` + artist/album distinct counts). `genre_edge_evidence`
+    // is the multi-channel edge model — three Jaccards (artist / album /
+    // track), the playlist-cooccurrence channel from `genre_edge`
+    // normalised to [0,1], and the materialised support counts (used for
+    // the support floor + the future evidence panel). Canonical `a < b`
+    // half stored once (unlike `genre_edge`'s mirrored adjacency-list
+    // posture) — the layout/render pipeline reads the whole table once and
+    // folds in memory, so mirrored rows would be redundant.
+    migrator.registerMigration("v7.genreMap") { db in
+      try db.create(table: "genre_node") { t in
+        t.primaryKey("genre", .text)
+        t.column("track_count", .integer).notNull()
+        t.column("album_count", .integer).notNull()
+        t.column("artist_count", .integer).notNull()
+        // Normalised importance in [0,1], `log`-shaped and then divided by
+        // the max raw weight across all rows in the same rebuild — see
+        // `LibraryStore+GenreMap.rebuildGenreMap`.
+        t.column("weight", .double).notNull()
+      }
+      try db.create(table: "genre_edge_evidence") { t in
+        t.column("genre_a", .text).notNull()
+        t.column("genre_b", .text).notNull()
+        t.column("artist_overlap_jaccard", .double).notNull()
+        t.column("album_overlap_jaccard", .double).notNull()
+        t.column("track_overlap_jaccard", .double).notNull()
+        t.column("playlist_cooccur_weight", .double).notNull()
+        t.column("shared_artist_count", .integer).notNull()
+        t.column("shared_album_count", .integer).notNull()
+        t.column("shared_track_count", .integer).notNull()
+        t.column("total_weight", .double).notNull()
+        t.primaryKey(["genre_a", "genre_b"])
+      }
+    }
+
+    // v8: the materialised `song_genre` view + its three indexes —
+    // Phase-3 carry-forward from the Phase 2 gate (`plans/genre-metro-
+    // map.md` Phase 3 step 9). Lives in its own migration so existing
+    // local DBs (which already applied v7 during Phase 1) pick it up
+    // on the next launch without re-running v7. The table is rebuilt
+    // (DELETE + INSERT) by `LibraryStore.rebuildGenreMap` — same
+    // wholesale-rebuild posture as `genre_node` / `genre_edge_evidence`.
+    // Indexes on `(genre, song_id)`, `(genre, artist_key)`, and
+    // `(genre, album_key)` collapse both the strand-inference adjacency
+    // build cost AND the previously-6-8 s evidence-on-demand CTE
+    // latency — the queries now hit indexed columns instead of
+    // re-exploding `json_each(song.genre_names)` on every read.
+    migrator.registerMigration("v8.songGenreMaterialised") { db in
+      try db.create(table: "song_genre") { t in
+        t.column("song_id", .text).notNull()
+        t.column("genre", .text).notNull()
+        t.column("artist_key", .text)
+        t.column("album_key", .text)
+      }
+      try db.create(
+        index: "song_genre_genre_song_idx",
+        on: "song_genre",
+        columns: ["genre", "song_id"],
+      )
+      try db.create(
+        index: "song_genre_genre_artist_idx",
+        on: "song_genre",
+        columns: ["genre", "artist_key"],
+      )
+      try db.create(
+        index: "song_genre_genre_album_idx",
+        on: "song_genre",
+        columns: ["genre", "album_key"],
+      )
+    }
+
+    // v9: the genre **metro map** persistent state (`plans/genre-metro-
+    // map.md` Phase 6). Two new tables alongside the v7 substrate, both
+    // additive — v1–v8 stay frozen, and an existing DB migrates non-
+    // destructively (both tables start empty until the first Phase-6
+    // rebuild populates them). Re-imports persist enough state that the
+    // map feels like the user's stable atlas: positions, multi-resolution
+    // community ids, member strand ids, plus per-strand colour + label
+    // tokens.
+    //
+    // `genre_map_state` is keyed by genre (one row per persisted genre,
+    // matches `genre_node` cardinality). The community columns are
+    // **string** ids (not integers) because the matching pass mints
+    // fresh ids when no high-Jaccard predecessor exists; strings keep the
+    // freshly-minted ids visibly disjoint from the algorithmic small-int
+    // ids the layout pass uses inside a single rebuild. `strand_ids` is a
+    // JSON array of integer strand ids (the small-int identity the
+    // renderer uses); `revision` bumps wholesale every recompute (the
+    // builder fold the rebuild produces).
+    //
+    // `genre_map_strand` is the sibling table keyed by `strand_id`
+    // (stable across rebuilds via the Phase-6 strand-matching pass).
+    // Holds the persisted colour (`ARGB` integer, stable per strand
+    // identity) + the TF-IDF label tokens as a JSON array. The default
+    // render does not show the label; persisting the tokens means a
+    // strand's name doesn't change on every re-Analyze when its member
+    // set is unchanged.
+    //
+    // No FK on either table — same posture as `genre_node` /
+    // `genre_edge_evidence` (genres are denormalised free text, strand
+    // ids are algorithmic identifiers minted by the inference pass).
+    // The wholesale rebuild re-derives both tables in a single
+    // transaction; row-by-row consistency is structural, not enforced.
+    migrator.registerMigration("v9.genreMapState") { db in
+      try db.create(table: "genre_map_state") { t in
+        t.primaryKey("genre", .text)
+        t.column("x", .double).notNull()
+        t.column("y", .double).notNull()
+        t.column("community_coarse", .text).notNull()
+        t.column("community_medium", .text).notNull()
+        t.column("community_fine", .text).notNull()
+        t.column("strand_ids", .text).notNull()
+        t.column("updated_at", .integer).notNull()
+        t.column("revision", .integer).notNull()
+      }
+      try db.create(table: "genre_map_strand") { t in
+        t.primaryKey("strand_id", .text)
+        t.column("colour", .integer).notNull()
+        t.column("label_tokens", .text).notNull()
+        t.column("revision", .integer).notNull()
+      }
+    }
+
     return migrator
   }
 }

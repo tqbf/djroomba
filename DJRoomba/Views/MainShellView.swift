@@ -213,20 +213,18 @@ struct MainShellView: View {
         .help("Refresh playlists (⌘R)")
         .disabled(controller.isLibraryBusy)
       }
-      // The discoverable reveal affordance for the genre-graph panel. The
-      // panel's own header chevron collapses it, but once collapsed a
-      // faint chevron in a slim bottom bar is easy to miss — a toolbar
-      // toggle is the discoverable, always-present control (mirroring the
-      // inspector toggle below, the native Xcode/Numbers idiom). Bound to
-      // the SAME `@SceneStorage` key as `GenreGraphPanel.collapsed`, so the
-      // two controls stay in sync automatically within the scene.
+      // Genre Tree — the default genre visualization, docked below the
+      // track list in the detail pane (replaces the older
+      // `GenreGraphPanel` ForceGraph). The button toggles the pane's
+      // collapse, mirroring the pane's own header chevron; both drive
+      // `controller.genreTreePaneCollapsed`.
       ToolbarItem(placement: .automatic) {
         Button {
-          genreGraphCollapsed.toggle()
+          controller.genreTreePaneCollapsed.toggle()
         } label: {
-          Label("Genre Graph", systemImage: "point.3.connected.trianglepath.dotted")
+          Label("Genre Map", systemImage: "map")
         }
-        .help(genreGraphCollapsed ? "Show the genre graph" : "Hide the genre graph")
+        .help(controller.genreTreePaneCollapsed ? "Show the genre map" : "Hide the genre map")
       }
       // Standard macOS inspector toggle placement (trailing edge of the
       // toolbar, the side the panel slides from) — the native idiom
@@ -251,6 +249,10 @@ struct MainShellView: View {
     .sheet(isPresented: Bindable(controller).catalogSearchPresented) {
       CatalogSearchSheet(isPresented: Bindable(controller).catalogSearchPresented)
     }
+    // The genre tree (`plans/son-of-genre-map.md`) is no longer a
+    // sheet — it lives docked below the track list in `DetailPaneView`
+    // (per user direction 2026-05-22). No presentation wiring needed
+    // here; the pane is part of the detail column.
     // Document import/export (plans/snapshot-export-import.md). The
     // exporter's bytes are built off-main *before* its flag flips true
     // (`beginSnapshotExport`), so the document is always ready here.
@@ -282,11 +284,6 @@ struct MainShellView: View {
   /// readiness surface, not a primary feature). Per-scene persisted so a
   /// user who opens it keeps it open across relaunch.
   @SceneStorage("inspectorPresented") private var inspectorPresented = false
-  /// Mirror of `GenreGraphPanel`'s collapse state — SAME `@SceneStorage`
-  /// key, so the toolbar toggle and the panel's header chevron drive one
-  /// shared value (SwiftUI keeps same-key scene storage in sync within the
-  /// scene). Default `false` (expanded) must match the panel's default.
-  @SceneStorage("genreGraphPanelCollapsed") private var genreGraphCollapsed = false
 
   @State private var columnVisibility = NavigationSplitViewVisibility.automatic
 

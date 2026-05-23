@@ -16,7 +16,7 @@ struct TrackTableView: View {
       if tracks.isEmpty {
         ContentUnavailableView.search(text: trackFilter)
       } else {
-        Table(tracks, selection: $selection, sortOrder: $sortOrder) {
+        Table(of: TrackRow.self, selection: $selection, sortOrder: $sortOrder) {
           TableColumn("#", value: \.position) { row in
             Text(row.position, format: .number)
               .font(.body.monospacedDigit())
@@ -36,14 +36,14 @@ struct TrackTableView: View {
                   .accessibilityLabel("Explicit")
               }
             }
-            // Drag a track onto a "My Playlists" sidebar row to
-            // add it (native macOS drag-into-playlist). The
-            // context-menu "Add to Playlist ▸" is the always-
-            // reachable equivalent.
-            .draggable(SongDragItem(songID: row.songID)) {
-              Label(row.title, systemImage: "music.note")
-                .padding(6)
-            }
+            // NOTE: the drag source is the **row** (the `rows:` builder
+            // below), NOT this cell. A per-cell `.draggable` installs a
+            // drag gesture that competes with the table's row gesture, so
+            // a plain click on the title never selected the row (the
+            // computer-use finding) — selection only worked from other
+            // columns. Row-level `.draggable` integrates with the table's
+            // own gesture: a click selects, a press-drag drags, and the
+            // drag carries the whole multi-selection.
           }
 
           TableColumn("Artist", value: \.artistName) { row in
@@ -85,6 +85,23 @@ struct TrackTableView: View {
               .lineLimit(1)
           }
           .width(100)
+        } rows: {
+          // Explicit `rows:` builder so the drag source is the ROW, not a
+          // cell (see the Title column note). `.draggable` on `TableRow`
+          // plays nicely with the table's selection gesture — click
+          // selects, press-drag drags — and a drag of any selected row
+          // carries a `SongDragItem` for EVERY selected row, so dragging
+          // a multi-selection onto a "My Playlists" sidebar row adds them
+          // all (the existing `.dropDestination(for: SongDragItem.self)`
+          // already maps `[SongDragItem]`). The system uses the native
+          // row snapshot as the drag image (more Finder/Music-like than
+          // the old custom `music.note` label, which is intentionally
+          // dropped). `tracks` is the already filtered+sorted
+          // `@State` cache, so this `ForEach` adds no per-`body` work.
+          ForEach(tracks) { row in
+            TableRow(row)
+              .draggable(SongDragItem(songID: row.songID))
+          }
         }
         // Native macOS track-list treatment (Music.app / Finder):
         // flat full-width alternating row striping that fills the
@@ -127,7 +144,10 @@ struct TrackTableView: View {
   // MARK: Private
 
   @Environment(MusicController.self) private var controller
-  @State private var selection: TrackRow.ID?
+  /// A `Set` (not a single optional) so the native `Table` gives
+  /// shift-click range + ⌘-click point multi-select for free — what the
+  /// "Add to Genre ▸" / "Add to Playlist ▸" context actions operate on.
+  @State private var selection = Set<TrackRow.ID>()
   @State private var trackFilter = ""
   /// Native column-header sorting. Defaults to playlist order (`position`),
   /// so an unsorted table looks exactly as before; clicking "Plays" /

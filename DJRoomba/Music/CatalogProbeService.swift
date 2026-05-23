@@ -34,8 +34,6 @@ import MusicKit
 @MainActor
 final class CatalogProbeService {
 
-  // MARK: Internal
-
   /// The outcome of a single search probe. `verdict` is the human-readable
   /// diagnostic for the **search half** only (the controller appends the
   /// playback-half tail). `firstSong` is the first catalog `Song` returned on
@@ -57,37 +55,37 @@ final class CatalogProbeService {
       let response = try await request.response()
       guard let first = response.songs.first else {
         let verdict = """
-        ⚠️ Catalog request SUCCEEDED but returned 0 songs.
+          ⚠️ Catalog request SUCCEEDED but returned 0 songs.
 
-        No authorization error, so the MusicKit App Service is likely live — \
-        but a well-known track matching nothing is unusual. Check the \
-        Apple Account's storefront / region.
+          No authorization error, so the MusicKit App Service is likely live — \
+          but a well-known track matching nothing is unusual. Check the \
+          Apple Account's storefront / region.
 
-        (query: “\(term)”)
-        """
+          (query: “\(term)”)
+          """
         return ProbeResult(verdict: verdict, firstSong: nil)
       }
       let verdict = """
-      ✅ Catalog access OK — the MusicKit App Service is live for this App ID.
+        ✅ Catalog access OK — the MusicKit App Service is live for this App ID.
 
-      MusicCatalogSearchRequest returned \(response.songs.count) song(s).
-      First: “\(first.title)” — \(first.artistName)
-      Catalog id: \(first.id.rawValue) (globally stable)
-      """
+        MusicCatalogSearchRequest returned \(response.songs.count) song(s).
+        First: “\(first.title)” — \(first.artistName)
+        Catalog id: \(first.id.rawValue) (globally stable)
+        """
       return ProbeResult(verdict: verdict, firstSong: first)
     } catch {
       let verdict = """
-      ❌ Catalog request FAILED.
+        ❌ Catalog request FAILED.
 
-      \(error.localizedDescription)
+        \(error.localizedDescription)
 
-      (\(type(of: error)))
+        (\(type(of: error)))
 
-      If this reads as a permissions / “not authorized” / developer-token \
-      error, the MusicKit App Service is probably not enabled — or not yet \
-      propagated — on App ID org.sockpuppet.djroomba (Team KK7E9G89GW). \
-      Recheck the portal step, then re-run this probe.
-      """
+        If this reads as a permissions / “not authorized” / developer-token \
+        error, the MusicKit App Service is probably not enabled — or not yet \
+        propagated — on App ID org.sockpuppet.djroomba (Team KK7E9G89GW). \
+        Recheck the portal step, then re-run this probe.
+        """
       return ProbeResult(verdict: verdict, firstSong: nil)
     }
   }

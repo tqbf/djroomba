@@ -42,6 +42,21 @@ struct PlaylistHeaderView: View {
           .controlSize(.large)
           .disabled(detail.isEmpty || !controller.canAttemptPlayback)
 
+          // Rename the browsed genre. Header-level (same tier as Play),
+          // not buried in a context menu — discoverable, and the natural
+          // home for "act on this genre". Only a genre is renamable;
+          // renaming onto an existing name merges (store-side).
+          if detail.isGenre {
+            Button {
+              controller.beginRenameBrowsedGenre()
+            } label: {
+              Label("Rename", systemImage: "pencil")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .help("Rename this genre (renaming onto an existing genre merges them)")
+          }
+
           if let reason = controller.playbackUnavailableReason {
             Text(reason)
               .font(.caption)
