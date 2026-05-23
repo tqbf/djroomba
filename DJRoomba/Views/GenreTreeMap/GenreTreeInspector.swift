@@ -19,13 +19,14 @@ enum GenreTreeInspectorSelection: Equatable {
 /// (precedent: `GenreMapPanel`'s metro inspector). Three modes:
 ///
 /// - **Empty** — no genre selected. Hint card explains the click +
-///   shift-click + listen affordances.
+///   shift-click affordances.
 /// - **Single genre** — header (genre name + community colour swatch +
-///   transferness% + track/album/artist counts) + a **Listen** action
-///   that starts playback on a transient queue + Save-as-Playlist
-///   follow-up + 1-hop neighbours (click-to-navigate) + 2-hop
-///   neighbours read-only + top artists + top albums (paginated via
-///   the existing `LibraryStore+GenreMap` reads).
+///   transferness% + track/album/artist counts) + 1-hop neighbours
+///   (click-to-navigate) + 2-hop neighbours read-only + top artists +
+///   top albums (paginated via the existing `LibraryStore+GenreMap`
+///   reads). The inspector is read-only discovery — to *play* a genre
+///   the user selects it in the track pane above the map, so there is
+///   deliberately no play affordance here.
 /// - **Compare** — Yen-k shortest paths between the two genres
 ///   (re-uses `GenreMapDiscovery.kShortestPaths`) + shared
 ///   artists/albums/tracks (re-uses `LibraryStore.genreMapShared*`).
@@ -67,15 +68,6 @@ struct GenreTreeInspector: View {
   /// Tap a neighbour name in the single-genre 1-hop list ⇒ jump
   /// focus to that genre. Forwarded from the panel.
   var onSelectNeighbour: (String) -> Void
-  /// Tap "Listen" in the header ⇒ start playback on a transient
-  /// queue (the picker-based deterministic top-N).
-  var onListen: (() -> Void)?
-  /// Tap "Save as Playlist" in the header (or the post-listen affordance) ⇒
-  /// create a "Genre Tree: <name>" app playlist with the picked tracks.
-  var onSaveAsPlaylist: (() -> Void)?
-  /// Disabled state for Listen / Save buttons — true while the action
-  /// is in flight. Lets the panel coalesce repeated clicks.
-  var isListenInFlight: Bool
   /// Tap "Done" in the compare card ⇒ leave compare mode, return to
   /// the previous single-genre focus.
   var onExitCompare: (() -> Void)?
@@ -151,7 +143,7 @@ struct GenreTreeInspector: View {
           .foregroundStyle(.secondary)
       }
       Text(
-        "Click a genre to see its neighbours and representative artists. Shift-click a second genre to compare. Click Listen to start playing a deterministic top-N selection."
+        "Click a genre to see its neighbours and representative artists. Shift-click a second genre to compare."
       )
       .font(.callout)
       .foregroundStyle(.primary)
@@ -161,37 +153,6 @@ struct GenreTreeInspector: View {
       RoundedRectangle(cornerRadius: 8, style: .continuous)
         .fill(Color.primary.opacity(0.04))
     )
-  }
-
-  private var listenActions: some View {
-    HStack(spacing: 8) {
-      Button {
-        onListen?()
-      } label: {
-        Label("Listen", systemImage: "play.fill")
-      }
-      .buttonStyle(.borderedProminent)
-      .controlSize(.small)
-      .disabled(onListen == nil || isListenInFlight)
-      .help("Start playing a top-N selection from this genre")
-
-      Button {
-        onSaveAsPlaylist?()
-      } label: {
-        Label("Save as Playlist", systemImage: "square.and.arrow.down")
-      }
-      .buttonStyle(.bordered)
-      .controlSize(.small)
-      .disabled(onSaveAsPlaylist == nil || isListenInFlight)
-      .help("Save this genre's top-N selection as a new app playlist")
-
-      if isListenInFlight {
-        ProgressView()
-          .controlSize(.small)
-      }
-      Spacer()
-    }
-    .padding(.top, 2)
   }
 
   @ViewBuilder
@@ -216,7 +177,6 @@ struct GenreTreeInspector: View {
       .font(.caption)
       .foregroundStyle(.secondary)
     }
-    listenActions
     Divider()
     oneHopSection(node: node, hullColour: hullColour)
     if !twoHopNeighbours.isEmpty {

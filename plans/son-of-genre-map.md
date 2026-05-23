@@ -2,6 +2,17 @@
 
 ## Ship status — 2026-05-21
 
+> **Post-ship layout pass (2026-05-22)** — see the top PROGRESS.md
+> entry. From live feedback ("it's a map, let it breathe", "you're
+> laying out a circle where you want a wide ellipse"): the circular
+> fans + radial-focus rings now stretch into **wide ellipses**
+> (`horizontalStretch`, applied at the `GenreTreeService` boundary; the
+> pure layout stays circular + unit-tested), fan radius grew adaptive to
+> child count with depth-flat sibling spacing, "Save as Playlist" and
+> the "Fit" affordance were removed, and the default open zoom frames a
+> trunk + its neighbourhood. Standing rule: see
+> `~/.claude/.../memory/genre-tree-wide-ellipse.md`.
+
 **Programme complete on `feature/genre-tree-map`. Neither branch
 merged to `main`.** Phases A through E all landed on the same day
 (2026-05-21) as sequenced commits on top of `feature/genre-metro-map`.

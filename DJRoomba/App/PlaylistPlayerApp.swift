@@ -152,7 +152,7 @@ struct PlaylistPlayerApp: App {
         // a sheet). Setting `collapsed = false` expands it; the pane's
         // own header chevron + the toolbar button toggle the same
         // shared `genreTreePaneCollapsed` flag.
-        Button("Show Genre Tree") {
+        Button("Show Genre Map") {
           controller.genreTreePaneCollapsed = false
         }
         .keyboardShortcut("a", modifiers: [.command, .option, .shift])
@@ -212,7 +212,7 @@ struct PlaylistPlayerApp: App {
         // facing "Show Genre Tree…" command auto-rebuilds on demand;
         // this entry is a developer escape hatch for re-running the
         // pipeline without leaving the menu.
-        Button("Re-Analyze Genre Tree") {
+        Button("Re-Analyze Genre Map") {
           Task { await controller.analyzeGenreTree() }
         }
         // Trunk-selection metric A/B — a development comparison knob,

@@ -70,12 +70,14 @@ enum GenreTreeLayout {
     // MARK: Lifecycle
 
     init(
-      worldSide: CGFloat = 7000,
-      diagonalPadding: CGFloat = 500,
+      worldSide: CGFloat = 14000,
+      diagonalPadding: CGFloat = 1100,
       branchArcWidthDegrees: Double = 120,
-      depthArcShrink: Double = 0.5,
-      depth1Radius: CGFloat = 520,
+      depthArcShrink: Double = 0.65,
+      depth1Radius: CGFloat = 700,
       depthRadiusShrink: CGFloat = 0.65,
+      minChildSpacing: CGFloat = 360,
+      horizontalStretch: CGFloat = 1.0,
       controlPointFraction: CGFloat = 0.45,
       alternateSides: Bool = true,
     ) {
@@ -85,16 +87,19 @@ enum GenreTreeLayout {
       self.depthArcShrink = depthArcShrink
       self.depth1Radius = depth1Radius
       self.depthRadiusShrink = depthRadiusShrink
+      self.minChildSpacing = minChildSpacing
+      self.horizontalStretch = horizontalStretch
       self.controlPointFraction = controlPointFraction
       self.alternateSides = alternateSides
     }
 
     // MARK: Internal
 
-    /// Canvas side length (square). Defaults match the metro plan's
-    /// Phase-3-gate widening (`5000`). The map is **explicitly larger
-    /// than any reasonable viewport** — the user pans / zooms /
-    /// scrolls to discover.
+    /// Canvas side length (square). **Deliberately huge** — the map is
+    /// larger than any reasonable viewport and the user pans / zooms /
+    /// scrolls to discover (the standing "scrolling is fine" directive).
+    /// Widened from the metro-era `7000` to `14000` so adjacent trunk
+    /// fans get room to breathe instead of colliding near the diagonal.
     var worldSide: CGFloat
     /// Inset from the canvas corners along the diagonal — keeps the
     /// first / last trunks from touching the world edge.
@@ -106,13 +111,41 @@ enum GenreTreeLayout {
     /// Multiplicative factor applied to the arc width on each recursion
     /// step. Default `0.5` ⇒ depth-1 120°, depth-2 60°, depth-3 30°.
     var depthArcShrink: Double
-    /// Distance from a trunk to its depth-1 branches.
+    /// **Floor** distance from a trunk to its depth-1 branches. The
+    /// effective radius is `max(depth1Radius, requiredForSpacing)` —
+    /// see `adaptiveRadius`. A bushy parent pushes its fan further out
+    /// so the children never crowd; a sparse parent keeps this floor.
     var depth1Radius: CGFloat
     /// Multiplicative factor applied to the radius on each recursion
     /// step. Default `0.7` ⇒ depth-2 children sit at `0.7 × depth1Radius`
     /// from their depth-1 parent. Slight shrink keeps the recursion
     /// from outrunning the canvas while still spreading.
     var depthRadiusShrink: CGFloat
+    /// Minimum world-space gap to leave between two adjacent siblings on
+    /// a fan. The arc geometry needs the fan radius to grow with the
+    /// child count so a 12-child trunk doesn't pack its branches on top
+    /// of each other (the "TOO TIGHT" failure mode); `adaptiveRadius`
+    /// derives the radius that yields this gap and uses the larger of it
+    /// and the depth's base radius. Held **flat across depths** — a deep
+    /// genre label is the same kind of long string as a shallow one, so
+    /// shrinking the gap with depth (an earlier mistake) collapsed deep
+    /// fans back into a pile.
+    var minChildSpacing: CGFloat
+    /// Horizontal stretch applied to the whole layout as the very last
+    /// step. The fan geometry is computed in **circular** space (clean
+    /// trig, deterministic, unit-tested), then every x-coordinate is
+    /// multiplied by this factor — turning each circular fan into a
+    /// **wide ellipse** and the 45° trunk diagonal into a shallow one.
+    /// The docked pane is wide and short, so a circle wastes the
+    /// horizontal room and overflows vertically (and near-vertical
+    /// sibling stacks are exactly what collide); the wide ellipse fills
+    /// the space and pulls those stacks apart sideways. Default `1.0`
+    /// keeps the pure-geometry layout circular (so the geometry tests
+    /// describe un-stretched coordinates); the view-facing
+    /// `GenreTreeService` supplies the real wide value, because "how
+    /// wide is our canvas" is a presentation concern, not a property of
+    /// the tree.
+    var horizontalStretch: CGFloat
     /// Cubic-Bezier control-point distance, as a fraction of the
     /// parent → child line length. `0.45` ≈ a soft S-curve that hints
     /// the radial direction at both endpoints without spiking.
@@ -216,21 +249,49 @@ enum GenreTreeLayout {
       )
     }
 
-    // World bounds = the canvas (the trees fit inside the configured
-    // worldSide by construction). The renderer pans / zooms over this
-    // rect; "scrolling is fine" — we don't try to fit pills tighter.
+    // Wide-ellipse pass: the fan geometry above is circular; stretch
+    // every x-coordinate to fill the wide / short pane (see
+    // `Configuration.horizontalStretch`). A horizontal affine scale maps
+    // circles to wide ellipses and preserves the Bézier curves, so the
+    // edges still meet their (stretched) endpoints. `1.0` is a no-op.
+    let stretch = configuration.horizontalStretch
+    let stretchedNodes = stretch == 1.0
+      ? placed
+      : placed.map { node in
+        var node = node
+        node.position = stretchX(node.position, by: stretch)
+        if let edge = node.edge {
+          node.edge = BezierCurve(
+            start: stretchX(edge.start, by: stretch),
+            control1: stretchX(edge.control1, by: stretch),
+            control2: stretchX(edge.control2, by: stretch),
+            end: stretchX(edge.end, by: stretch),
+          )
+        }
+        return node
+      }
+
+    // World bounds = the (stretched) canvas. The renderer pans / zooms
+    // over this rect; "scrolling is fine" — we don't try to fit pills
+    // tighter.
     let bounds = CGRect(
       x: 0,
       y: 0,
-      width: configuration.worldSide,
+      width: configuration.worldSide * stretch,
       height: configuration.worldSide,
     )
     return Output(
-      placedNodes: placed,
+      placedNodes: stretchedNodes,
       worldBounds: bounds,
-      diagonalStart: diagonalStart,
-      diagonalEnd: diagonalEnd,
+      diagonalStart: stretchX(diagonalStart, by: stretch),
+      diagonalEnd: stretchX(diagonalEnd, by: stretch),
     )
+  }
+
+  /// Multiply a point's x by `factor`, leaving y untouched — the
+  /// horizontal half of the wide-ellipse affine scale.
+  static func stretchX(_ point: CGPoint, by factor: CGFloat) -> CGPoint {
+    CGPoint(x: point.x * factor, y: point.y)
   }
 
   /// Position the `n` children around their parent's local 12 o'clock
@@ -350,6 +411,36 @@ enum GenreTreeLayout {
     return configuration.depth1Radius * pow(configuration.depthRadiusShrink, CGFloat(depth))
   }
 
+  /// The radius a parent at `depth` should fan its `childCount` children
+  /// out to. This is the breathing-room fix for the "TOO TIGHT" failure
+  /// mode: a fan of `n` children spread over `arcWidth` only has
+  /// `arcWidth · radius / (n − 1)` of arc length between neighbours, so a
+  /// trunk with a dozen branches packed them on top of each other at the
+  /// old fixed radius. We instead solve for the radius that leaves at
+  /// least `minChildSpacing` (shrunk per depth, since deeper pills are
+  /// smaller) between adjacent siblings, and take the larger of that and
+  /// the depth's base radius so sparse fans keep their tidy floor.
+  ///
+  /// `childCount ≤ 1` ⇒ no spacing constraint, return the base radius
+  /// (a lone child sits on the bisector at the floor distance).
+  static func adaptiveRadius(
+    depth: Int,
+    childCount: Int,
+    configuration: Configuration,
+  ) -> CGFloat {
+    let base = childRadius(depth: depth, configuration: configuration)
+    guard childCount > 1 else { return base }
+    let arcWidth = childArcWidth(depth: depth, configuration: configuration)
+    guard arcWidth > 0 else { return base }
+    // Flat spacing across depths (see `minChildSpacing`): a deep label
+    // is just as long as a shallow one. Required radius = the radius at
+    // which `childCount` equally-spaced points on the arc sit
+    // `minChildSpacing` apart (small-angle chord ≈ arc length / count).
+    let required = configuration.minChildSpacing
+      * CGFloat(childCount - 1) / CGFloat(arcWidth)
+    return max(base, required)
+  }
+
   // MARK: Private
 
   /// Which side of the canvas diagonal a trunk's fan occupies. The
@@ -425,7 +516,11 @@ enum GenreTreeLayout {
       childCount: children.count,
       parentBisector: parentBisector,
       arcWidthRadians: arcWidthRadians,
-      radius: childRadius(depth: depth, configuration: configuration),
+      radius: adaptiveRadius(
+        depth: depth,
+        childCount: children.count,
+        configuration: configuration,
+      ),
     )
     for (index, child) in children.enumerated() {
       let childPosition = positions[index]

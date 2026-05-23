@@ -455,6 +455,83 @@ struct GenreTreeLayoutTests {
     #expect(abs(distance - 252) < 1.0e-6)
   }
 
+  /// A bushy fan pushes its radius out so siblings keep at least
+  /// `minChildSpacing` between them — the breathing-room fix for the
+  /// "TOO TIGHT" pile-up. A 12-child fan over the default 120° arc must
+  /// land further from the trunk than the `depth1Radius` floor.
+  @Test
+  func `a bushy fan grows its radius to keep siblings apart`() {
+    let spacing: CGFloat = 360
+    let configuration = GenreTreeLayout.Configuration(
+      depth1Radius: 500,
+      minChildSpacing: spacing,
+    )
+    let arc = 2.0 * .pi / 3.0 // 120° default
+    // 12 children → required = 360 * 11 / (2π/3) ≈ 1890, well over the
+    // 500 floor, so the floor must NOT win.
+    let radius12 = GenreTreeLayout.adaptiveRadius(
+      depth: 0,
+      childCount: 12,
+      configuration: configuration,
+    )
+    #expect(radius12 > 500)
+    #expect(abs(Double(radius12) - spacing * 11 / arc) < 1.0e-6)
+    // A 2-child fan needs only `spacing` of arc, far under the floor, so
+    // the floor wins and the fan stays tidy.
+    let radius2 = GenreTreeLayout.adaptiveRadius(
+      depth: 0,
+      childCount: 2,
+      configuration: configuration,
+    )
+    #expect(radius2 == 500)
+  }
+
+  /// Sibling spacing is held flat across depths — the same number of
+  /// equally-weighted children gets the same required radius at depth 1
+  /// as at depth 3 (modulo the arc, which the call passes implicitly via
+  /// `depth`). Pins the regression where deep fans collapsed because the
+  /// gap shrank with depth.
+  @Test
+  func `sibling spacing does not collapse with depth`() {
+    let configuration = GenreTreeLayout.Configuration(minChildSpacing: 360)
+    // For a fixed child count, the required radius scales as
+    // `spacing / arcWidth`; arc shrinks with depth, so the radius should
+    // GROW with depth (narrower arc ⇒ push further to keep the gap), not
+    // shrink. A collapsing gap would invert this.
+    let r1 = GenreTreeLayout.adaptiveRadius(depth: 1, childCount: 5, configuration: configuration)
+    let r2 = GenreTreeLayout.adaptiveRadius(depth: 2, childCount: 5, configuration: configuration)
+    #expect(r2 > r1)
+  }
+
+  /// The wide-ellipse stretch scales x and leaves y alone, so a circular
+  /// fan becomes a horizontally-wide ellipse. Same model, stretch 2 vs
+  /// 1: every node's x doubles, y is identical, and the canvas widens.
+  @Test
+  func `horizontal stretch widens x and preserves y`() {
+    let circular = GenreTreeLayout.Configuration(
+      worldSide: 5000,
+      diagonalPadding: 360,
+      horizontalStretch: 1,
+    )
+    let wide = GenreTreeLayout.Configuration(
+      worldSide: 5000,
+      diagonalPadding: 360,
+      horizontalStretch: 2,
+    )
+    let circularOutput = GenreTreeLayout.layout(model: Self.singleTrunkModel(), configuration: circular)
+    let wideOutput = GenreTreeLayout.layout(model: Self.singleTrunkModel(), configuration: wide)
+    #expect(wideOutput.worldBounds.width == circularOutput.worldBounds.width * 2)
+    #expect(wideOutput.worldBounds.height == circularOutput.worldBounds.height)
+    for circularNode in circularOutput.placedNodes {
+      let wideNode = Self.placed(wideOutput, circularNode.genre.name)
+      #expect(abs(Double(wideNode.position.x) - Double(circularNode.position.x) * 2) < 1.0e-6)
+      #expect(abs(Double(wideNode.position.y) - Double(circularNode.position.y)) < 1.0e-6)
+    }
+    // The diagonal endpoints stretch with everything else.
+    #expect(wideOutput.diagonalEnd.x == circularOutput.diagonalEnd.x * 2)
+    #expect(wideOutput.diagonalEnd.y == circularOutput.diagonalEnd.y)
+  }
+
   /// Layout is deterministic — same input twice ⇒ identical output.
   @Test
   func `layout is deterministic across runs`() {

@@ -82,6 +82,7 @@ enum GenreTreeRadialPlan {
       selectedOpacity: Double = 1.0,
       canvasInset: CGFloat = 40,
       startingAngleRadians: Double = -.pi / 2.0,
+      horizontalStretch: CGFloat = 1.0,
     ) {
       self.r1 = r1
       self.r2 = r2
@@ -91,6 +92,7 @@ enum GenreTreeRadialPlan {
       self.selectedOpacity = selectedOpacity
       self.canvasInset = canvasInset
       self.startingAngleRadians = startingAngleRadians
+      self.horizontalStretch = horizontalStretch
     }
 
     // MARK: Internal
@@ -117,6 +119,14 @@ enum GenreTreeRadialPlan {
     /// puts the first slot at the top (12 o'clock); subsequent slots
     /// distribute clockwise.
     var startingAngleRadians: Double
+    /// Horizontal stretch turning the focus rings from circles into
+    /// **wide ellipses** — the same treatment the trunk-tree layout
+    /// gets (`GenreTreeLayout.Configuration.horizontalStretch`), for the
+    /// same reason: the docked pane is wide and short, so a circular
+    /// ring crowds and a wide ellipse fills the room. `1.0` keeps the
+    /// rings circular (the geometry tests describe circles); the panel
+    /// passes the live wide value.
+    var horizontalStretch: CGFloat
   }
 
   /// Per-genre placement target. The view layer reads `position` for
@@ -210,6 +220,7 @@ enum GenreTreeRadialPlan {
       radius: configuration.r1,
       count: oneHop.count,
       startingAngle: configuration.startingAngleRadians,
+      horizontalStretch: configuration.horizontalStretch,
     )
     for (index, neighbour) in oneHop.enumerated() {
       let clamped = clamp(
@@ -231,6 +242,7 @@ enum GenreTreeRadialPlan {
       radius: configuration.r2,
       count: twoHopRaw.count,
       startingAngle: configuration.startingAngleRadians,
+      horizontalStretch: configuration.horizontalStretch,
     )
     for (index, neighbour) in twoHopRaw.enumerated() {
       let clamped = clamp(
@@ -278,23 +290,23 @@ enum GenreTreeRadialPlan {
     radius: CGFloat,
     count: Int,
     startingAngle: Double,
+    horizontalStretch: CGFloat = 1.0,
   ) -> [CGPoint] {
     guard count > 0 else { return [] }
+    /// Elliptical ring: the x half-axis is stretched, the y half-axis is
+    /// the plain radius (a circle when `horizontalStretch == 1`).
+    func point(at angle: Double) -> CGPoint {
+      CGPoint(
+        x: centre.x + radius * horizontalStretch * CGFloat(cos(angle)),
+        y: centre.y + radius * CGFloat(sin(angle)),
+      )
+    }
     if count == 1 {
-      return [
-        CGPoint(
-          x: centre.x + radius * CGFloat(cos(startingAngle)),
-          y: centre.y + radius * CGFloat(sin(startingAngle)),
-        )
-      ]
+      return [point(at: startingAngle)]
     }
     let step = (2.0 * .pi) / Double(count)
     return (0 ..< count).map { index in
-      let angle = startingAngle + Double(index) * step
-      return CGPoint(
-        x: centre.x + radius * CGFloat(cos(angle)),
-        y: centre.y + radius * CGFloat(sin(angle)),
-      )
+      point(at: startingAngle + Double(index) * step)
     }
   }
 

@@ -46,7 +46,7 @@ struct GenreTreePaneResizeHandle: View {
       }
     }
     .accessibilityElement()
-    .accessibilityLabel("Resize genre tree")
+    .accessibilityLabel("Resize genre map")
     .accessibilityValue("\(Int(height)) points tall")
     .accessibilityAdjustableAction { direction in
       switch direction {

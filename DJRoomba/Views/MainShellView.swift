@@ -222,9 +222,9 @@ struct MainShellView: View {
         Button {
           controller.genreTreePaneCollapsed.toggle()
         } label: {
-          Label("Genre Tree", systemImage: "arrow.triangle.branch")
+          Label("Genre Map", systemImage: "map")
         }
-        .help(controller.genreTreePaneCollapsed ? "Show the genre tree" : "Hide the genre tree")
+        .help(controller.genreTreePaneCollapsed ? "Show the genre map" : "Hide the genre map")
       }
       // Standard macOS inspector toggle placement (trailing edge of the
       // toolbar, the side the panel slides from) — the native idiom

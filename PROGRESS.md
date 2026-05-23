@@ -5,6 +5,90 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-22 — Genre Tree Map — "it's a map, let it breathe" layout pass
+
+**Branch `feature/genre-tree-map`.** Live-feedback pass on the tree
+view from an annotated screenshot ("TOO TIGHT", "USE THIS SPACE", "LET
+IT BREATHE", "DON'T FEAR THE SCROLL BAR", "lose this", "cursed") plus
+the steer **"you're laying out a circle where you want a wide
+ellipse"** and the follow-up **"strike the Listen button — I'll play a
+genre from the track pane above."** All verified live (signed build,
+computer-use) on the real 84-genre library. `make build` + `swift test`
+(**354 / 51**) + `swiftformat --lint` + `swiftlint --strict` all clean.
+
+### What changed
+
+1. **Breathing room — adaptive fan radius (`GenreTreeLayout`).** The
+   pile-ups were intra-fan: a bushy trunk fanned N branches over a
+   fixed-radius arc, so a 12-child fan packed branches on top of each
+   other. New `adaptiveRadius(depth:childCount:)` solves for the radius
+   that leaves `minChildSpacing` between adjacent siblings and takes the
+   larger of it and the depth's base radius. Sibling spacing is held
+   **flat across depths** — the earlier `0.65^depth` shrink collapsed
+   deep fans (hip-hop sub-tree) back into a pile because a deep label is
+   just as long as a shallow one. depthArcShrink 0.5 → 0.65 (wider deep
+   arcs, so deep siblings stop stacking near-vertically).
+2. **Wide ellipse (the headline fix).** The docked pane is wide + short,
+   but each trunk's fan was a *circle* — overflowing vertically, wasting
+   horizontal room, and the near-vertical sibling stacks were exactly
+   what overlapped. New `Configuration.horizontalStretch`: the fan
+   geometry is computed in circular space (clean trig, deterministic,
+   unit-tested) then every x-coordinate is scaled at the end, turning
+   circles into wide ellipses and the 45° trunk diagonal into a shallow
+   one. Default `1.0` keeps the pure layout circular (geometry tests
+   describe circles); `GenreTreeService.canvasStretch = 2.0` supplies
+   the live value at the view boundary — "how wide is our canvas" is a
+   presentation concern, not a property of the tree. Same treatment
+   applied to the radial-focus rings (`GenreTreeRadialPlan`), and the
+   focus zoom now frames the **inner (1-hop) ring against pane height**
+   (was the outer ring against the shorter axis), so a high-degree
+   genre's neighbours are readable instead of crushed to a dot.
+3. **Removed both inspector action buttons** — first "Save as Playlist"
+   ("lose this"), then "Listen" ("strike that — I'll play from the track
+   pane above"). The inspector is now **read-only discovery** (header +
+   neighbours + representative artists/albums). The whole listen chain
+   came out end-to-end: the buttons, the panel wiring (`onListen` /
+   `triggerListen` / `isListenInFlight`), `MusicController.listenToGenre`
+   + `saveListenAsAppPlaylist`, and the now-orphaned
+   `GenreTreeListenPicker` module **+ its 11 tests** (the −11 / −1 suite
+   from the count above).
+4. **Lost the "Fit" affordance** ("cursed") — Fit button + ⌘9 +
+   `fitToView` + `fitRequested` + the fit branch of `baseTransform`
+   removed. Fit directly contradicts the "scrolling is fine / the map
+   is bigger than any viewport" directive (it just stacks pills). The
+   default open zoom is now `0.28` (frames a trunk + its neighbourhood)
+   instead of a lone pill at 100 %; ⌘0 "Actual Size" still snaps to 100 %.
+5. **Direct connections dramatically weighted in focus mode** (follow-up
+   feedback: "direct connections from the highlighted genre need to be
+   dramatically more visually weighted; they all blend together").
+   New `FocusSpokeLayer` draws a bold spoke from the focused genre (hub)
+   to each 1-hop neighbour, line width scaled by normalised
+   `genre_edge_evidence` strength (strongest ties thickest), coloured by
+   the focused community. The competing ink recedes: back-edge web
+   0.25 → 0.06 in focus, and the tree branch edges drop to 0.0 in focus
+   (`edgeOpacityFor` — the spokes now carry the connection signal, so a
+   re-projected tree curve would just re-add noise). Result is a clean
+   hub-and-spoke even for a high-degree genre like R&B/Soul.
+6. **Renamed the surface "Genre Tree" → "Genre Map"** (the "it's a map"
+   annotation = "just call the window a genre map"). All user-visible
+   strings: pane header + collapsed bar, the "Show Genre Map" (⌥⇧⌘A) +
+   "Re-Analyze Genre Map" menu commands, the toolbar button label +
+   icon (`arrow.triangle.branch` → `map`), the empty state
+   ("No Genre Map Yet", icon `tree` → `map`), the resize-handle a11y
+   label, and the transient-queue playlist name ("Genre Map: <name>").
+   **Code symbols stay `GenreTree*`** — a symbol rename is a big
+   no-behaviour-change churn, deferred. Pre-existing saved playlists
+   named "Genre Tree: …" keep their stored names.
+
+### Carry-forward / not done
+
+- Code symbols (`GenreTreeService`, `GenreTreeMapPanel`, the
+  `GenreTreeMap/` dirs, `genreTreePaneCollapsed`, scene-storage keys)
+  still say "Tree"; only user-visible strings became "Map". A full
+  symbol rename is deferred (mechanical, no behaviour change).
+- The "?!" Actual-Size (⌘0) button was kept (reset-to-100% is useful);
+  flagged to the user in case they want it gone too.
+
 ## 2026-05-21 — Son of Genre Map — Phase E: Persistence repurpose + metro retirement (programme complete)
 
 **Branch `feature/genre-tree-map`.** The final phase of

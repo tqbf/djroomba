@@ -44,6 +44,21 @@ final class GenreTreeService {
   /// after live verification the user names the eventual default.
   static let defaultMetric = TrunkSelectionMetric.highestTransferness
 
+  /// Horizontal stretch applied to the (circular) tree layout so it
+  /// renders as a **wide ellipse** that fills the wide / short docked
+  /// pane (see `GenreTreeLayout.Configuration.horizontalStretch`). The
+  /// pure layout stays orientation-neutral; the canvas aspect is a
+  /// presentation decision and lives here, at the view boundary.
+  nonisolated static let canvasStretch: CGFloat = 2.0
+
+  /// The layout configuration the live view uses — the
+  /// `GenreTreeLayout` defaults plus the wide-ellipse stretch.
+  /// `nonisolated` so the `nonisolated` `assembleRenderModel` can name
+  /// it as a default argument.
+  nonisolated static let liveLayoutConfiguration = GenreTreeLayout.Configuration(
+    horizontalStretch: canvasStretch
+  )
+
   /// True while the layout pipeline is running. Coalesces re-entrancy
   /// (the metric toggle, a re-analyze, a config tweak — a second
   /// `build()` during one in flight is a no-op).
@@ -80,7 +95,7 @@ final class GenreTreeService {
     evidence: [GenreEdgeEvidence],
     communityByGenre: [String: Int],
     metric: TrunkSelectionMetric,
-    layoutConfiguration: GenreTreeLayout.Configuration = GenreTreeLayout.Configuration(),
+    layoutConfiguration: GenreTreeLayout.Configuration = GenreTreeService.liveLayoutConfiguration,
   ) -> GenreTreeRenderModel {
     let topology = GenreTreeBuilder.build(
       nodes: nodes,

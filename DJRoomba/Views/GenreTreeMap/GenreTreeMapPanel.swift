@@ -17,11 +17,12 @@ import SwiftUI
 ///
 /// - Cmd-+ / Cmd-− zoom (10 % to 600 %).
 /// - Cmd-0 actual-size + recenter.
-/// - Cmd-9 fit-the-canvas-to-the-viewport. The default presentation is
-///   **not** fitted (per the standing user directive "scrolling is
-///   fine"); the user invokes Fit only when they want an overview.
 /// - Magnification gesture: live pinch-zoom.
 /// - Drag gesture: pan the canvas.
+///
+/// There is **no fit-to-view** affordance: the canvas is intentionally
+/// larger than any viewport (the standing "scrolling is fine"
+/// directive), and a fit just stacks the pills on top of each other.
 ///
 /// **Phase C additions:**
 ///
@@ -88,9 +89,6 @@ struct GenreTreeMapPanel: View {
               isLoadingCompare: isLoadingCompare,
               twoHopNeighbours: twoHopNeighboursForSelection(),
               onSelectNeighbour: selectByName,
-              onListen: selectedGenre.map { genre in { triggerListen(for: genre) } },
-              onSaveAsPlaylist: selectedGenre.map { genre in { triggerSaveAsPlaylist(for: genre) } },
-              isListenInFlight: isListenInFlight,
               onExitCompare: endCompare,
             )
             .frame(width: CGFloat(inspectorWidth))
@@ -208,6 +206,21 @@ struct GenreTreeMapPanel: View {
   private static let minInspectorWidth: Double = 260
   private static let maxInspectorWidth: Double = 460
 
+  /// Default open zoom. The canvas is far larger than the pane (the
+  /// "scrolling is fine" directive), so 100 % opens onto a single
+  /// lone trunk in a sea of white. This framing zoom instead lands the
+  /// user on a trunk *plus* its neighbourhood — enough to read the
+  /// shape of the library at a glance, then pan / zoom to explore.
+  /// ⌘0 ("Actual Size") still snaps to a literal 100 %.
+  private static let defaultScale: CGFloat = 0.28
+
+  /// Radial-focus configuration — the plan defaults plus the same
+  /// wide-ellipse stretch the trunk layout uses, so the focus rings
+  /// match the rest of the canvas instead of snapping back to circles.
+  private static let radialConfiguration = GenreTreeRadialPlan.Configuration(
+    horizontalStretch: GenreTreeService.canvasStretch
+  )
+
   @Environment(MusicController.self) private var controller
 
   /// Pane body height — view-layer concern, scene-persisted so a
@@ -218,9 +231,8 @@ struct GenreTreeMapPanel: View {
   /// Inspector column width — scene-persisted like the body height.
   @SceneStorage("genreTreeInspectorWidth") private var inspectorWidth = 320.0
 
-  @State private var scale: CGFloat = 1.0
+  @State private var scale: CGFloat = GenreTreeMapPanel.defaultScale
   @State private var offset = CGSize.zero
-  @State private var fitRequested = false
   /// Live viewport size, updated by `mapBody`'s `GeometryReader`.
   @State private var viewportSize = CGSize(width: 900, height: 600)
 
@@ -250,10 +262,6 @@ struct GenreTreeMapPanel: View {
   @State private var compareEvidence: GenreMapCompareEvidence?
   @State private var isLoadingCompare = false
   @State private var compareTask: Task<Void, Never>?
-
-  /// Phase D — Listen / Save-as-Playlist in-flight flag. Disables
-  /// repeat clicks while the SQLite read + resolver hop runs.
-  @State private var isListenInFlight = false
 
   /// Saved viewport state at the moment the user clicked into a
   /// focus. `clearSelection()` restores from this so the user lands
@@ -327,7 +335,7 @@ struct GenreTreeMapPanel: View {
   private var collapsedBar: some View {
     HStack(spacing: 12) {
       collapseChevron
-      Text("Genre Tree")
+      Text("Genre Map")
         .font(.headline)
       if let model = service.renderModel {
         Text("\(model.layout.placedNodes.count) genres")
@@ -343,7 +351,7 @@ struct GenreTreeMapPanel: View {
       }
       .labelStyle(.iconOnly)
       .buttonStyle(.borderless)
-      .help("Rebuild the genre tree from the current library")
+      .help("Rebuild the genre map from the current library")
       .disabled(service.isBuilding)
     }
     .padding(.horizontal, 16)
@@ -362,14 +370,14 @@ struct GenreTreeMapPanel: View {
         .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
-    .help(collapsed ? "Show the genre tree" : "Hide the genre tree")
+    .help(collapsed ? "Show the genre map" : "Hide the genre map")
   }
 
   private var header: some View {
     HStack(spacing: 12) {
       collapseChevron
 
-      Text("Genre Tree")
+      Text("Genre Map")
         .font(.headline)
       if service.isBuilding {
         ProgressView()
@@ -399,7 +407,7 @@ struct GenreTreeMapPanel: View {
       }
       .labelStyle(.iconOnly)
       .buttonStyle(.borderless)
-      .help("Rebuild the genre tree from the current library")
+      .help("Rebuild the genre map from the current library")
       .disabled(service.isBuilding)
 
       if !collapsed {
@@ -440,10 +448,10 @@ struct GenreTreeMapPanel: View {
 
   private var emptyState: some View {
     ContentUnavailableView {
-      Label("No Genre Tree Yet", systemImage: "tree")
+      Label("No Genre Map Yet", systemImage: "map")
     } description: {
       Text(
-        "The genre tree appears here once your library has been analyzed. Build it once your library has genre tags — or rebuild it any time."
+        "The genre map appears here once your library has been analyzed. Build it once your library has genre tags — or rebuild it any time."
       )
     } actions: {
       Button("Analyze") {
@@ -459,7 +467,7 @@ struct GenreTreeMapPanel: View {
     HStack(spacing: 8) {
       Image(systemName: "hand.point.up.left")
       Text(
-        "Drag to pan · Pinch / ⌘+ / ⌘− to zoom · ⌘0 reset · ⌘9 fit · click a genre to focus"
+        "Drag to pan · Pinch / ⌘+ / ⌘− to zoom · ⌘0 reset · click a genre to focus"
       )
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -489,13 +497,7 @@ struct GenreTreeMapPanel: View {
       .labelStyle(.iconOnly)
       .controlSize(.small)
       .keyboardShortcut("0", modifiers: .command)
-      Button {
-        fitToView()
-      } label: {
-        Label("Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
-      }
-      .controlSize(.small)
-      .keyboardShortcut("9", modifiers: .command)
+      .help("Reset to 100% and recentre (⌘0)")
       Text(String(format: "%.0f%%", scale * 100))
         .font(.caption.monospacedDigit())
         .foregroundStyle(.secondary)
@@ -535,14 +537,19 @@ struct GenreTreeMapPanel: View {
         x: fitted.scale * placed.position.x + fitted.translation.width,
         y: fitted.scale * placed.position.y + fitted.translation.height,
       )
-      // Target: fit the outer ring + a half-pill margin inside the
-      // shorter viewport axis. `r2` is the outer-ring radius in world
-      // coords; the fit scale converts it to a screen radius.
-      let r2: CGFloat = 820
-      let padding: CGFloat = 90
-      let availableHalf = min(viewportSize.width, viewportSize.height) / 2 - padding
-      let targetRingScreen = max(180, availableHalf)
-      let rawScale = targetRingScreen / max(1, fitted.scale * r2)
+      // Frame the **inner (1-hop) ring** against the pane *height*. The
+      // rings are wide ellipses whose short (vertical) half-axis is the
+      // plain radius, so fitting `r1` to the height keeps the closest
+      // neighbours readable and lets the stretched ring use the width;
+      // the 2-hop ring spills past the top/bottom and the user scrolls
+      // to it ("scrolling is fine"). Fitting the *outer* ring instead
+      // (the earlier behaviour) pulled the zoom so far back that a
+      // high-degree genre's neighbours stacked into a pile.
+      let r1 = Self.radialConfiguration.r1
+      let padding: CGFloat = 70
+      let availableHalf = viewportSize.height / 2 - padding
+      let targetRingScreen = max(150, availableHalf)
+      let rawScale = targetRingScreen / max(1, fitted.scale * r1)
       let targetScale = clamp(rawScale, min: 0.1, max: 6.0)
       withAnimation(.easeInOut(duration: service.animationDurationSeconds)) {
         scale = targetScale
@@ -579,6 +586,7 @@ struct GenreTreeMapPanel: View {
         selectedGenre: selectedGenre,
         layout: renderModel.layout,
         evidence: renderModel.evidence,
+        configuration: Self.radialConfiguration,
       )
     else { return [] }
     let twoHop = plan.targetsByGenre.compactMap { name, target in
@@ -673,6 +681,18 @@ struct GenreTreeMapPanel: View {
         comparePathEdges: comparePathEdges,
         inCompareMode: inCompareMode,
       )
+      // Bold direct-connection spokes — only in single-genre focus, and
+      // drawn above the (now-faint) back-edge + tree-edge layers so the
+      // focused genre's neighbours dominate the canvas.
+      if !inCompareMode, let radialPlan, let spokes = focusSpokes(model: model, plan: radialPlan) {
+        FocusSpokeLayer(
+          hub: radialPlan.centre,
+          spokes: spokes,
+          colour: colourByGenre[radialPlan.selectedGenre] ?? .accentColor,
+          project: viewTransform.project,
+        )
+        .animation(.easeInOut(duration: service.animationDurationSeconds), value: selectedGenre)
+      }
       pillsLayer(
         model: model,
         colourByGenre: colourByGenre,
@@ -727,7 +747,10 @@ struct GenreTreeMapPanel: View {
       if inCompareMode {
         0.15
       } else if radialPlan != nil {
-        0.25
+        // Focus mode: the bold `FocusSpokeLayer` now carries the
+        // "direct connection" signal, so the back-edge web recedes to
+        // near-nothing instead of competing with it.
+        0.06
       } else {
         1.0
       }
@@ -855,33 +878,20 @@ struct GenreTreeMapPanel: View {
     )
   }
 
-  /// Pick the visible opacity for a parent → child edge given the
-  /// current radial focus state. In trunk-tree mode: full opacity.
-  /// In radial-focus mode: edges adjacent to the selected genre or a
-  /// 1-hop neighbour stay visible; 2-hop-adjacent edges dim; out-of-
-  /// focus edges hide.
+  /// Pick the visible opacity for a parent → child tree edge given the
+  /// current radial focus state. In trunk-tree mode: full opacity. In
+  /// radial-focus mode the bold `FocusSpokeLayer` carries the
+  /// direct-connection signal, so the tree edges step **all the way
+  /// back** — drawing them at all would re-introduce the "everything
+  /// blends together" noise the spokes exist to cut through. The hub
+  /// and its 1-hop neighbours are joined by spokes; the rest of the
+  /// canvas is just faded pills + the whisper-faint back-edge web.
   private func edgeOpacityFor(
-    a: String,
-    b: String,
+    a _: String,
+    b _: String,
     radialPlan: GenreTreeRadialPlan.Plan?,
   ) -> Double {
-    guard let plan = radialPlan else { return 1.0 }
-    let ringA = plan.targetsByGenre[a]?.ring ?? .outOfFocus
-    let ringB = plan.targetsByGenre[b]?.ring ?? .outOfFocus
-    // The edge is visible at full strength when one endpoint is the
-    // selected genre + the other is a 1-hop neighbour. That's the
-    // "spoke" reading the eye wants.
-    if (ringA == .selected && ringB == .oneHop) || (ringA == .oneHop && ringB == .selected) {
-      return 1.0
-    }
-    // An edge between two 1-hop neighbours is the radial "rim" — kept
-    // present but slightly dimmed.
-    if ringA == .oneHop, ringB == .oneHop { return 0.6 }
-    // 2-hop-adjacent edges (selected ↔ 2-hop OR 1-hop ↔ 2-hop): visible
-    // but subordinate.
-    if ringA == .twoHop || ringB == .twoHop { return 0.4 }
-    // Everything else (involves an out-of-focus endpoint) hides.
-    return 0.0
+    radialPlan == nil ? 1.0 : 0.0
   }
 
   /// Project the layout's pre-computed world-space Bezier endpoints
@@ -906,6 +916,32 @@ struct GenreTreeMapPanel: View {
     )
   }
 
+  /// Build the bold direct-connection spokes for the focused genre —
+  /// one per 1-hop neighbour, weighted by the (normalised) composite
+  /// `genre_edge_evidence` strength so the strongest ties draw thickest.
+  /// `nil` when the focused genre has no 1-hop neighbours.
+  private func focusSpokes(
+    model: GenreTreeRenderModel,
+    plan: GenreTreeRadialPlan.Plan,
+  ) -> [FocusSpokeLayer.Spoke]? {
+    let selected = plan.selectedGenre
+    var weightByNeighbour = [String: Double]()
+    for row in model.evidence {
+      if row.genreA == selected {
+        weightByNeighbour[row.genreB] = max(weightByNeighbour[row.genreB] ?? 0, row.totalWeight)
+      } else if row.genreB == selected {
+        weightByNeighbour[row.genreA] = max(weightByNeighbour[row.genreA] ?? 0, row.totalWeight)
+      }
+    }
+    let maxWeight = weightByNeighbour.values.max() ?? 0
+    let spokes = plan.targetsByGenre.compactMap { name, target -> FocusSpokeLayer.Spoke? in
+      guard target.ring == .oneHop else { return nil }
+      let normalised = maxWeight > 0 ? (weightByNeighbour[name] ?? 0) / maxWeight : 0
+      return FocusSpokeLayer.Spoke(end: target.position, weight: normalised)
+    }
+    return spokes.isEmpty ? nil : spokes
+  }
+
   /// Compute the radial plan for the current `selectedGenre`, or
   /// `nil` in trunk-tree mode.
   private func currentRadialPlan(
@@ -916,6 +952,7 @@ struct GenreTreeMapPanel: View {
       selectedGenre: selectedGenre,
       layout: model.layout,
       evidence: model.evidence,
+      configuration: Self.radialConfiguration,
     )
   }
 
@@ -1068,39 +1105,6 @@ struct GenreTreeMapPanel: View {
     }
   }
 
-  /// Phase D — start a transient queue from the deterministic Top-N
-  /// pick for `genre`. Fire-and-forget; the in-flight flag disables
-  /// the button so a repeated click can't queue twice.
-  private func triggerListen(for genre: String) {
-    guard !isListenInFlight else { return }
-    isListenInFlight = true
-    Task {
-      await controller.listenToGenre(genre)
-      await MainActor.run {
-        isListenInFlight = false
-      }
-    }
-  }
-
-  /// Phase D — create the "Genre Tree: <name>" app playlist with the
-  /// same Top-N pick. `saveListenAsAppPlaylist` selects the new
-  /// playlist in the sidebar; collapsing the docked pane then hands the
-  /// full detail height to the new playlist's track list so the user
-  /// lands on what they just saved.
-  private func triggerSaveAsPlaylist(for genre: String) {
-    guard !isListenInFlight else { return }
-    isListenInFlight = true
-    Task {
-      let newID = await controller.saveListenAsAppPlaylist(genre: genre)
-      await MainActor.run {
-        isListenInFlight = false
-        if newID != nil {
-          controller.genreTreePaneCollapsed = true
-        }
-      }
-    }
-  }
-
   private func zoomIn() {
     scale = clamp(scale * 1.25, min: 0.1, max: 6.0)
   }
@@ -1112,41 +1116,19 @@ struct GenreTreeMapPanel: View {
   private func resetZoom() {
     scale = 1.0
     offset = .zero
-    fitRequested = false
   }
 
-  private func fitToView() {
-    fitRequested = true
-    scale = 1.0
-    offset = .zero
-  }
-
-  /// World → screen base transform.
-  ///
-  /// Two modes, matching the metro panel's pattern:
-  ///
-  /// - **Fit requested** (Cmd-9): scale the canvas's worldBounds into
-  ///   the viewport with `80pt` padding, centre.
-  /// - **Default**: identity scale, centre on the **canvas centre**
-  ///   (not the heaviest community — the trunk tree's anchor is the
-  ///   diagonal, which is itself centred on the canvas).
+  /// World → screen base transform: identity scale, centred on the
+  /// **canvas centre**. The trunk tree's anchor is the diagonal, which
+  /// is itself centred on the canvas, so this lands the user on the
+  /// middle trunk; they pan / zoom out to explore the rest. There is
+  /// deliberately **no fit-to-view mode** — the map is larger than any
+  /// viewport on purpose (the standing "scrolling is fine" directive),
+  /// and crushing it to fit just stacks the pills on top of each other.
   private func baseTransform(model: GenreTreeRenderModel, into size: CGSize) -> FitTransform {
     let bounds = model.layout.worldBounds
     guard bounds.width > 0, bounds.height > 0, size.width > 0, size.height > 0 else {
       return FitTransform(scale: 1, translation: .zero)
-    }
-    if fitRequested {
-      let padding: CGFloat = 80
-      let availableWidth = max(1, size.width - 2 * padding)
-      let availableHeight = max(1, size.height - 2 * padding)
-      let fitScale = min(availableWidth / bounds.width, availableHeight / bounds.height)
-      let scaledCentreX = (bounds.minX + bounds.width / 2) * fitScale
-      let scaledCentreY = (bounds.minY + bounds.height / 2) * fitScale
-      let translation = CGSize(
-        width: size.width / 2 - scaledCentreX,
-        height: size.height / 2 - scaledCentreY,
-      )
-      return FitTransform(scale: fitScale, translation: translation)
     }
     // Default — identity scale, centre on canvas centre. With the
     // diagonal layout the trunks straddle the canvas centre, so this
