@@ -62,6 +62,7 @@ playlist-forward and intentionally simple.
 | [plans/memory-and-laziness.md](plans/memory-and-laziness.md) | **Residency plan (A+B done)** — killed per-`body` recompute + bounded detail cache; records why GRDB observation was rejected (single-writer) and the mutation-chokepoint forward pattern |
 | [plans/recently-played.md](plans/recently-played.md) | **Recently Played** landing surface — replaces the "Select a Playlist" empty state with a keyset-paginated, lazily-scrolled distinct-songs list (built on `play_history`); + a Debug-menu synthetic-history seeder. Code-complete |
 | [plans/play-statistics.md](plans/play-statistics.md) | Capped 50k numeric play history (`song.local_id`) + skip/replay counters; canonical attribution (no Apple ids as app keys); drops `play_event`. **ALL 4 phases ✅ code-complete** — Phase 1 shipped (v3 schema + store API, no gate); Phases 2–4 (canonical play context / skip-replay counting / auto-advance recording) code-complete, **signed runtime gate pending (user)**. 100 tests/18 suites green |
+| [plans/openai-gpt.md](plans/openai-gpt.md) | **OpenAI GPT integration** — Phase 1 landed on `feature/openai-gpt-spike` (2026-05-29). Persistent `ContextWindow` over a separate SQLite store at `Application Support/DJRoomba/assistant.sqlite`; seven tools (`list_playlists`, `playlist_contents`, `track_genres`, `search_apple_music`, `recently_played`, `create_playlist`, `add_tracks_to_playlist`); standalone Assistant window (⌥⌘\\) with transcript + composer. **Library now vendored** at `Vendor/contextwindow-swift` with `DJROOMBA PATCH 1` — `OpenAIChatModel.message(for:)` lost `tool_call_id` on `.toolOutput` records, breaking every multi-turn conversation with HTTP 400; replaced with a sequential walker that pairs each output to its preceding call. **Unified logging** (subsystem `org.sockpuppet.djroomba`, category `openai`) records every user / tool / assistant turn so conversations can be replayed with `log show` instead of screenshots. "Signin" reality: OpenAI has no OAuth → key flow for desktop apps, so the user pastes a key into a `SecureField`; the pane's footer says so. Phase 2+ (streaming, model picker, richer surface) still deferred. |
 | [plans/typography.md](plans/typography.md) | Semantic-font type system + hierarchy rules |
 | [plans/milestone-1.md](plans/milestone-1.md) | _Historical_ — original "Play a library playlist" notes |
 | [plans/milestone-2.md](plans/milestone-2.md) | _Historical_ — original "Make it pleasant" notes |
@@ -178,6 +179,36 @@ Four persistent conceptual regions, mapped to the macOS layout formula:
 - **Track list:** native SwiftUI `Table` — deliberately boring, operational.
 - **Concurrency:** Swift structured concurrency only. No GCD.
 - **MusicKit wrapper stays thin** — debuggability over abstraction.
+
+## Observability
+
+The assistant boundary is fully traced via Apple's unified-logging
+subsystem so conversations can be inspected programmatically — no
+screenshots required. One `Logger` (`os.Logger`) under
+`subsystem = org.sockpuppet.djroomba`, `category = openai` covers:
+
+- `→ user: …` and `← assistant: …` — chat turn boundaries (`.info`)
+- `→ tool name args=…` and `← tool name out=…` — every tool call + its
+  output, output truncated to ~600 chars (`.info`, so they persist to disk)
+- `! …` — anything that broke a round trip (`.error`)
+
+Read it with the `log` CLI:
+
+```sh
+# Live stream:
+log stream --predicate \
+  'subsystem == "org.sockpuppet.djroomba" AND category == "openai"' \
+  --info --debug
+
+# Replay the last N minutes:
+log show --predicate \
+  'subsystem == "org.sockpuppet.djroomba" AND category == "openai"' \
+  --info --last 5m
+```
+
+The API key is never logged; the full system prompt is never logged;
+tool outputs are truncated. See `AssistantLog.swift` for the helpers
+and `LoggedToolRunner` for the per-tool wrapper.
 
 ## Hard constraints (from CLAUDE.md)
 

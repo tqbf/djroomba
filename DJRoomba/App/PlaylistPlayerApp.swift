@@ -229,13 +229,26 @@ struct PlaylistPlayerApp: App {
     }
 
     // The standard macOS Settings window (⌘, — SwiftUI wires the menu
-    // item + shortcut automatically for a `Settings` scene). Holds the
-    // Advanced genre-analysis thresholds. Self-contained: it binds
-    // `UserDefaults` via `@AppStorage`, the same keys the analysis reads,
-    // so it needs no access to `controller`.
+    // item + shortcut automatically for a `Settings` scene). The **OpenAI**
+    // pane reads `controller.gpt` so we inject the controller into this
+    // scene's environment; the Advanced pane stays self-contained on
+    // `@AppStorage`.
     Settings {
       SettingsView()
+        .environment(controller)
     }
+
+    // The Assistant chat window — `plans/openai-gpt.md` Phase 1. Its own
+    // top-level `Window` scene (not a sheet) because chat is a foreground
+    // surface, not a modal preference, and the user wants it open while
+    // they browse the library. SwiftUI auto-adds it to the Window menu;
+    // the keyboard shortcut here drives that auto-item.
+    Window("DJ Roomba Assistant", id: AssistantWindowID) {
+      AssistantWindowView()
+        .environment(controller)
+    }
+    .defaultSize(width: 620, height: 720)
+    .keyboardShortcut("\\", modifiers: [.command, .option])
   }
 
   // MARK: Private

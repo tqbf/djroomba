@@ -38,6 +38,7 @@ final class MusicController {
     catalogIngestService = CatalogIngestService(store: safeStore)
     snapshotService = SnapshotService(store: safeStore)
     resolver = PlaybackResolver()
+    gpt = GPTService(store: openedStore, catalogIngest: catalogIngestService)
     autoReanalyzeGenreGraph = preferences.autoReanalyzeGenreGraph
     if openedStore == nil {
       storeError = "The local library database could not be opened."
@@ -88,6 +89,13 @@ final class MusicController {
   /// `ImportService` ↔ `runImport`.
   let snapshotService: SnapshotService
   let resolver: PlaybackResolver
+
+  /// The GPT/assistant boundary (`plans/openai-gpt.md`). One canonical
+  /// instance owned by the controller; the Settings pane and the
+  /// Assistant window both bind to it via `@Environment(MusicController.self)`.
+  /// Tools dispatch directly to the `LibraryStore` + `CatalogIngestService`
+  /// the service was handed at init — no separate `attach`.
+  let gpt: GPTService
 
   /// Phase 1 (`plans/catalog-playlists.md`): catalog `Song` → SQLite `song`
   /// row, the prerequisite for any catalog track to participate in app
