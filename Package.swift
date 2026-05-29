@@ -38,6 +38,13 @@ let package = Package(
     // the graph transitively via swift-profile-recorder; declared directly
     // so the target can `import Logging`. Only referenced behind `#if DEBUG`.
     .package(url: "https://github.com/apple/swift-log.git", from: "1.6.1"),
+    // tqbf/contextwindow-swift — the named-context record store + model
+    // call loop + OpenAI provider adapters. **Vendored** at
+    // `Vendor/contextwindow-swift` (forked from the 0.1.0 tag), not a remote
+    // SPM dep, so the few patches we need can land in-tree until upstream
+    // takes them. See the "DJROOMBA PATCH" comments in
+    // `Vendor/contextwindow-swift/Sources/ContextWindowOpenAI/`.
+    .package(path: "Vendor/contextwindow-swift"),
     // tqbf/fdg — ForceGraph: a reusable SwiftUI force-directed graph
     // control. **Vendored** at `Vendor/ForceGraph` (the exact v1.0.0
     // commit 0a8a43e we previously consumed remotely), not a remote SPM
@@ -55,6 +62,8 @@ let package = Package(
         .product(name: "ProfileRecorderServer", package: "swift-profile-recorder"),
         .product(name: "Logging", package: "swift-log"),
         .product(name: "ForceGraph", package: "ForceGraph"),
+        .product(name: "ContextWindow", package: "contextwindow-swift"),
+        .product(name: "ContextWindowOpenAI", package: "contextwindow-swift"),
       ],
       path: "DJRoomba",
       exclude: [

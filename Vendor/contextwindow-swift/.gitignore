@@ -1,0 +1,18 @@
+# Credentials — never commit (contains a real OPENAI_API_KEY)
+.envrc
+
+# SwiftPM build artifacts
+.build/
+.swiftpm/
+Package.resolved
+
+# Example package build artifacts
+Examples/*/.build/
+Examples/*/.swiftpm/
+
+# macOS / Xcode
+.DS_Store
+*.xcuserstate
+xcuserdata/
+*.xcodeproj
+DerivedData/
