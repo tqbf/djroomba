@@ -83,6 +83,26 @@ final class GPTService {
     return URLSession(configuration: configuration)
   }()
 
+  /// UserDefaults key for the Phase-5 auto-fill opt-in. Owned here
+  /// so the view (`OpenAISettingsPane` via `@AppStorage`) and the
+  /// controller's drain detector key off one canonical string.
+  nonisolated static let autoFillToggleKey = "djroomba.upNext.autoFillEnabled"
+
+  /// Seed prompt for the Phase-5 auto-fill loop. Sent verbatim as
+  /// the first user message of a fresh conversation when the Up
+  /// Next queue drains and the user has the opt-in toggle on. Kept
+  /// tight — the system prompt's "auto-fill" paragraph teaches the
+  /// model to fulfil this silently without preamble; this seed
+  /// just supplies the context the system prompt promised would
+  /// arrive. `static let` so the system prompt's auto-fill
+  /// paragraph and this seed stay easy to read side-by-side.
+  static let autoFillSeed = """
+    The Up Next queue just emptied and I need ten more tracks. Use \
+    `recently_played` (and `app_state` if useful) to pick what I'm \
+    likely to want next, then call `up_next_add` with the chosen \
+    track ids. Don't ask follow-up questions — just queue them.
+    """
+
   /// Whether an API key is stored in the Keychain.
   private(set) var isKeyConfigured: Bool
 
@@ -321,6 +341,31 @@ final class GPTService {
     }
   }
 
+  /// Phase-5 auto-fill dispatch (`plans/up-next-queue.md` — "Auto-fill
+  /// on empty"). Called by `MusicController.notifyUpNextMutated` on the
+  /// non-empty → empty transition when the user's opt-in toggle is on
+  /// and the API key is configured. Single-flight: if a previous
+  /// auto-fill task is still running this call no-ops.
+  ///
+  /// The task mints a fresh conversation (the user explicitly wanted
+  /// auto-fills isolated from any in-progress chat) and sends a tight
+  /// seed message instructing the model to pick ten tracks via
+  /// `recently_played` + `up_next_add`. Any failure inside `sendMessage`
+  /// surfaces via the assistant pane's `errorMessage` just like a
+  /// user-typed message would — we don't shadow-handle network errors
+  /// here. The task handle is cleared in `defer` so a re-drain after a
+  /// clean fill re-arms.
+  func autoFillUpNext() {
+    guard autoFillTask == nil else { return }
+    AssistantLog.logger.info("→ auto-fill: queue drained, dispatching")
+    autoFillTask = Task { @MainActor [weak self] in
+      defer { self?.autoFillTask = nil }
+      guard let self else { return }
+      await newConversation()
+      await sendMessage(Self.autoFillSeed)
+    }
+  }
+
   /// Permanently delete the conversation named `id`. Drops its
   /// records from `assistant.sqlite` via the vendored library's
   /// `deleteContext(name:)`, clears the app-side title + last-
@@ -454,11 +499,32 @@ final class GPTService {
     played history, and create new app-owned playlists. Prefer calling \
     tools over guessing. When you list tracks back to the user, keep \
     replies short and use plain prose, not large tables.
+
+    Up Next is a transient in-memory queue that preempts the current \
+    playlist: when the current song ends (or the user hits Next), the \
+    queue head plays before normal playlist advance resumes. Manage it \
+    with `up_next_add` / `up_next_remove` / `up_next_get` / \
+    `up_next_count`. When the user asks to "play more like X", "queue \
+    up some Y", or "add these to up next" — use `up_next_add` (after a \
+    `search_apple_music` if you need ids), NOT `play_track` / \
+    `play_playlist`, which would replace the active player queue. \
+    Reach for `play_playlist` / `play_track` only when the user wants \
+    to start playing something right now. If the user's first message \
+    in a fresh conversation says the queue is empty and asks for \
+    tracks, the user has auto-fill enabled — silently fulfil it via \
+    `recently_played` + `up_next_add`, no preamble.
     """
 
   @ObservationIgnored private var session: Session?
   @ObservationIgnored private let store: LibraryStore?
   @ObservationIgnored private let catalogIngest: CatalogIngestService?
+  /// Phase-5 single-flight guard. Holds the in-flight auto-fill task so
+  /// a second drain-detector dispatch (e.g. the user pounding Clear
+  /// twice while the first refill is still resolving) no-ops instead
+  /// of racing a second `newConversation` + `sendMessage` against the
+  /// first. Cleared in the task body's `defer` so a clean exit re-arms
+  /// the next drain.
+  @ObservationIgnored private var autoFillTask: Task<Void, Never>?
   /// Weak controller back-reference for the playback / state tools.
   /// Set via `attach(controller:)` immediately after `MusicController`
   /// finishes initializing this service.

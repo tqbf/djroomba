@@ -1,4 +1,5 @@
 import Foundation
+import MusicKit
 import Observation
 
 /// Top-level coordinator. Owns the service instances and the app-level state
@@ -30,6 +31,7 @@ final class MusicController {
     appPlaylistService = AppPlaylistService(store: safeStore)
     detailService = PlaylistDetailService(store: safeStore)
     recentlyPlayed = RecentlyPlayedService(store: safeStore)
+    upNext = UpNextService()
     importService = ImportService(store: safeStore)
     genreImportService = GenreImportService(store: safeStore)
     genreGraphService = GenreGraphService(store: safeStore)
@@ -62,6 +64,16 @@ final class MusicController {
   /// would.
   static let recentlyPlayedLandingID = "__djroomba.recentlyPlayedLanding__"
 
+  /// Sentinel id for the **Up Next** sidebar row (peer of the
+  /// recently-played landing). Lives below `RecentlyPlayedLandingRow`
+  /// in the same "Recently Played" section so the two landings read as
+  /// siblings. Same reservation discipline as the recently-played
+  /// sentinel — leading double underscore + dotted namespace — so it
+  /// can never collide with a real Apple/app playlist id and is exempt
+  /// from `reconcileSelectionAfterImport` / `restoreSelection`'s
+  /// existence check.
+  static let upNextLandingID = "__djroomba.upNextLanding__"
+
   let authorization = MusicAuthorizationService()
   let subscription = MusicSubscriptionService()
   let playback = PlaybackService()
@@ -73,6 +85,14 @@ final class MusicController {
   /// The "Recently Played" landing surface's view-model (shown when no
   /// playlist is selected). Reads the keyset-paginated distinct history.
   let recentlyPlayed: RecentlyPlayedService
+  /// The ephemeral **Up Next** queue (`plans/up-next-queue.md`). Lives in
+  /// memory only; lost on quit by design. Mutated via the controller's
+  /// `addToUpNext` / `removeFromUpNext` / `clearUpNext` /
+  /// `playFromUpNext(position:)` funnels so the GPT tools (Phase 4) and
+  /// the view layer (Phase 2/3) go through one path. The playback
+  /// dominance hook (`detectAndRecordAdvance` + `skipNext`) pops the
+  /// head whenever the queue is non-empty.
+  let upNext: UpNextService
   let importService: ImportService
   /// Album→track genre enrichment. Runs **only** on a full import
   /// (Reimport Everything ⇧⌘R) or the empty-DB first import — never on the
@@ -406,10 +426,23 @@ final class MusicController {
   /// (2) the user explicitly picked the "All Recently Played Tracks"
   ///     sidebar row (sentinel id).
   /// Either way the surface is the same view, just reached two ways.
+  /// The **Up Next** sentinel is explicitly excluded — otherwise both
+  /// landings would light up at once when the user picks the queue row.
   var isShowingRecentlyPlayedLanding: Bool {
     guard selectedGenre == nil else { return false }
+    guard selectedPlaylistID != Self.upNextLandingID else { return false }
     return selectedPlaylistID == nil
       || selectedPlaylistID == Self.recentlyPlayedLandingID
+  }
+
+  /// `true` when the detail pane should render `UpNextView`. Sibling of
+  /// `isShowingRecentlyPlayedLanding`: the user explicitly picked the
+  /// **Up Next** sidebar row (sentinel id) and no genre is selected.
+  /// Unlike the recently-played landing this is NOT also the
+  /// nothing-selected default — Up Next is a dedicated destination.
+  var isShowingUpNextLanding: Bool {
+    guard selectedGenre == nil else { return false }
+    return selectedPlaylistID == Self.upNextLandingID
   }
 
   /// O(1) index lookup (was an O(n) scan over a freshly concatenated
@@ -870,6 +903,20 @@ final class MusicController {
   /// this is a skip (Phase 3, ask #2), then run the unchanged transport.
   func skipNext() async {
     recordTransportStat(button: .next)
+    // Up Next dominance: an explicit Next pops the queue head before
+    // touching the player's transport (so the song the user wanted next
+    // *is* what plays next, never the playlist's natural next track).
+    // Empty queue falls through to the unchanged transport. The
+    // in-flight flag mirrors `dispatchUpNextIfNeeded` — a user pounding
+    // Next during a still-resolving previous pop falls through to the
+    // transport rather than racing a second resolve against the first.
+    if !upNext.isEmpty, !upNextDispatchInFlight, let entry = upNext.popHead() {
+      upNextDispatchInFlight = true
+      notifyUpNextMutated()
+      await playUpNextEntry(entry)
+      upNextDispatchInFlight = false
+      return
+    }
     await playback.skipNext()
   }
 
@@ -1065,6 +1112,114 @@ final class MusicController {
     }
   }
 
+  /// Controller-level Up Next funnel — every queue mutator (track-table
+  /// context menu in Phase 3, GPT `up_next_add` tool in Phase 4) routes
+  /// through here so the service stays the single source of truth and
+  /// the dominance hook + auto-fill (Phase 5) see one canonical event.
+  /// `insertAt` is 1-based; `nil` appends. Paired arrays — caller has
+  /// already resolved the MusicKit `MusicItemID` for each song.
+  func addToUpNext(
+    _ songs: [Song],
+    musicItemIDs: [MusicItemID],
+    insertAt position: Int? = nil,
+  ) {
+    if let position {
+      upNext.insert(songs, musicItemIDs: musicItemIDs, at: position)
+    } else {
+      upNext.append(songs, musicItemIDs: musicItemIDs)
+    }
+    // Phase-5 bookkeeping: an add can't drain the queue (it's
+    // non-decreasing in count), but it does flip the
+    // `previousUpNextWasNonEmpty` flag from false → true so the next
+    // genuine drain after this add actually fires the detector. Routing
+    // through the same helper keeps the flag-update discipline in one
+    // place — the helper short-circuits on a non-transition.
+    notifyUpNextMutated()
+  }
+
+  /// Convenience funnel for the Phase-3 user-facing add paths
+  /// (track-context-menu "Add to Up Next" and the sidebar landing's
+  /// `SongDragItem` drop target). Caller hands over `song.id`s — the
+  /// only stable identity the track-table selection and the drag payload
+  /// both carry; this method does the batched store fetch
+  /// (`[[djroomba-sqlite-batch-idioms]]`, never per-row) and re-pairs
+  /// each `Song` with its own `musicItemID`. Input order is preserved;
+  /// missing ids are silently dropped (a song deleted out from under a
+  /// stale selection shouldn't crash the menu). No-op on empty input.
+  func addToUpNext(songIDs: [String], insertAt position: Int? = nil) async {
+    guard let store, !songIDs.isEmpty else { return }
+    let songsByID: [String: Song]
+    do {
+      let songs = try await store.songs(byIDs: songIDs)
+      songsByID = Dictionary(uniqueKeysWithValues: songs.map { ($0.id, $0) })
+    } catch {
+      storeError = error.localizedDescription
+      return
+    }
+    var orderedSongs = [Song]()
+    var orderedIDs = [MusicItemID]()
+    orderedSongs.reserveCapacity(songIDs.count)
+    orderedIDs.reserveCapacity(songIDs.count)
+    for id in songIDs {
+      guard let song = songsByID[id] else { continue }
+      orderedSongs.append(song)
+      orderedIDs.append(MusicItemID(song.musicItemID))
+    }
+    guard !orderedSongs.isEmpty else { return }
+    addToUpNext(orderedSongs, musicItemIDs: orderedIDs, insertAt: position)
+  }
+
+  func removeFromUpNext(positions: [Int]) {
+    upNext.remove(at: positions)
+    notifyUpNextMutated()
+  }
+
+  func clearUpNext() {
+    upNext.clear()
+    notifyUpNextMutated()
+  }
+
+  /// 1-based "move these queue rows to the top", preserving relative
+  /// order. Funnels through the controller so any future side-effect
+  /// (logging, auto-fill bookkeeping) lands in one place — even though
+  /// the service does the mechanical work today.
+  func moveToTopOfUpNext(positions: [Int]) {
+    upNext.moveToTop(positions: positions)
+  }
+
+  /// Debug-menu affordance: pick the first `count` tracks of whichever
+  /// surface the user is looking at — the selected playlist's detail
+  /// (already loaded), or the Recently Played landing's rows — and
+  /// append them to the Up Next queue. Kept past Phase 3 as a permanent
+  /// developer / computer-use convenience (Phase 3's "Add to Up Next"
+  /// context-menu and the landing-row drop target are the user-facing
+  /// routes). No-op if there's no source to seed from.
+  func seedUpNextFromCurrentSelection(count: Int = 3) async {
+    guard count > 0 else { return }
+    let sourceRows: [TrackRow]
+    if let detail = detailService.detail, !detail.tracks.isEmpty {
+      sourceRows = Array(detail.tracks.prefix(count))
+    } else if !recentlyPlayed.rows.isEmpty {
+      sourceRows = Array(recentlyPlayed.rows.prefix(count))
+    } else {
+      return
+    }
+    await addToUpNext(songIDs: sourceRows.map(\.songID))
+  }
+
+  /// Click-to-play on a queue row: consume everything above `position`
+  /// (inclusive) and play the row at `position`. Resolves the entry's
+  /// `MusicItemID` against MusicKit on the spot (the same per-id
+  /// `equalTo` round-trip the app-playlist path uses) and starts a
+  /// one-song queue through the existing F1a `startResolvedQueue`
+  /// path — no new playback infra. No-op on a position that doesn't
+  /// exist (the queue mutated under a stale selection).
+  func playFromUpNext(position: Int) async {
+    guard let entry = upNext.consumeThrough(position: position) else { return }
+    notifyUpNextMutated()
+    await playUpNextEntry(entry)
+  }
+
   /// Show a synthetic genre collection in the top pane (genre-graph
   /// navigation). Records the pre-change destination, clears the sidebar
   /// selection (so no playlist row stays highlighted) WITHOUT recording a
@@ -1206,6 +1361,25 @@ final class MusicController {
   /// reads it from a view body, and it must stay that way.
   @ObservationIgnored private var activePlayContext = ActivePlayContext()
 
+  /// `true` while an Up Next pop's async resolve+play is in flight.
+  /// `@ObservationIgnored` because the playback hook reads/writes it
+  /// from the 0.5 s monitor tick — no view path reads it. See
+  /// `dispatchUpNextIfNeeded` for the bounded re-entry argument.
+  @ObservationIgnored private var upNextDispatchInFlight = false
+
+  /// Phase-5 auto-fill: was the Up Next queue non-empty at the most
+  /// recently observed callsite? Every controller-level mutator that
+  /// can shrink the queue calls `notifyUpNextMutated` after touching
+  /// the service; the helper compares this flag with the new
+  /// `upNext.isEmpty` and dispatches the auto-fill task on the
+  /// non-empty → empty transition. The plan deliberately chose this
+  /// callsite-flag idiom over `withObservationTracking` on the
+  /// `@MainActor @Observable` controller to match the file's existing
+  /// direct-reaction style (`dispatchUpNextIfNeeded`, the watermark
+  /// guard, etc.) and to keep the trigger sites grep-able.
+  /// `@ObservationIgnored` because no view reads it.
+  @ObservationIgnored private var previousUpNextWasNonEmpty = false
+
   /// The destination currently shown in the top pane: a genre takes
   /// precedence (it's mutually exclusive with a playlist), else the
   /// selected playlist, else nil (the Recently-Played landing — never
@@ -1305,11 +1479,13 @@ final class MusicController {
     if
       let id = selectedPlaylistID,
       id != Self.recentlyPlayedLandingID,
+      id != Self.upNextLandingID,
       !allSummaries.contains(where: { $0.id == id })
     {
       // Playlist disappeared between refreshes — clear silently.
-      // The Recently-Played-landing sentinel isn't a playlist and isn't
-      // expected to appear in `allSummaries`, so it's excepted here.
+      // The Recently-Played-landing + Up-Next-landing sentinels aren't
+      // playlists and aren't expected to appear in `allSummaries`, so
+      // they're excepted here.
       selectedPlaylistID = nil
     } else if let summary = selectedSummary {
       // Re-fetch fresh detail for the still-selected playlist.
@@ -1456,14 +1632,17 @@ final class MusicController {
       preferences.lastSelectedPlaylistID = summary.id
       detailService.select(summary)
     } else {
-      // The Recently-Played-landing sentinel resolves to no `summary`
-      // (it's not in `summariesByID`) but is still a real, restorable
-      // selection — persist the id so a relaunch lands back on the
-      // tracks view. Other "no summary" cases (nil / cleared) reset
-      // the pref as before.
-      if selectedPlaylistID == Self.recentlyPlayedLandingID {
+      // The Recently-Played-landing + Up-Next-landing sentinels
+      // resolve to no `summary` (they're not in `summariesByID`) but
+      // are still real, restorable selections — persist the id so a
+      // relaunch lands back on the right tracks view. Other "no
+      // summary" cases (nil / cleared) reset the pref as before.
+      switch selectedPlaylistID {
+      case Self.recentlyPlayedLandingID:
         preferences.lastSelectedPlaylistID = Self.recentlyPlayedLandingID
-      } else {
+      case Self.upNextLandingID:
+        preferences.lastSelectedPlaylistID = Self.upNextLandingID
+      default:
         preferences.lastSelectedPlaylistID = nil
       }
       detailService.clear()
@@ -1473,6 +1652,7 @@ final class MusicController {
   private func restoreSelection() {
     guard let raw = preferences.lastSelectedPlaylistID else { return }
     let isLanding = raw == Self.recentlyPlayedLandingID
+      || raw == Self.upNextLandingID
     if isLanding || allSummaries.contains(where: { $0.id == raw }) {
       // Launch restore must not create phantom Back history and must
       // not touch `selectedGenre` — `navBackStack` is in-memory only
@@ -1629,6 +1809,17 @@ final class MusicController {
     // hole isn't retried every tick and the next real transition is
     // still detected. A `nil` position simply records nothing.
     activePlayContext.lastRecordedQueueIndex = recordIndex
+
+    // Up Next dominance: a transition is the moment the playlist
+    // *would* have advanced; preempt with the queue head before the
+    // user hears more than a tick of the playlist's own next track.
+    // Idempotent — `popHead` mutates `upNext.entries` synchronously
+    // and `playUpNextEntry` will reset `activePlayContext` once its
+    // resolve lands, so subsequent ticks see "no transition" until
+    // the queue song itself ends. Recording the play stat for the
+    // now-superseded playlist track below is the accepted Phase-1
+    // edge — the song was current at this tick, even if briefly.
+    dispatchUpNextIfNeeded()
 
     guard
       let songID = PlaybackResolver.storedSongID(
@@ -1845,6 +2036,96 @@ final class MusicController {
       storeError = error.localizedDescription
       return false
     }
+  }
+
+  /// Build a one-song `Resolution` for `entry` (resolving via the
+  /// per-id `equalTo` path the app-playlist branch uses), then start
+  /// it through the canonical `startResolvedQueue` helper so the
+  /// Phase-2 canonical context, the Phase-4 watermark seed, and the
+  /// F1a chunk wiring all land on the same invariant-sensitive
+  /// sequence as a normal play. A resolve miss is silently tolerated
+  /// (matches `playRecentlyPlayed`) — the queue's denormalised
+  /// snapshot is fine for rendering but Apple may have de-listed the
+  /// song since add-time; the error surface is `resolver.lastError`,
+  /// not `storeError`.
+  private func playUpNextEntry(_ entry: UpNextService.Entry) async {
+    let row = TrackRow(song: entry.song, position: 1)
+    guard let resolution = await resolver.resolveAppPlaylist(rows: [row], startAt: row) else {
+      return
+    }
+    let didStart = await startResolvedQueue(
+      resolution,
+      // No backing playlist — the queue context id is nil, exactly as the
+      // Recently-Played start path. Stats attribution stays the Phase-2
+      // structural-position path (never an Apple id).
+      contextID: nil,
+      beforePlay: nil,
+    )
+    if didStart {
+      await recordPlayStart(startedSongID: resolution.startSongID ?? entry.song.id)
+    }
+  }
+
+  /// Playback-dominance hook (`plans/up-next-queue.md` — "Playback
+  /// dominance hook"). The Up Next queue always preempts the natural
+  /// playlist advance: on a detected end-of-song transition (the
+  /// existing `detectAndRecordAdvance` watermark guard makes this
+  /// fire exactly once per real transition) OR an explicit Next press,
+  /// if the queue is non-empty we pop the head and start a one-song
+  /// resolved queue with it. When the queue is empty this is a no-op
+  /// and the player falls through to whatever it was going to do
+  /// (advance to the next playlist track / stop at the end). Idempotent
+  /// re-entry is bounded by the watermark: once we pop and swap the
+  /// player queue, `activePlayContext` is reset to the new single-song
+  /// context with `lastRecordedQueueIndex` seeded to 0, so subsequent
+  /// 0.5 s ticks see "no transition" until that song ends and the cycle
+  /// repeats. Phase 5 will hook the queue's non-empty-to-empty
+  /// transition here for auto-fill; do NOT add that here.
+  private func dispatchUpNextIfNeeded() {
+    // In-flight guard: the resolve + queue-swap inside
+    // `playUpNextEntry` is async, so a 0.5 s monitor tick that fires
+    // mid-resolve would otherwise see the still-old `activePlayContext`
+    // transition past *another* song boundary and pop a second queue
+    // head before the first has even started playing. The flag is set
+    // synchronously before the dispatch and cleared synchronously after
+    // the resolve+play finishes on the main actor — single-threaded
+    // `@MainActor` makes this a safe bool, no lock.
+    guard !upNext.isEmpty, !upNextDispatchInFlight else { return }
+    guard let entry = upNext.popHead() else { return }
+    upNextDispatchInFlight = true
+    notifyUpNextMutated()
+    Task {
+      await playUpNextEntry(entry)
+      upNextDispatchInFlight = false
+    }
+  }
+
+  /// Phase-5 drain detector. Called by every controller-level mutator
+  /// that can shrink the Up Next queue (`skipNext`'s pop branch,
+  /// `dispatchUpNextIfNeeded`, `playFromUpNext`, `removeFromUpNext`,
+  /// `clearUpNext`). Compares the queue's pre-mutation emptiness flag
+  /// (`previousUpNextWasNonEmpty`) with the post-mutation `isEmpty`
+  /// and fires `GPTService.autoFillUpNext()` on the non-empty → empty
+  /// transition, gated on the user's opt-in toggle + a configured API
+  /// key. The GPT side single-flight-guards itself, so calling this
+  /// twice in a row across a re-drain after the first auto-fill task
+  /// returned is fine.
+  ///
+  /// Note we update `previousUpNextWasNonEmpty` unconditionally at the
+  /// tail — the transition detector only fires once per drain because
+  /// the next call's `previousUpNextWasNonEmpty = false` short-circuits
+  /// the predicate until the queue refills and is then re-emptied.
+  private func notifyUpNextMutated() {
+    let isEmptyNow = upNext.isEmpty
+    let drained = UpNextDrainDetector.didDrain(
+      previousWasNonEmpty: previousUpNextWasNonEmpty,
+      isEmptyNow: isEmptyNow,
+    )
+    previousUpNextWasNonEmpty = !isEmptyNow
+    guard drained else { return }
+    guard UserDefaults.standard.bool(forKey: GPTService.autoFillToggleKey) else { return }
+    guard gpt.isKeyConfigured else { return }
+    gpt.autoFillUpNext()
   }
 
   /// The single funnel for the membership-mutating app-playlist edits

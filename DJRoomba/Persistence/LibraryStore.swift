@@ -599,6 +599,26 @@ struct LibraryStore: Sendable {
     }
   }
 
+  /// Batched fetch of `Song` rows by primary key. Chunked under the
+  /// SQLite host-variable limit so a large id list doesn't blow up the
+  /// IN-list; one read transaction per chunk. Order of the returned
+  /// array is **not** guaranteed to match `ids` — callers that need a
+  /// specific order should index by `Song.id` (a `Dictionary` over the
+  /// result) and rebuild the sequence themselves. Missing ids are
+  /// silently dropped — same tolerance as `song(id:)` returning nil.
+  func songs(byIDs ids: [String]) async throws -> [Song] {
+    guard !ids.isEmpty else { return [] }
+    return try await database.dbQueue.read { db in
+      var collected = [Song]()
+      collected.reserveCapacity(ids.count)
+      for chunk in ids.chunked(into: Self.sqliteVariableLimit) {
+        let songs = try Song.fetchAll(db, keys: chunk)
+        collected.append(contentsOf: songs)
+      }
+      return collected
+    }
+  }
+
   /// Every song in the library, materialized into `[Song]`.
   ///
   /// ⚠️ **Residency footgun (Phase B — `plans/memory-and-laziness.md`).**

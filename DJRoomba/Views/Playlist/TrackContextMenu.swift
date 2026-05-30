@@ -24,6 +24,14 @@ struct TrackContextMenu: View {
           Task { await controller.play(row) }
         }
       }
+      // Queue is the transient / immediate destination; placed above
+      // the longer-term "Add to Playlist" / "Add to Genre" submenus
+      // (the macos-design call). A flat menu item — Up Next is an
+      // append, not a pick-one-of-many surface like the playlist /
+      // genre submenus below.
+      Button("Add to Up Next", systemImage: "text.line.first.and.arrowtriangle.forward") {
+        addSelectedToUpNext()
+      }
       Menu("Add to Playlist") {
         addToPlaylistContent
       }
@@ -85,6 +93,15 @@ struct TrackContextMenu: View {
   private func addSelected(to playlistID: String) {
     let ids = rows.map(\.songID)
     Task { await controller.addSongs(ids, toAppPlaylist: playlistID) }
+  }
+
+  /// Fans the resolved selection out through the controller's batched
+  /// `addToUpNext(songIDs:)` funnel — the same path the sidebar
+  /// landing's drop target uses, so context-menu adds and drag-drop
+  /// adds are observationally identical.
+  private func addSelectedToUpNext() {
+    let ids = rows.map(\.songID)
+    Task { await controller.addToUpNext(songIDs: ids) }
   }
 
   private func createPlaylistWithSelection() {

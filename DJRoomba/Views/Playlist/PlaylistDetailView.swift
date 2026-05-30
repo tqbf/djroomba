@@ -13,7 +13,14 @@ struct PlaylistDetailView: View {
     @Bindable var controller = controller
 
     return Group {
-      if controller.isShowingRecentlyPlayedLanding {
+      if controller.isShowingUpNextLanding {
+        // Sibling landing of recently-played: the user picked the
+        // explicit "Up Next" sidebar row (sentinel id). The two
+        // landings are mutually exclusive — `isShowingRecentlyPlayedLanding`
+        // explicitly rejects the Up Next sentinel — so this branch
+        // wins cleanly.
+        UpNextView()
+      } else if controller.isShowingRecentlyPlayedLanding {
         // Either nothing is selected, or the user picked the explicit
         // "All Recently Played Tracks" sidebar row (sentinel id) — the
         // landing surface is the user's Recently Played, not a dead
