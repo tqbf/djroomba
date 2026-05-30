@@ -37,6 +37,67 @@ final class PlaybackService {
   /// no I/O; the detector fires its SQLite write off-main in a `Task`.
   @ObservationIgnored var onSnapshotRefresh: (@MainActor () -> Void)?
 
+  /// Invoked after `refreshSnapshot()` when the player's queue has run
+  /// out of entries (`currentEntry == nil`) AND no F1a chunk swap is
+  /// pending or in flight. This is the **natural end-of-song** signal
+  /// for a single-song queue (the Up Next path's load-bearing case): the
+  /// 0.5 s `onSnapshotRefresh` hook's `queueIndex`-transition detector
+  /// can't see it because a single-song `ApplicationMusicPlayer.Queue`
+  /// either wraps to entry 0 (no index change) or stops (queue empties,
+  /// `snapshot.queueIndex` goes nil — also not a transition), so the
+  /// queue head never gets popped without a second signal. Mirrors the
+  /// F1a chunk-swap monitor's shape: same source-of-truth
+  /// (`player.queue.currentEntry == nil`), same MainActor closure
+  /// idiom, fires *after* the chunk-swap detector so the chunk-swap
+  /// case is handled by `advanceToNextChunkIfNeeded` and this only
+  /// fires when there's nothing to swap to. `MusicController` wires
+  /// this to `dispatchUpNextIfNeeded()`, whose existing
+  /// `upNextDispatchInFlight` guard collapses double-fires from the
+  /// 0.5 s tick.
+  @ObservationIgnored var onQueueEmptied: (@MainActor () -> Void)?
+
+  /// Pure predicate for the "queue drained, signal end-of-song" decision
+  /// that fires `onQueueEmptied`. Returns true on a `.playing → .paused`
+  /// transition where `playbackTime` has wrapped back to ~0 (the macOS
+  /// single-song-queue natural-end signal — empirically the engine wraps
+  /// to entry 0 and goes `.paused` at `playbackTime == 0`, NOT `.stopped`
+  /// as the docs would suggest) while (a) no F1a chunk swap is in flight
+  /// (the brief window where the player momentarily shows the chunk-end
+  /// state, not an Up Next signal); (b) no next chunk exists to swap to
+  /// (so the F1a `advanceToNextChunkIfNeeded` path can't take it).
+  /// Extracted so the five-AND is unit-testable without spinning up
+  /// MusicKit.
+  ///
+  /// **The playbackTime wrap is the load-bearing tell vs. a user pause.**
+  /// A user pause near the song's middle/end leaves `playbackTime` at
+  /// the paused-at value; the natural-end wrap jumps it back to ~0. The
+  /// `playbackTime < playbackTimeWrapEpsilon` threshold (0.5 s) catches
+  /// the wrap without misfiring on a "user paused at the very start"
+  /// edge — and at the very start there's no Up Next entry that would
+  /// have advanced anyway. Discovered live on the signed build via
+  /// the `playback-diag` unified-log probe (2026-05-30): natural song
+  /// end logged `status playing → paused; playbackTime=0.138`.
+  nonisolated static func shouldSignalQueueEmptied(
+    chunkSwapInFlight: Bool,
+    currentChunkIndex: Int,
+    pendingChunkCount: Int,
+    previousStatus: PlayerStateSnapshot.Status,
+    currentStatus: PlayerStateSnapshot.Status,
+    playbackTime: TimeInterval,
+  ) -> Bool {
+    !chunkSwapInFlight
+      && currentChunkIndex + 1 >= pendingChunkCount
+      && previousStatus == .playing
+      && (currentStatus == .paused || currentStatus == .stopped)
+      && playbackTime < playbackTimeWrapEpsilon
+  }
+
+  /// Threshold on `playbackTime` distinguishing "the engine wrapped to
+  /// start of song after natural end" (~0) from "user paused mid-song"
+  /// (any non-trivial value). 0.5 s tolerates the ~0.14 s observed on
+  /// live macOS without making the predicate brittle on faster machines.
+  nonisolated static let playbackTimeWrapEpsilon: TimeInterval = 0.5
+
   func startMonitoring() {
     guard monitorTask == nil else { return }
     monitorTask = Task { [weak self] in
@@ -250,6 +311,30 @@ final class PlaybackService {
     refreshSnapshot()
   }
 
+  /// Seek the playhead to `seconds` within the current entry. Clamped to
+  /// `[0, duration]` so a wild slider drag past the end can't write a
+  /// nonsense value into `player.playbackTime`. `refreshSnapshot()` is
+  /// called immediately so the now-playing bar reflects the new position
+  /// without waiting for the ~0.5 s monitor tick. Idempotent w.r.t.
+  /// playback state — a seek while paused stays paused, a seek while
+  /// playing stays playing (`player.playbackTime` is just an assignment;
+  /// it does not toggle the engine).
+  ///
+  /// Caller responsibility: only invoke while there's a current entry
+  /// (the now-playing bar gates this on `snapshot.hasContent` + a
+  /// known `duration`). A seek with no current entry is a no-op.
+  func seek(to seconds: TimeInterval) {
+    guard player.queue.currentEntry != nil else { return }
+    let clamped: TimeInterval = {
+      guard let duration = snapshot.duration, duration > 0 else {
+        return max(0, seconds)
+      }
+      return min(max(0, seconds), duration)
+    }()
+    player.playbackTime = clamped
+    refreshSnapshot()
+  }
+
   // MARK: Private
 
   /// F1a sequential-sub-queue state.
@@ -326,6 +411,14 @@ final class PlaybackService {
   /// MainActor-serialized state, set on the MainActor, read on the
   /// MainActor — no actor hop, no lock.
   @ObservationIgnored private var chunkSwapInFlight = false
+
+  /// Previous-tick playback status, captured at the START of every
+  /// `refreshSnapshot()` so the natural-end-of-song detector (which fires
+  /// `onQueueEmptied` for the Up Next path) can spot a `.playing →
+  /// .stopped` transition. Initialized to `.stopped` so the first tick
+  /// after launch cannot synthesize a phantom transition (`.stopped →
+  /// .stopped` is a no-op).
+  @ObservationIgnored private var previousPlaybackStatus = PlayerStateSnapshot.Status.stopped
 
   /// Namespace for the single-shot `play(songs:startingAt:)` path
   /// (Phase 4 of `plans/catalog-playlists.md`). Set on entry by the
@@ -563,6 +656,7 @@ final class PlaybackService {
   }
 
   private func refreshSnapshot() {
+    let previousStatus = previousPlaybackStatus
     var snap = PlayerStateSnapshot()
     snap.status = Self.map(player.state.playbackStatus)
     snap.elapsed = player.playbackTime
@@ -634,6 +728,40 @@ final class PlaybackService {
     // double-swapping). Called LAST so the detector observed the final
     // queueIndex of the just-finished chunk first.
     advanceToNextChunkIfNeeded()
+
+    // Natural end-of-song fallthrough for the Up Next path. The chunk-
+    // swap detector above only fires when there's a NEXT chunk to swap
+    // to; for a single-song queue (the Up Next dispatch shape) there
+    // isn't, and the `queueIndex`-transition detector hung off
+    // `onSnapshotRefresh` can't see the end either: empirically a
+    // single-song `ApplicationMusicPlayer.Queue` on macOS WRAPS to
+    // entry 0 at natural end with `status playing → paused;
+    // playbackTime=0.14` (live-captured via the playback-diag unified-
+    // log probe, 2026-05-30) — `currentEntry` stays non-nil and
+    // `queueIndex` doesn't change. The wrap-to-zero playbackTime is the
+    // load-bearing distinguishing tell vs. a user pause, which leaves
+    // `playbackTime` at the paused-at value. Re-entry across 0.5 s
+    // ticks is gated by the controller's `upNextDispatchInFlight`; the
+    // `previousStatus == .playing` check pins this to the transition
+    // edge so a subsequent paused→paused tick is a no-op.
+    if
+      Self.shouldSignalQueueEmptied(
+        chunkSwapInFlight: chunkSwapInFlight,
+        currentChunkIndex: currentChunkIndex,
+        pendingChunkCount: pendingChunks.count,
+        previousStatus: previousStatus,
+        currentStatus: snap.status,
+        playbackTime: snap.elapsed,
+      )
+    {
+      onQueueEmptied?()
+    }
+
+    // Update the previous-status watermark UNCONDITIONALLY at the tail
+    // — even when the predicate didn't fire — so the next tick's
+    // transition check sees the freshest prior state. Off the predicate
+    // path so a transition can never be observed twice.
+    previousPlaybackStatus = snap.status
   }
 
 }

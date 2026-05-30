@@ -262,17 +262,42 @@ trackpad gesture path plus a parallel mouse-friendly affordance.
 
 ## Deferred (next phases)
 
+- **Phase 2 — Responses API migration (next up).** Swap `GPTService`
+  from `OpenAIChatModel` (Chat Completions, `/v1/chat/completions`) to
+  `OpenAIResponsesModel` (Responses, `/v1/responses`). Both adapters
+  already exist in `Vendor/contextwindow-swift/Sources/
+  ContextWindowOpenAI/` — only the Chat one is wired today
+  (`GPTService.swift:603, :765`). **Motivation:** the per-turn
+  reasoning-effort selector (grace note 5, `DJROOMBA PATCH 3`) is
+  blocked at the OpenAI server side — `/v1/chat/completions` returns
+  HTTP 400 when `reasoning_effort` is set AND function tools are
+  bound, and the assistant always has 13 tools bound, so every
+  non-Medium turn fails end-to-end. Responses is the documented home
+  for `reasoning_effort` and supports tools at every effort level.
+  Scope: re-point `GPTService`'s model construction at
+  `OpenAIResponsesModel`; verify `DJROOMBA PATCH 1` (multi-turn
+  `tool_call_id`) is unnecessary on Responses (the API shape differs
+  — Responses uses its own response-input format which probably
+  doesn't suffer the Chat-side bug) or port it across; verify PATCH 2
+  (`service_tier`) and PATCH 3 (`reasoning_effort`) land on the
+  Responses request type, or are accepted natively upstream; realign
+  the `ReasoningEffort` enum to gpt-5.4's actual value set
+  (`none / low / medium / high / xhigh` — no `minimal`); live-verify
+  end-to-end with tools + high reasoning. Also touches `Assistant
+  Summarizer` (the `gpt-5.4-mini` titler) — same migration applies.
 - **Phase 3 — Streaming + model picker.** Pull model choice into
-  Settings. Consider the Responses adapter (`OpenAIResponsesModel`
-  already in the vendored package). Stream the assistant turn so the
-  transcript reveals progressively.
+  Settings. Stream the assistant turn so the transcript reveals
+  progressively. (Streaming pairs naturally with the Responses
+  migration above — Responses' SSE format is the canonical streaming
+  surface, so it makes sense to do these in either order or together.)
 - **Phase 4 — Tool surface polish.** A one-shot single-song queue
   path so `play_track` doesn't need a playlist context. Token spend
   surfaced in the Assistant pane / Settings (the `ContextWindow`
   metrics actor already accumulates this).
-- **Phase 5 — Vendoring graduation.** Send PATCH 1 + PATCH 2
+- **Phase 5 — Vendoring graduation.** Send PATCH 1 + PATCH 2 + PATCH 3
   upstream to `tqbf/contextwindow-swift`, retire `Vendor/
-  contextwindow-swift`.
+  contextwindow-swift`. (Phase 2's Responses migration may render
+  some of these patches moot — re-evaluate at that point.)
 
 ## Risks carried forward
 

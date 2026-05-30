@@ -4,9 +4,11 @@ An ephemeral, **in-memory** "play these tracks next" queue that takes
 precedence over normal playlist advance, can be edited from a sidebar
 landing surface peer to "All Recently Played Tracks", is exposed to the
 GPT assistant via four `up_next_*` tools, and — when an opt-in toggle is
-on — asks the assistant for ten more tracks in a fresh conversation the
-moment the queue drains. The intent is a continuous stream of music
-populated ten songs at a time that the user nudges in different
+on — asks the assistant for eleven more tracks in a fresh conversation
+the moment the queue depth drops to one. The intent is a continuous
+stream of music populated eleven songs at a time (refilling while one
+track is still playing, so the assistant's `gpt-5.4`-flex turn lands
+under the cover of audible playback) that the user nudges in different
 directions by talking to DJ Roomba.
 
 ## Product decisions (locked)
@@ -14,7 +16,7 @@ directions by talking to DJ Roomba.
 | Decision | Choice | Rationale |
 |---|---|---|
 | Storage | **In-memory** on `MusicController`; lost on quit. | Matches the "ephemeral virtual playlist" framing the user wants. Avoids a v10 schema migration. Auto-fill (Phase 5) covers the "I just relaunched and the queue is empty" case for users who want it. |
-| Playback dominance | Queue **always preempts** the natural playlist advance. End-of-song and Next both drain the queue head first; only when empty do we fall through to whatever the player would have done. | The "10 at a time, then ask for 10 more" loop only works if queue items actually play. User-stated escape hatch is "clear the queue". |
+| Playback dominance | Queue **always preempts** the natural playlist advance. End-of-song and Next both drain the queue head first; only when empty do we fall through to whatever the player would have done. | The "11 at a time, refill at 1 remaining" loop only works if queue items actually play. User-stated escape hatch is "clear the queue". |
 | Click a non-head queue row | **Consumes everything above it**: clicking #5 plays #5 and removes #1–#5 in one shot. | User-chosen. Removes the only path where the queue's order would visibly contradict play order. |
 | Auto-fill on empty | Opt-in via UserDefaults toggle, **default OFF for now**. | User-chosen for v1. Phase 5 ships the wiring; the toggle lives in OpenAI Settings so it's reachable. |
 | Tool names | `up_next_count`, `up_next_get`, `up_next_add`, `up_next_remove`. | Matches `play_track` / `play_playlist` snake-case convention; `up_next_` namespace avoids colliding with `ApplicationMusicPlayer.Queue` connotations. |
@@ -45,7 +47,8 @@ snapshot it needs to render — title, artist, album, artwork ref — so
 the queue table renders without a SQLite round-trip per row and is
 unaffected by mid-queue library mutation (e.g. someone deletes a song
 out from under us). The size is bounded by user behaviour, not library
-size; ten-at-a-time fill keeps `entries.count` small in practice.
+size; eleven-at-a-time fill keeps `entries.count` small in practice
+(steady-state floor 1, ceiling 12).
 
 Service methods (all `@MainActor`, all return synchronously — this is
 pure in-memory state with no I/O):
@@ -88,7 +91,8 @@ on advance-detected OR user-pressed-Next:
                        label: "Up Next",
                        startAt: 0)
     record played-from-queue stat (existing pipeline)
-    if upNext.isEmpty and autoFillOn: GPTService.autoFillUpNext()
+    if upNext.count <= refillThreshold (=1) and autoFillOn:
+      GPTService.autoFillUpNext()  # single-flight-guarded
 ```
 
 The single-song play uses the existing `startResolvedQueue` path
@@ -153,25 +157,41 @@ gets a paragraph teaching the model the queue's semantics and naming
 the tools — keep it tight; per-tool affordances live in each tool's
 schema description.
 
-### Auto-fill on empty (Phase 5)
+### Auto-fill on queue low-water (Phase 5)
 
 UserDefaults key `djroomba.upNext.autoFillEnabled` (default `false`),
-toggle in OpenAI Settings ("Auto-fill Up Next when empty").
+toggle in OpenAI Settings ("Auto-fill Up Next when empty"; the UI
+label predates the low-water refinement but the footer copy is
+accurate).
 
-When `upNext.entries` transitions from non-empty to empty AND the
-toggle is on AND `gpt.isKeyConfigured` AND no auto-fill is already in
-flight, `MusicController` dispatches `GPTService.autoFillUpNext()`:
+`UpNextDrainDetector` pairs two named constants:
+
+- `targetDepth = 11` — how many tracks the seed prompt asks for.
+- `refillThreshold = 1` — the queue depth that triggers a refill.
+
+When `upNext.count` transitions from strictly above `refillThreshold`
+to at-or-below it (`oldCount > 1 && newCount <= 1`) AND the toggle is
+on AND `gpt.isKeyConfigured` AND no auto-fill is already in flight,
+`MusicController` dispatches `GPTService.autoFillUpNext()`:
 
 1. `await gpt.newConversation()` — mints a fresh context (the user
    wanted "in a new conversation").
 2. `await gpt.sendMessage(autoFillSeed)` where `autoFillSeed` is a
    short instruction grounding the model in the queue tools, telling
-   it to use `recently_played` + `app_state` to pick ten tracks, and
-   to add them via `up_next_add`.
+   it to use `recently_played` + `app_state` to pick eleven tracks,
+   and to add them via `up_next_add`.
 3. One-at-a-time guard: a `Task<Void, Never>?` handle on
    `GPTService`. If the queue refills before the task lands, the task
-   still completes (the model may add ten on top of the user-added
-   ones; that's fine).
+   still completes (the model may add eleven on top of the
+   user-added ones; that's fine — `entries.count` stays small).
+
+**Why low-water instead of empty.** The model loop runs against
+`gpt-5.4` on `service_tier: "flex"`, which can sit ~10–30 s on a
+typical refill turn. Triggering at empty leaves a dead-air gap
+between the last queued track and the first newly-added one;
+triggering at depth 1 gives the assistant a full song's worth of
+playback to complete the round-trip, so the user always has something
+queued.
 
 No retry on failure beyond what the assistant naturally does inside
 its tool loop; failures land in unified log under the existing
@@ -211,12 +231,16 @@ playback / UI phases). I push PRs and never merge.
 - System prompt paragraph added in `GPTService.swift`.
 - Live-verified: "Add five Pinback tracks to up next" → tool calls land → queue populates → first plays automatically when current song ends.
 
-### Phase 5 — Auto-fill toggle + empty-queue dispatch
+### Phase 5 — Auto-fill toggle + low-water dispatch
 
 - UserDefaults toggle + OpenAI Settings UI.
-- `MusicController` watches the non-empty → empty transition.
-- `GPTService.autoFillUpNext()`.
-- Live-verified: enable toggle, deplete queue, watch new conversation appear in sidebar with ten tool calls and ten queue rows.
+- `MusicController` watches the `oldCount > 1 → newCount <= 1`
+  transition via `UpNextDrainDetector.didCrossLowWater`.
+- `GPTService.autoFillUpNext()` mints a fresh conversation and seeds
+  it with the "add 11 tracks" instruction.
+- Live-verified: enable toggle, drain queue to depth 1, watch a new
+  conversation appear in the sidebar that calls `up_next_add` with
+  ~11 track ids while the depth-1 song is still playing.
 
 ## Open / deferred
 

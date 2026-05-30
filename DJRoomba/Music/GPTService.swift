@@ -45,6 +45,45 @@ final class GPTService {
 
   // MARK: Internal
 
+  /// Per-turn reasoning-effort override for the chat model.
+  ///
+  /// Maps 1:1 to OpenAI's `reasoning_effort` wire values (DJROOMBA
+  /// PATCH 3 in `OpenAIChatModel`). `.default` aliases `.medium` —
+  /// the server default — and is special-cased to OMIT the wire
+  /// field entirely so a default-effort turn produces the cleanest
+  /// possible request body (and avoids implying intent the user
+  /// didn't express). Higher = slower + more deliberate.
+  enum ReasoningEffort: String, CaseIterable, Sendable {
+    case minimal
+    case low
+    case medium
+    case high
+
+    // MARK: Internal
+
+    /// Alias for the user-visible "default" state — sends nothing on
+    /// the wire and lets the server pick (medium).
+    static let `default` = ReasoningEffort.medium
+
+    /// Wire representation for `OpenAIChatModel.reasoningEffort`.
+    /// `.default` returns `nil` so the field is omitted from the
+    /// request body entirely; non-default values send their literal
+    /// raw string.
+    var wireValue: String? {
+      self == .default ? nil : rawValue
+    }
+
+    /// Compact label for the segmented picker chrome.
+    var shortLabel: String {
+      switch self {
+      case .minimal: "Min"
+      case .low: "Low"
+      case .medium: "Med"
+      case .high: "High"
+      }
+    }
+  }
+
   /// One rendered turn in the chat transcript.
   struct Message: Identifiable, Equatable, Sendable {
     enum Role: Sendable, Equatable {
@@ -97,11 +136,21 @@ final class GPTService {
   /// arrive. `static let` so the system prompt's auto-fill
   /// paragraph and this seed stay easy to read side-by-side.
   static let autoFillSeed = """
-    The Up Next queue just emptied and I need ten more tracks. Use \
-    `recently_played` (and `app_state` if useful) to pick what I'm \
-    likely to want next, then call `up_next_add` with the chosen \
-    track ids. Don't ask follow-up questions — just queue them.
+    The Up Next queue is running low and I need eleven more tracks. \
+    Use `recently_played` (and `app_state` if useful) to pick what \
+    I'm likely to want next, then add 11 tracks via `up_next_add` \
+    in a single call. Don't ask follow-up questions — just queue them.
     """
+
+  /// Per-turn reasoning effort override for the chat model. Drives
+  /// OpenAI's `reasoning_effort` request field on gpt-5.x (DJROOMBA
+  /// PATCH 3). The assistant pane's segmented picker writes here
+  /// before each `sendMessage`; the turn body applies the value to
+  /// `chatModel.reasoningEffort` and unconditionally resets this
+  /// property back to `.default` in `defer` so cancellations and
+  /// errors snap back too. `.default` ⇒ omit the wire field
+  /// entirely, server default (medium) applies.
+  var pendingReasoningEffort = ReasoningEffort.default
 
   /// Whether an API key is stored in the Keychain.
   private(set) var isKeyConfigured: Bool
@@ -172,35 +221,93 @@ final class GPTService {
   /// Append `text` to the conversation and drive `callModel()`. Tool
   /// calls fire inside the model's loop and are persisted as records;
   /// the transcript refresh at the tail surfaces everything.
+  ///
+  /// Cancellable: the actual model loop runs inside `inFlightTurn` so
+  /// `cancelTurn()` can drop the wait via Swift structured concurrency.
+  /// `Task.checkCancellation()` lands at the next suspension inside the
+  /// `ContextWindow.callModel()` loop (HTTP request, tool-call dispatch,
+  /// or the loop's own `await`s). The in-flight HTTP request may
+  /// complete on the server side after we cancel — we just stop waiting
+  /// on it and surface a synthetic "Turn cancelled." row in the
+  /// transcript so the user sees what happened.
   func sendMessage(_ text: String) async {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
+    guard inFlightTurn == nil else { return }
 
     isSending = true
     errorMessage = nil
-    defer { isSending = false }
 
     AssistantLog.logger.info("→ user: \(AssistantLog.truncate(trimmed), privacy: .public)")
 
-    do {
-      let session = try await ensureSession()
-      try await session.window.addPrompt(trimmed)
-      // Optimistic refresh so the user sees their own message immediately.
-      await refreshTranscript(window: session.window)
-      let reply = try await session.window.callModel()
-      AssistantLog.logger.info("← assistant: \(AssistantLog.truncate(reply), privacy: .public)")
-      await refreshTranscript(window: session.window)
-      if let currentID = currentConversationID {
-        AssistantConversationStore.setLastActivity(.now, for: currentID)
+    // DJROOMBA PATCH 3 wiring: snapshot the user's pending choice so the
+    // turn body can apply it independently of any later mutation; the
+    // `defer` snap-back fires on success, cancel, AND throw so the
+    // segmented picker always returns to its default position after the
+    // turn settles. Snap-back happens BEFORE `isSending` flips false so
+    // the UI sees the reset and the spinner disappear in one frame.
+    let effortForTurn = pendingReasoningEffort
+    let turn = Task { @MainActor [weak self] in
+      guard let self else { return }
+      defer {
+        self.pendingReasoningEffort = .default
+        self.isSending = false
+        self.inFlightTurn = nil
       }
-      refreshConversations()
-    } catch {
-      AssistantLog.logger.error("! send failed: \(String(describing: error), privacy: .public)")
-      errorMessage = "\(error)"
-      if let session {
+      do {
+        let session = try await ensureSession()
+        // Apply the per-turn effort to the shared chat model right
+        // before driving the loop. The model is a value-typed `var`
+        // on `OpenAIChatModel`; we're on the main actor and so are
+        // any other writers (`@MainActor`-isolated `GPTService`), so
+        // no separate synchronisation is needed.
+        session.chatModel.reasoningEffort = effortForTurn.wireValue
+        try Task.checkCancellation()
+        try await session.window.addPrompt(trimmed)
+        // Optimistic refresh so the user sees their own message immediately.
         await refreshTranscript(window: session.window)
+        try Task.checkCancellation()
+        let reply = try await session.window.callModel()
+        try Task.checkCancellation()
+        AssistantLog.logger.info("← assistant: \(AssistantLog.truncate(reply), privacy: .public)")
+        await refreshTranscript(window: session.window)
+        if let currentID = currentConversationID {
+          AssistantConversationStore.setLastActivity(.now, for: currentID)
+        }
+        refreshConversations()
+      } catch is CancellationError {
+        AssistantLog.logger.info("✕ turn cancelled by user")
+        appendCancelledMarker()
+      } catch {
+        if Task.isCancelled {
+          AssistantLog.logger.info("✕ turn cancelled by user (post-throw)")
+          appendCancelledMarker()
+        } else {
+          AssistantLog.logger.error("! send failed: \(String(describing: error), privacy: .public)")
+          errorMessage = "\(error)"
+          if let session {
+            await refreshTranscript(window: session.window)
+          }
+        }
       }
     }
+    inFlightTurn = turn
+    await turn.value
+  }
+
+  /// Cancel the in-flight model turn, if any. Swift structured
+  /// concurrency propagates cancellation through `ContextWindow.callModel`
+  /// — `Task.checkCancellation()` lands at the next suspension point
+  /// (the in-flight HTTP request, the next tool-call dispatch, or one of
+  /// the loop's `await`s). The server-side completion isn't aborted;
+  /// we just stop waiting for it and discard the reply. A synthetic
+  /// "Turn cancelled." marker is appended to the transcript inside the
+  /// turn's cancel branch so the user sees what happened.
+  func cancelTurn() {
+    guard let task = inFlightTurn else { return }
+    AssistantLog.logger.info("→ user cancelled turn")
+    task.cancel()
+    inFlightTurn = nil
   }
 
   /// Re-pull the transcript from the underlying context window. Cheap
@@ -342,26 +449,37 @@ final class GPTService {
   }
 
   /// Phase-5 auto-fill dispatch (`plans/up-next-queue.md` — "Auto-fill
-  /// on empty"). Called by `MusicController.notifyUpNextMutated` on the
-  /// non-empty → empty transition when the user's opt-in toggle is on
-  /// and the API key is configured. Single-flight: if a previous
-  /// auto-fill task is still running this call no-ops.
+  /// on queue low-water"). Called by
+  /// `MusicController.notifyUpNextMutated` when the queue depth crosses
+  /// `UpNextDrainDetector.refillThreshold` (=1) on the way down, with
+  /// the user's opt-in toggle on and the API key configured.
+  /// Single-flight: if a previous auto-fill task is still running this
+  /// call no-ops.
   ///
   /// The task mints a fresh conversation (the user explicitly wanted
   /// auto-fills isolated from any in-progress chat) and sends a tight
-  /// seed message instructing the model to pick ten tracks via
-  /// `recently_played` + `up_next_add`. Any failure inside `sendMessage`
-  /// surfaces via the assistant pane's `errorMessage` just like a
-  /// user-typed message would — we don't shadow-handle network errors
-  /// here. The task handle is cleared in `defer` so a re-drain after a
-  /// clean fill re-arms.
+  /// seed message instructing the model to add 11 tracks via
+  /// `recently_played` + `up_next_add`. The 11-track batch + 1-remaining
+  /// trigger gives the assistant a song's worth of playback to land
+  /// the refill, so the user doesn't sit through dead air between
+  /// batches. Any failure inside `sendMessage` surfaces via the
+  /// assistant pane's `errorMessage` just like a user-typed message
+  /// would — we don't shadow-handle network errors here. The task
+  /// handle is cleared in `defer` so a re-cross after a clean fill
+  /// re-arms.
   func autoFillUpNext() {
     guard autoFillTask == nil else { return }
-    AssistantLog.logger.info("→ auto-fill: queue drained, dispatching")
+    AssistantLog.logger.info("→ auto-fill: queue at low-water, dispatching")
     autoFillTask = Task { @MainActor [weak self] in
       defer { self?.autoFillTask = nil }
       guard let self else { return }
       await newConversation()
+      // Auto-fill should never inherit whatever per-turn effort the
+      // user had pending on the chat surface — it's a background
+      // refill, not a user turn. Force `.default` for the duration
+      // of the seed send; `sendMessage`'s own `defer` will also reset
+      // afterwards, which is fine (idempotent).
+      pendingReasoningEffort = .default
       await sendMessage(Self.autoFillSeed)
     }
   }
@@ -478,6 +596,11 @@ final class GPTService {
     let window: ContextWindow
     let executor: LateBoundToolExecutor
     let contextStore: SQLiteContextStore
+    /// Held so per-turn mutations (`reasoningEffort`) land on the same
+    /// instance the `ContextWindow` is driving — re-instantiating
+    /// would require also re-binding through `ContextWindow`'s
+    /// `Model`-typed init parameter, which we don't expose.
+    let chatModel: OpenAIChatModel
   }
 
   /// The chat model. Bumped from `gpt-4.1-mini` to `gpt-5.4` on
@@ -510,14 +633,22 @@ final class GPTService {
     `play_playlist`, which would replace the active player queue. \
     Reach for `play_playlist` / `play_track` only when the user wants \
     to start playing something right now. If the user's first message \
-    in a fresh conversation says the queue is empty and asks for \
-    tracks, the user has auto-fill enabled — silently fulfil it via \
-    `recently_played` + `up_next_add`, no preamble.
+    in a fresh conversation says the queue is running low and asks for \
+    tracks, the user has auto-fill enabled — silently fulfil it by \
+    adding 11 tracks via `recently_played` + `up_next_add`, no preamble.
     """
 
   @ObservationIgnored private var session: Session?
   @ObservationIgnored private let store: LibraryStore?
   @ObservationIgnored private let catalogIngest: CatalogIngestService?
+  /// Grace-note-3 cancel handle. Set when `sendMessage` begins driving a
+  /// turn, cleared in the task body's `defer` on completion *or*
+  /// cancellation. The outer `await turn.value` in `sendMessage` keeps the
+  /// caller's coroutine alive across cancellation so the synthetic
+  /// "Turn cancelled." marker lands before `sendMessage` returns. A
+  /// second `sendMessage` while a turn is in flight no-ops (matches the
+  /// existing `isSending`-disabled composer).
+  @ObservationIgnored private var inFlightTurn: Task<Void, Never>?
   /// Phase-5 single-flight guard. Holds the in-flight auto-fill task so
   /// a second drain-detector dispatch (e.g. the user pounding Clear
   /// twice while the first refill is still resolving) no-ops instead
@@ -662,13 +793,37 @@ final class GPTService {
       try await window.registerTool(tool)
     }
 
-    let session = Session(window: window, executor: executor, contextStore: contextStore)
+    let session = Session(
+      window: window,
+      executor: executor,
+      contextStore: contextStore,
+      chatModel: model,
+    )
     self.session = session
     currentConversationID = initialContextName
     AssistantConversationStore.setCurrentContextName(initialContextName)
     await refreshTranscript(window: window)
     refreshConversations()
     return session
+  }
+
+  /// Append a synthetic "Turn cancelled." row to the visible transcript
+  /// (only — not persisted to `assistant.sqlite`). Real records carry
+  /// positive `Int64` ids minted by SQLite; synthetic markers use a
+  /// negative id derived from the epoch microsecond so they never
+  /// collide with a real record and `ForEach`'s `Identifiable` diff is
+  /// happy across the next transcript refresh (the negative-id row
+  /// simply disappears on the next disk reload — that's the intended
+  /// behaviour, the user has the visible confirmation and any
+  /// subsequent send rebuilds from records).
+  private func appendCancelledMarker() {
+    let marker = Message(
+      id: -Int64(Date().timeIntervalSince1970 * 1_000_000),
+      role: .assistant,
+      content: "Turn cancelled.",
+      timestamp: .now,
+    )
+    messages.append(marker)
   }
 
   private func refreshTranscript(window: ContextWindow) async {

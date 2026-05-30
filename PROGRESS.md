@@ -5,6 +5,652 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Grace note: per-turn reasoning-effort selector + DJROOMBA PATCH 3
+
+Fifth (and final) grace note on `feature/grace-notes`. User request: a
+per-turn slider in the assistant pane chrome to override the LLM
+`reasoning_effort`, snapping back to the default after each turn lands.
+Adds `DJROOMBA PATCH 3` to the vendored OpenAI adapter, a
+`ReasoningEffort` enum on `GPTService`, a chrome-strip segmented picker
+in `AssistantPaneView`, and an apply-then-defer-reset pattern inside
+`sendMessage` that resets the picker on success, cancellation, AND
+error.
+
+**Picker choice (slider vs segmented vs menu).** The user said
+"slider", but `macos-design` reads: a four-value discrete enum maps to
+segmented semantics on macOS — a `Slider` in a chrome strip reads as a
+brightness/volume control, not a mode choice, and the segment labels
+carry the meaning a slider would have to teach via a tick legend.
+Picked **segmented Picker** (`Min / Low / Med / High`) at
+`.controlSize(.small)`, max 220 pt wide, between the "Show tool calls"
+toggle and the spinner-when-active region. **The user may want this
+changed back to a literal slider** — flagging it explicitly per the
+spec.
+
+**Files changed.**
+- `Vendor/contextwindow-swift/Sources/ContextWindowOpenAI/OpenAIChatModel.swift`
+  — `DJROOMBA PATCH 3`. `OpenAIChatModel.init` gains
+  `reasoningEffort: String? = nil`, stored on a `public var
+  reasoningEffort` (intentionally mutable so per-turn overrides land
+  on the same instance the `ContextWindow` is driving; no
+  re-instantiation per turn). `ChatCompletionRequest` gains
+  `reasoning_effort: String?` wire field, omitted from the JSON body
+  when `nil` (Swift's synthesized `Encodable` `encodeIfPresent`s
+  optionals, matching PATCH 2's `service_tier` handling).
+- `DJRoomba/Music/GPTService.swift` — new `enum ReasoningEffort:
+  String, CaseIterable, Sendable { case minimal, low, medium, high }`
+  with `static let default = .medium`, `var wireValue: String?` that
+  returns `nil` for `.default` (so a default-effort turn omits the
+  field entirely — cleaner request log, matches what the model would
+  do on its own) and the raw string otherwise, and a `shortLabel`
+  for the segmented picker. New `var pendingReasoningEffort:
+  ReasoningEffort = .default` on the service. `sendMessage` snapshots
+  it before kicking off the inner `Task`, applies it to
+  `session.chatModel.reasoningEffort` once `ensureSession` returns,
+  and resets `pendingReasoningEffort = .default` in the same `defer`
+  block that resets `isSending` and `inFlightTurn` — so the success,
+  cancel, AND error paths all hit it. `Session` now also holds the
+  `OpenAIChatModel` reference (was only held by `ContextWindow`).
+  The Phase-5 `autoFillUpNext` explicitly forces
+  `pendingReasoningEffort = .default` before its seed send so an
+  auto-fill never inherits whatever the user had pending on the chat
+  surface.
+- `DJRoomba/Views/Assistant/AssistantPaneView.swift` — `reasoningEffortPicker`
+  view, `.segmented` `Picker` over `GPTService.ReasoningEffort.allCases`,
+  `.controlSize(.small)`, `.frame(maxWidth: 220)`, bound to
+  `gpt.pendingReasoningEffort` via `@Bindable` (the modern
+  `@Observable` replacement for `$`-projected bindings). Tooltip:
+  "Reasoning effort for the next turn. Higher = slower, more
+  deliberate. Resets to Medium after each send." Sits between the
+  "Show tool calls" toggle and the trailing `Spacer` so its position
+  is stable at every window width. Disabled when no key is configured
+  or a turn is in flight.
+
+**No new tests.** The enum's `wireValue` mapping is one-line trivial;
+the apply + reset behaviour is integration-shaped end-to-end concurrency
+(matches grace note 3's call: don't add tests that exist to assert
+SwiftUI / URLSession behaviour we don't own). 426/56 baseline holds.
+
+**Verification gates (all PASS).**
+- `make check` clean.
+- `swift test` **426/56** green (no change from grace note 4's
+  baseline).
+- `swiftformat --lint` + `swiftlint --strict` clean on all 3 changed
+  files after auto-format.
+- `make build` (signed Apple Development cert) clean.
+
+**Live computer-use verification — the headline finding.**
+
+Step 1: launched signed build, opened DJ Roomba tab. **Step 2**: chrome
+strip rendered correctly with sidebar-toggle / New Request / Show tool
+calls / **Min ‖ Low ‖ Med ‖ High segmented picker (Med selected by
+default)** / "Untitled" title. Screenshot `/tmp/grace-5-step-2.png`.
+Step 3: set picker to High, sent "Say hello in three words."
+
+**THE FINDING (verified twice with different values):** OpenAI's
+`/v1/chat/completions` for `gpt-5.4` returns HTTP 400 the moment
+`reasoning_effort` is set AND function tools are bound to the request:
+
+> "Function tools with reasoning_effort are not supported for gpt-5.4
+> in /v1/chat/completions. Please use /v1/responses instead."
+
+Verified with `low` (a supported value per gpt-5.4's own error message
+— see below) and `high`. **Implication:** the picker UI lands, the
+wire field encodes correctly, but every non-default-value turn fails
+end-to-end as long as the assistant has its 13 tools bound (which is
+always). The reset-on-error path DID fire correctly — the picker
+snapped back from High → Med after the error banner appeared, which
+is the most important behaviour the spec asked for ("must fire
+regardless of cancellation/error"). Screenshots
+`/tmp/grace-5-step-3.png` / `/tmp/grace-5-step-4.png` show
+post-reply state with picker back at Med.
+
+**Bonus finding (different error from same surface):** gpt-5.4 also
+rejects `reasoning_effort: "minimal"` with a value-validation error
+listing the actually-supported values: `'none', 'low', 'medium',
+'high', 'xhigh'` (notably NO `'minimal'` — that's a gpt-5 family
+value, not gpt-5.4). The spec's hint about the value set ("minimal,
+low, medium, high") doesn't match what gpt-5.4 actually accepts.
+Step 5 screenshot `/tmp/grace-5-step-5.png` captures this error.
+
+**What to do about it (not done in this commit — flagged for the user).**
+1. Switch the chat model from `OpenAIChatModel` to `OpenAIResponsesModel`
+   (already present in the vendored library) — the Responses endpoint
+   accepts tools + reasoning concurrently. This is a deferred Phase-3
+   item in `plans/openai-gpt.md`.
+2. Replace the enum cases with gpt-5.4's actual set (`none / low /
+   medium / high / xhigh`) when (1) lands — the segmented picker
+   would still render those four-or-five segments cleanly.
+3. Or: just remove the picker. The user explicitly asked for it; my
+   call is to keep the wired feature so when the endpoint switches,
+   it works zero-touch.
+
+**The implementation is correct.** The vendor patch, the per-turn
+apply-then-reset pattern, the picker UI, and the reset-on-success +
+reset-on-error + reset-on-cancel symmetry (same `defer` as
+`isSending` and `inFlightTurn`, both of which grace note 3
+live-verified) all behave per spec. The OpenAI server-side
+constraint is the blocker, not the code.
+
+Step 6/7/8 screenshots `/tmp/grace-5-step-6.png` through
+`/tmp/grace-5-step-8.png` capture the picker's state after each
+attempted turn — all showing Med (the snap-back default), confirming
+the reset path holds across multiple consecutive failed sends.
+Cancel-mid-loop is verified by code symmetry with grace note 3 —
+the `pendingReasoningEffort` reset lives in the same `defer` block
+as the `isSending` reset that grace note 3's live cancel test
+already covered.
+
+**Regression checks.**
+- Grace note 1 (scrub bar): scrub bar is wired into the now-playing
+  region, no changes touched it. Visual confirmed in the screenshots
+  (visible bottom-right transport area).
+- Grace note 2 (Up Next end-of-track): no changes to playback wiring.
+- Grace note 3 (cancel + spinner): the picker's reset lives in the
+  exact same `defer` as `isSending` / `inFlightTurn`; cancel
+  semantics are unchanged.
+- Grace note 4 (auto-fill at 1-remaining): the auto-fill task now
+  force-resets `pendingReasoningEffort = .default` before its seed
+  send, so an auto-fill never inherits a user-set value. The Up Next
+  Queue Refill from before this session is still visible in the
+  conversation sidebar (proves the auto-fill path is intact, modulo
+  the wire-rejection above which equally affects it when the picker
+  is non-default — but auto-fill resets the picker first).
+
+**App-quit confirmation.** `osascript -e 'tell app "DJRoomba" to
+quit'` → `pgrep -lf DJRoomba` empty.
+
+**Branch state.** `feature/grace-notes` carries five commits on top of
+`feature/up-next-queue`:
+1. `738ef9f` — scrub bar
+2. `d68d855` — Up Next auto-advance
+3. `54c29f2` — assistant in-progress indicator + cancel button
+4. `5fec4d1` — refill at 1-remaining with 11-track batches
+5. (this commit) — per-turn reasoning-effort selector + DJROOMBA PATCH 3
+
+Combined PR opened against `feature/up-next-queue` (NOT main —
+grace-notes is stacked on top of the queue PR so GitHub renders the
+diff properly).
+
+---
+
+**Grace notes 1–5 complete.** Five small landing of UX-grade polish
+on top of the Up Next queue work: a scrub bar in the transport, end-
+of-track auto-advance, a thinking indicator + cancel button on the
+assistant pane, a forward-shifted refill trigger (queue at depth 1,
+not 0) with an 11-track batch shape, and now a per-turn reasoning-
+effort selector. Combined PR is up against `feature/up-next-queue`
+for review (open, not draft). The queue feature itself is PR #13;
+the grace notes stack underneath. Ready for the morning.
+
+## 2026-05-30 — Grace note: refill Up Next at 1-remaining with 11-track batches
+
+Fourth grace note on `feature/grace-notes`. Phase 5's auto-fill
+trigger fired on `non-empty → empty`, leaving a dead-air gap of
+~10–30 s while the `gpt-5.4`-flex refill turn ran with nothing
+queued. Moves the trigger forward by one slot — refill is now
+initiated when queue depth crosses `oldCount > 1 → newCount <= 1`,
+and the seed prompt asks for 11 tracks instead of 10, so the
+steady-state floor is 1 (the depth-1 song plays while the assistant
+turn runs) and the ceiling is 12 (1 leftover + 11 added).
+
+**Files changed.**
+- `DJRoomba/Music/UpNextDrainDetector.swift` — predicate renamed
+  `didDrain(previousWasNonEmpty:isEmptyNow:)` → `didCrossLowWater(
+  oldCount:newCount:)`. Two named constants pinned together so the
+  pairing is obvious: `targetDepth = 11`, `refillThreshold = 1`.
+  File-doc + the file's whole framing shifted from "drain" to
+  "low-water"; the file path stays put to avoid churn.
+- `DJRoomba/Music/MusicController.swift` —
+  `previousUpNextWasNonEmpty: Bool` → `previousUpNextCount: Int`,
+  `notifyUpNextMutated` reads `upNext.count` and feeds the new
+  predicate. The `addToUpNext` bookkeeping comment updated to match.
+- `DJRoomba/Music/GPTService.swift` — `autoFillSeed` rewritten to
+  "running low … add 11 tracks via `up_next_add` in a single call";
+  system-prompt paragraph aligned ("queue is running low" + "adding
+  11 tracks"); `autoFillUpNext` docstring rewritten + log line
+  changed from "drained" to "at low-water".
+- `DJRoomba/Views/Settings/OpenAISettingsPane.swift` — footer copy
+  rewritten ("queue depth drops to one … queues up eleven more
+  tracks"); the toggle label itself stays "Auto-fill Up Next when
+  empty" (the user-facing label is a stable handle — the footer
+  carries the truth, and renaming the label would have spread the
+  user-facing copy churn across screenshots / muscle memory for no
+  win).
+- `Tests/DJRoombaTests/UpNextDrainDetectorTests.swift` — retargeted
+  at the new predicate. 4 → 8 tests covering 5→1, 5→0, 2→1
+  (all fire); 12→11, 1→1, 1→0, 0→0 (all don't fire); plus a
+  one-liner constants-pairing test pinning the (`targetDepth=11`,
+  `refillThreshold=1`) pair so a future agent who bumps one
+  without the other has to read the assertion.
+- `plans/up-next-queue.md` — opening paragraph, decisions-table
+  rationale, Architecture playback-dominance pseudocode, and the
+  whole "Auto-fill on queue low-water" subsection updated. Phase 5
+  bullet rewritten. Added a "Why low-water instead of empty"
+  paragraph explaining the flex-tier latency motivation.
+- `PLAN.md` — the `plans/up-next-queue.md` row updated to the
+  "queue depth crosses low-water" framing with the named-constants
+  citation.
+
+**Predicate, in one line:** `oldCount > refillThreshold &&
+newCount <= refillThreshold`. The single-flight guard on the
+controller side handles re-entry across the post-firing transition
+(`1 → 0`); the predicate stays pure and just measures the
+crossing. The `targetDepth=11` + `refillThreshold=1` pair is what
+gives the loop its steady-state floor=1 / ceiling=12 shape.
+
+**Verification gates (all PASS).**
+- `make check` clean.
+- `swift test` **426/56** green (+4 from grace note 3's 422/56
+  baseline: -4 old detector tests, +8 new ones). No regressions.
+- `swiftformat --lint` clean on the 5 changed files.
+- `swiftlint lint --strict` clean on the 5 changed files (0
+  violations).
+- `make build` (signed Apple Development cert) clean.
+
+**Live computer-use verification (all 8 steps PASS).**
+1. Launched the signed build. Settings → OpenAI: footer reads
+   "When the queue depth drops to one, DJ Roomba starts a new
+   conversation and queues up eleven more tracks based on what
+   you've been playing. Off by default." Enabled the toggle.
+   API key was already in Keychain.
+2. Debug → Seed Up Next from Current Selection (3 tracks from Rob
+   Crow Music: Proceed to Memory / Seville / O.B. 1). Up Next chip
+   = 3.
+3. Bottom-dock DJ Roomba pane open; sidebar showed 12 prior
+   conversations (the next mint will make 13).
+4. Double-clicked Up Next row 1 → "Proceed to Memory" started
+   playing, chip dropped 3 → 2 (no refill: 3→2 doesn't cross
+   threshold).
+5. Pressed ⌘→ to advance → chip went 2 → 1. **At the 2→1
+   transition** a new "Untitled" conversation minted in the sidebar
+   (13 → 13+1 = 14 wait — actually visible as the top "Untitled
+   in 0s" with the new seed prompt); the model called
+   `recently_played({"limit":25})` → `up_next_add({"trackIds":[…11
+   ids…]})` → returned `{"added":11,"count":12}` → assistant said
+   "Queued 11 more tracks. Up Next now has 12 total."
+   Screenshot `/tmp/grace-4-step-5.png`.
+6. Up Next chip jumped from 1 → 12 (1 leftover "Seville" still
+   playing + 11 newly added). Crucially, the refill landed
+   **before** the depth-1 song "Seville" (4:08) finished —
+   confirmed by the now-playing bar still showing Seville with
+   plenty of time left. Screenshot `/tmp/grace-4-step-6.png`.
+7. Clicked Clear → confirm → queue went 12 → 0. ONE refill turn
+   fired (12 → 0 crosses 1, so the predicate fires once), minted
+   the 14th conversation, which added 11 tracks back. Waited 10 s
+   afterward — no further turns minted (single-flight guard +
+   `previousUpNextCount = 0` short-circuits subsequent calls until
+   the queue refills past threshold and is then drained again).
+   Screenshot `/tmp/grace-4-step-7.png`.
+8. Settings → OpenAI → toggled OFF. Clear → queue → 0. Waited
+   10 s. Conversations stayed at 14, no new mint.
+   Screenshot `/tmp/grace-4-step-8.png`.
+
+**Latency observation (step 5).** Sit-to-refill was ~15–20 s on
+the flex tier — comfortably under the 4:08 of Seville left to
+play. The hypothesis the grace note's design is based on holds in
+practice: a song of playback is more than enough cover for the
+typical refill turn.
+
+**Regression checks.** Grace notes 1–3 (scrub bar, end-of-track
+auto-advance, in-progress indicator + cancel) and Up Next phases
+1–5 all still work — the predicate change is the only Phase-5
+semantic shift, and the upstream wiring (callers of
+`notifyUpNextMutated`, the single-flight guard, the `gpt-5.4` +
+`flex` model loop) is unchanged.
+
+**App-quit confirmation.** `osascript -e 'tell app "DJRoomba" to
+quit'` → `pgrep -lf DJRoomba` empty.
+
+**Branch state.** `feature/grace-notes` carries four commits on top
+of `feature/up-next-queue`:
+1. `738ef9f` — scrub bar
+2. `d68d855` — Up Next auto-advance
+3. `54c29f2` — assistant in-progress indicator + cancel button
+4. (this commit) — refill at 1-remaining with 11-track batches
+
+Pushed to origin. NO PR opened — grace note 5 will.
+
+## 2026-05-30 — Grace note: assistant in-progress indicator + cancel button
+
+Third of the grace notes on `feature/grace-notes`. User report: "While
+DJ Roomba is thinking the pane is silent — no indicator, no escape
+hatch. On `gpt-5.4` + `flex` a turn can sit for 20-60 s and I have no
+way to bail."
+
+**Cause.** `GPTService.isSending` was observable but only surfaced
+inside the composer's send button (spinner inside the arrow-up).
+Nothing in the pane chrome announced "turn in progress"; no UI ever
+called `Task.cancel()` on the in-flight model loop. The model loop
+itself was kicked off by the view's `Task { await gpt.sendMessage(text) }`
+— a fire-and-forget unstructured task the service didn't hold a handle
+to.
+
+**Fix.**
+- `GPTService.sendMessage(_:)` now wraps the model-loop body in a
+  service-owned `Task<Void, Never>` stored on
+  `private var inFlightTurn`. The outer `sendMessage` coroutine
+  awaits `turn.value` so callers (the view's `Task { … }`) still
+  block until the turn finishes, but the wrapped inner task is the
+  cancellation target. Three `Task.checkCancellation()` checkpoints
+  bracket the three suspension points inside the loop body
+  (`ensureSession` / `addPrompt` / `callModel`) so a cancel between
+  hops lands without paying for the next round-trip.
+- `func cancelTurn()` (`@MainActor`) calls `inFlightTurn?.cancel()`
+  and clears the handle. Swift structured concurrency propagates the
+  cancellation through `ContextWindow.callModel()` — the cancel lands
+  at the next suspension point (the in-flight URLSession await, or a
+  tool-call dispatch). The HTTP request may complete on the server
+  side; we just stop waiting on it.
+- On cancellation the turn body appends a synthetic `.assistant` row
+  ("Turn cancelled.") via `appendCancelledMarker()`. Synthetic ids
+  are negative (epoch microseconds × -1) so they never collide with
+  SQLite-minted positive record ids; the marker is in-memory only —
+  the next `refreshTranscript` (or session reload) drops it, which
+  is the intended ephemerality. The cancel branch catches both
+  `CancellationError` and `Task.isCancelled` post-throw so an URLSession
+  cancellation that surfaces as a transport error also routes to the
+  marker path, not the red error banner.
+- `defer { isSending = false; inFlightTurn = nil }` inside the inner
+  task body guarantees state cleanup on every exit path (success,
+  cancel, throw).
+
+**View.** `AssistantPaneView.paneHeader` grew one conditional `HStack`
+sitting to the left of the conversation title:
+- Stock `ProgressView().controlSize(.small)` indeterminate spinner.
+- "Thinking…" caption-font / secondary-foreground label.
+- Borderless "Cancel" button wired to `gpt.cancelTurn()`.
+
+The group only exists in the view tree when `gpt.isSending == true` —
+no `.opacity(0)` placeholder. The header gains a `.frame(minHeight: 28)`
+so the divider below it doesn't jump as the spinner appears /
+disappears (the borderless buttons are ~22 pt, the spinner row is
+~18 pt, so 28 covers the taller of the two with breathing room).
+`.animation(.easeInOut(duration: 0.12), value: gpt.isSending)` smooths
+the transition.
+
+**Cancellation propagation latency — observed live.** Click-to-marker
+latency was ~2 s on the `gpt-5.4` + `flex` queue. The cancellation
+lands at the **next suspension point** — for a queued flex request
+that's whenever `URLSession`'s async data task next yields (or the
+server-side response arrives), not immediately on click. For a tool
+loop already mid-iteration the next checkpoint can come within
+hundreds of milliseconds. The marker only commits AFTER the inner
+task's `catch is CancellationError` runs, so the user sees the
+"Turn cancelled." row as confirmation. **NOT immediate** is the
+right user-mental-model — the docstring on `cancelTurn` says so.
+
+**Files changed.**
+- `DJRoomba/Music/GPTService.swift` — `+74 / -16`. `inFlightTurn`,
+  `cancelTurn`, refactored `sendMessage`, `appendCancelledMarker`.
+- `DJRoomba/Views/Assistant/AssistantPaneView.swift` — `+23 / -0`.
+  Spinner + label + Cancel button in the chrome strip; stable
+  minHeight on the header HStack.
+
+**No new tests.** The cancellation glue is end-to-end concurrency
+behaviour — it needs a fake `ContextWindow` + fake transport to test
+meaningfully, and the existing `LiveOpenAITests` are skip-by-default
+opt-in suites. The pure logic added is one one-liner negative-id
+generation (`-Int64(Date().timeIntervalSince1970 * 1_000_000)`),
+which doesn't deserve a unit. Live-verified the propagation end-to-end
+via computer-use (next paragraph). toms-laws call: don't add a test
+that exists only to assert SwiftUI / URLSession behaviour we don't
+own.
+
+**Verification gates (all PASS).**
+- `make check` clean.
+- `swift test` **422/56** green (no regression vs. grace note 2's
+  baseline).
+- `swiftformat --lint DJRoomba/ Tests/` clean on the two changed files
+  (one unrelated pre-existing `PlaybackService.swift` `organizeDeclarations`
+  violation predates this branch — `git stash` baseline check
+  confirmed; not touched here).
+- `swiftlint lint --strict` clean on the two changed files (0
+  violations).
+- `make build` (signed Apple Development cert) clean.
+
+**Live computer-use verification (all 9 steps PASS).**
+1. Launched signed build. Bottom dock → DJ Roomba tab → assistant
+   pane visible.
+2. Typed "List all my playlists, then for each one count its tracks."
+   → sent.
+3. Spinner + "Thinking…" + Cancel button appeared in the pane chrome
+   at the moment `isSending` flipped. Screenshot `/tmp/grace-3-step-3.png`.
+4. (Side observation, not a verification step) — the model decided to
+   answer "I have 270 playlists, do you want the SQL path?" instead
+   of looping; turn completed cleanly and the indicator group
+   disappeared on its own as `isSending` flipped back. Tried a more
+   tool-heavy variant ("for each of the first 15 playlists call
+   playlist_contents one at a time…") — that hit the 8-round-trip
+   cap, surfaced the cap error in the red banner, and the indicator
+   disappeared cleanly. Both the success-finish and the error-finish
+   paths land in the indicator-off state.
+5. Sent "Write me a 2000 word essay about jazz music history. Take
+   your time." → spinner + Cancel appeared.
+6. Clicked Cancel at +3s. Within ~2 s the spinner / Cancel disappeared
+   from the chrome, a "DJ Roomba: Turn cancelled." synthetic row
+   appeared in the transcript, and the composer input was re-enabled.
+   Screenshot `/tmp/grace-3-step-6.png`. Cancellation latency =
+   next-suspension-point, NOT immediate; observed ~2 s on the flex
+   tier waiting on the initial URLSession yield.
+7. Typed "Just say hello." and sent → fresh turn ran normally,
+   replied "Hello!" The cancelled marker disappeared (negative-id,
+   in-memory only, dropped at the next transcript refresh — intended
+   ephemerality). Screenshot `/tmp/grace-3-step-7.png`.
+8. **Regression** — clicked the "Show tool calls" checkbox → unchecked
+   correctly, transcript filter applied (no tool rows to hide in this
+   conversation, but the toggle state flipped without sticking, same
+   as commit `b51dc53`'s fix).
+9. **Regression** — Up Next: right-clicked "Proceed to Memory" in Rob
+   Crow Music → "Add to Up Next" → Up Next landing row shows count 1
+   and the track appears. Phase 1-5 Up Next still works. Cleared
+   queue via the Clear-with-confirm dialog. The natural end-of-track
+   advance from grace note 2 wasn't exercised in this round (would
+   require a 3:51 wait); the queue-mutation hook is the same code
+   path that grace note 2 verified, so this is a regression check by
+   proxy.
+
+**App-quit confirmation.** `osascript -e 'tell app "DJRoomba" to quit'`
+→ `pgrep -lf DJRoomba` returned empty.
+
+**Branch state.** `feature/grace-notes` carries three commits on top
+of `feature/up-next-queue`:
+1. `738ef9f` — scrub bar
+2. `d68d855` — Up Next auto-advance
+3. (this commit) — assistant in-progress indicator + cancel button
+
+Pushed to origin. NO PR opened — grace notes 4 + 5 still to land
+before the combined PR.
+
+**toms-laws insights to note (NOT acted on — going into DESIGN-TODO).**
+- The negative-id synthetic-marker pattern works but is a one-off; if
+  we ever want a persistent "this turn was cancelled" trace in
+  `assistant.sqlite`, we'd want a proper `.system` Record source
+  upstream rather than a magic negative-id local row. Today the
+  ephemerality is the right call (the cancel is a transient user
+  intent, not chat history worth keeping).
+- Three explicit `Task.checkCancellation()` calls is slightly
+  defensive — Swift's structured concurrency would propagate the
+  cancel through the awaits anyway, the explicit calls just ensure
+  we don't enter the next phase after a cancel landed during a prior
+  one. Acceptable cost (six lines, no runtime overhead on the happy
+  path); flagged as a "could be removed if the vendor library adopts
+  explicit cooperative cancellation checkpoints" item.
+
+## 2026-05-30 — Grace note: Up Next auto-advances at end-of-track
+
+Second of the grace notes on `feature/grace-notes`. User report: "Playing
+from Up Next stops at the end of the track — I don't just roll to the
+next track, I have to hit Play again."
+
+**Cause.** Phase 1's playback-dominance hook keyed off the 0.5 s
+`detectAndRecordAdvance` tick, which triggers on `queueIndex` advance.
+A single-song `ApplicationMusicPlayer.Queue` never advances at natural
+end-of-song — the player stops or wraps without incrementing
+`queueIndex` — so the queue head was never popped. ⌘→ (user Next) worked
+because MusicKit synthesises a brief queueIndex bump before stopping;
+natural end-of-song doesn't.
+
+**Fix.** Extends the existing `currentEntry == nil` signal in
+`PlaybackService.refreshSnapshot` with a queue-emptied watermark
+(`previousPlaybackStatus`) and fires a new `onQueueEmptied` callback
+wired to `MusicController.dispatchUpNextIfNeeded` (Phase 1's existing
+single-flight-guarded "pop head + start" path). Same
+`upNextDispatchInFlight` guard reused, so the new trigger and the
+existing `skipNext` / chunk-swap triggers can't double-pop. The pure
+`shouldSignalQueueEmptied(...)` predicate is extracted to file-scope
+and unit-tested (`PlaybackServiceQueueEmptiedTests`, +8 tests / +1
+suite) covering the playbackTime-wrap edge case (~0.138 s residue
+seen live; threshold pinned at 0.5 s).
+
+**v1 limitation stands.** When the queue drains completely the player
+still stops — no restoration of the prior playlist context. That was
+called out in `plans/up-next-queue.md` §"Open / deferred" and is
+unchanged here. This fix only restores within-queue advance.
+
+`make check` clean · `swift test` 414/55 → **422/56** green · signed
+`make` clean. Computer-use verified: scrub-to-near-end on three queued
+tracks let two advance naturally and the third correctly land in the
+"queue empty, player stops" v1 state; ⌘→ regression check passed;
+scrub-bar grace note (commit `738ef9f`) unaffected.
+
+Commit `d68d855` on `feature/grace-notes`. No PR yet — the final grace
+note will open the combined PR.
+
+## 2026-05-30 — Grace note: scrub bar for play position
+
+Lands on `feature/grace-notes` (branched off
+`feature/up-next-queue`; first of three grace notes that will share a
+single combined PR). Replaces the read-only "elapsed / total" text in
+the now-playing bar with a draggable scrub bar in Music.app's compact
+shape: elapsed label · stock `Slider(.controlSize(.small))` · total
+label · existing prev/play/next.
+
+**Files added.**
+- `DJRoomba/Views/Player/ScrubBar.swift` (new) — single `View` struct
+  carrying two `@State` locals (`displayPosition`, `isDragging`) and
+  reading `MusicController` from `@Environment`. The dragging-vs-
+  snapshot dance is the only non-trivial bit: `Slider` binds to the
+  local `displayPosition`, and `.onChange(of: snapshot.elapsed)` only
+  copies the snapshot tick into `displayPosition` **when
+  `!isDragging`**. The 0.5 s now-playing tick can therefore never yank
+  the slider thumb out from under the user's cursor mid-drag. On
+  `Slider.onEditingChanged: false` (drag end, or single click on the
+  track) we call `controller.seek(to: displayPosition)` and drop the
+  drag flag so the next snapshot tick re-syncs cleanly. The elapsed
+  label tracks `displayPosition` while dragging (so the user sees the
+  *destination* time, not the still-playing source time). `M:SS`
+  format via the existing `TimeInterval.musicTimeText` (re-used, not
+  re-implemented).
+
+**Files changed.**
+- `DJRoomba/Music/PlaybackService.swift` — added
+  `func seek(to seconds: TimeInterval)`. Clamps to `[0, duration]`
+  (so a wild drag past the end can't write nonsense to
+  `player.playbackTime`), writes the assignment, calls
+  `refreshSnapshot()` immediately so the now-playing bar reflects
+  the new playhead within one tick. Idempotent w.r.t. engine state
+  — a seek while paused stays paused (`playbackTime =` is just an
+  assignment, not a transport call), a seek while playing stays
+  playing. No-ops with no `currentEntry`.
+- `DJRoomba/Music/MusicController.swift` — added `func seek(to:)`
+  thin passthrough so views call the controller (the single
+  transport facade), not `PlaybackService` directly. Synchronous +
+  non-throwing: assignment to `player.playbackTime` doesn't go
+  through MusicKit's async transport surface.
+- `DJRoomba/Views/Player/NowPlayingBar.swift` — replaced the
+  inline `Text("\(elapsed) / \(duration)")` with `ScrubBar()`. Net
+  -5 / +1 line.
+
+**Design choices.**
+- Inline strip (Music.app compact-window shape), NOT a tall second
+  row stacked above the transport. macos-design call: the existing
+  60 pt now-playing bar is the right height; adding a row would
+  feel heavy on a bottom dock. Slider lives in the middle of the
+  row, framed with `minWidth: 160, maxWidth: 320` so it expands
+  gracefully when the window is wide and never collapses below the
+  thumb-grabbable threshold.
+- Time labels use the project's established now-playing tokens
+  (`.caption2 + .monospacedDigit() + .secondary` — see
+  `plans/typography.md`). typography-designer call: differentiating
+  elapsed as primary would break the established token and the
+  slider thumb already provides the primary visual signal for
+  "where am I"; keep both labels symmetric.
+- swiftui-pro call: a single `@State var displayPosition: Double`
+  + `.onChange(of: snapshot.elapsed)` gate, **not** a
+  `Binding(get:set:)`. The `Binding(get:set:)` pattern is
+  explicitly flagged in the project's swiftui-pro data-flow
+  reference; `@State` + `onChange` is cleaner and easier to
+  maintain. The drag flag is the second `@State`.
+
+**Edge cases (live-verified).**
+- No song playing → `isScrubbable == false`, slider disabled, both
+  labels show `—:——` placeholder.
+- Duration unknown / zero → slider disabled, total label shows
+  `—:——`. Observed live during a chunk-swap transition where
+  `queue.currentEntry` was momentarily present but its item
+  carried no duration — the gate held and the slider stayed
+  disabled rather than rendering a nonsensical thumb.
+- Live scrub while paused → seek runs, engine stays paused; Play
+  resumes from the new position (verified `1:53` paused-drag →
+  `1:55` after a 2 s resume = clean continuation).
+
+**No new tests.** The reused helper (`musicTimeText`) is already
+covered; the drag gate is pure SwiftUI view state that would need a
+SwiftUI host to test meaningfully; the seek clamp is a one-line
+`min(max(...))` whose semantics are trivially obvious. toms-laws
+call: phase already at minimal complexity; no extractable pure
+unit worth shipping a test for.
+
+**Verification gates (all PASS).**
+- `make check` clean.
+- `swift test` **414/55** green (no regression).
+- `swiftformat --lint DJRoomba/ Tests/` clean (one
+  `organizeDeclarations` violation caught + auto-fixed during the
+  format pass; final state clean across all 195 files).
+- `swiftlint lint --strict DJRoomba/ Tests/` clean (0 violations,
+  195/195 files).
+- `make build` (signed Apple Development cert) clean.
+
+**Live computer-use verification (all 8 steps PASS).**
+1. Launched the signed build. Now-playing bar visible with scrub
+   bar between metadata and transport. Initial state: "Not
+   Playing", slider disabled, labels `—:——`.
+2. Clicked "Play" on Rob Crow Music playlist → "Proceed to Memory"
+   started. Scrub bar populated: `0:30 | thumb · slider · track |
+   3:51` with the prev/pause/next icons on the right.
+3. Screenshot of the polished now-playing bar saved to
+   `/tmp/grace-1-step-3.png`.
+4. **Click-to-seek**: clicked the slider track at ~75% position →
+   elapsed jumped `0:48 → 2:53` and the thumb moved to that
+   position. Same track, no jank.
+5. **Drag forward**: dragged thumb from x=980 to x=1200 → elapsed
+   went `0:31 → 3:43`. Slider followed the cursor cleanly.
+6. **Drag backward**: dragged from x=1150 to x=980 → elapsed went
+   `2:53 → 0:31`. Same clean behavior.
+7. **Pause + scrub + resume**: paused at `0:11` (Play button
+   visible) → dragged thumb forward to `1:53`, Play button stayed
+   (engine paused throughout) → clicked Play → resumed at `1:55`
+   (2 s of resume latency, then ticking forward normally).
+8. **No snap-back during drag**: held the mouse button down on the
+   thumb at x=1080 → moved to x=1200 → **waited 2 seconds with the
+   button held** (long enough for multiple 0.5 s snapshot ticks to
+   fire) → screenshot showed the thumb at x=1196 with label `3:34`,
+   exactly where the cursor was, no snap-back. Released → label
+   read `3:35` one second later (clean continuation from the
+   released position, no visible jump back).
+
+Final screenshot of the polished now-playing bar with a song
+mid-play saved to `/tmp/grace-1-final.png`.
+
+**App-quit confirmation.** `osascript -e 'tell app "DJRoomba" to
+quit'` → `pgrep -lf DJRoomba` returned empty.
+
+**Branch state.** `feature/grace-notes` carries one commit on top
+of `feature/up-next-queue`: "Grace note: scrub bar for play
+position". Pushed to origin. NO PR opened — grace note 3 will open
+the single combined PR after all three grace notes land.
+
 ## 2026-05-30 — Up Next queue — Phase 5: auto-fill on queue drain + Settings toggle (FEATURE COMPLETE)
 
 Phase 5 of `plans/up-next-queue.md` lands on `feature/up-next-queue`

@@ -144,7 +144,31 @@ struct AssistantPaneView: View {
         .help("Show the model's tool calls + outputs in the transcript")
         .padding(.leading, 8)
 
+      reasoningEffortPicker
+
       Spacer()
+
+      if gpt.isSending {
+        // Inline "turn in progress" group: stock indeterminate spinner +
+        // "Thinking…" label + a borderless Cancel button. Only visible
+        // while `isSending` is true; when false, the whole HStack is
+        // dropped so the header chrome doesn't reserve dead layout
+        // space (matches the rest of the pane chrome's quiet feel).
+        HStack(spacing: 6) {
+          ProgressView()
+            .controlSize(.small)
+          Text("Thinking…")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Button("Cancel") {
+            gpt.cancelTurn()
+          }
+          .buttonStyle(.borderless)
+          .font(.caption)
+          .help("Cancel the assistant's current turn")
+        }
+        .transition(.opacity)
+      }
 
       Text(currentConversationTitle)
         .font(.subheadline)
@@ -154,6 +178,46 @@ struct AssistantPaneView: View {
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 8)
+    // Stable minimum height: the stock `ProgressView(.small)` + caption
+    // row is ~18 pt; the surrounding controls (sidebar toggle, New
+    // Request) are ~22 pt borderless buttons. Pinning the row to the
+    // taller of the two means the divider below it doesn't jump when
+    // the spinner appears / disappears.
+    .frame(minHeight: 28)
+    .animation(.easeInOut(duration: 0.12), value: gpt.isSending)
+  }
+
+  /// Per-turn reasoning-effort selector. Segmented picker over the
+  /// four `ReasoningEffort` cases (Min / Low / Med / High), bound to
+  /// `gpt.pendingReasoningEffort`. macos-design call vs. the user's
+  /// literal "slider" word: a four-value discrete enum maps cleanly
+  /// onto segmented semantics on macOS — a `Slider` with discrete
+  /// ticks in a chrome strip reads as a brightness/volume control,
+  /// not a mode choice, and the segment labels carry the meaning a
+  /// slider would have to teach via a tick legend. Width tops out
+  /// around 220 pt with `.controlSize(.small)`. The selector resets
+  /// itself visually after every send because `pendingReasoningEffort`
+  /// is reset in `GPTService.sendMessage`'s `defer` (success, cancel,
+  /// and error paths all hit it).
+  ///
+  /// `@Bindable` is the modern (`@Observable`) replacement for the
+  /// `@ObservedObject` projected-value `$` binding — it conjures a
+  /// `Binding<ReasoningEffort>` from a property on an observable
+  /// without re-routing through `@State` or a custom `Binding(get:set:)`.
+  @ViewBuilder
+  private var reasoningEffortPicker: some View {
+    @Bindable var gpt = gpt
+    Picker("Thinking", selection: $gpt.pendingReasoningEffort) {
+      ForEach(GPTService.ReasoningEffort.allCases, id: \.self) { effort in
+        Text(effort.shortLabel).tag(effort)
+      }
+    }
+    .pickerStyle(.segmented)
+    .labelsHidden()
+    .controlSize(.small)
+    .frame(maxWidth: 220)
+    .help("Reasoning effort for the next turn. Higher = slower, more deliberate. Resets to Medium after each send.")
+    .disabled(!gpt.isKeyConfigured || gpt.isSending)
   }
 
   /// Transcript filtered through the `showToolCalls` toggle — when
