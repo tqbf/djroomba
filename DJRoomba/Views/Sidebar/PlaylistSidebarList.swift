@@ -42,6 +42,8 @@ struct PlaylistSidebarList: View {
           Section("Recently Played") {
             RecentlyPlayedLandingRow()
               .tag(MusicController.recentlyPlayedLandingID)
+            UpNextLandingRow()
+              .tag(MusicController.upNextLandingID)
             ForEach(recents) { summary in
               PlaylistSidebarRow(
                 summary: summary,

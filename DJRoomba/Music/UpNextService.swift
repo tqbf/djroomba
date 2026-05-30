@@ -106,6 +106,29 @@ final class UpNextService {
     entries.removeAll()
   }
 
+  /// 1-based "move these positions to the head", preserving the
+  /// **relative order** of the picked rows. Dedup + sort ascending so
+  /// the picked rows land in their existing order even when the caller
+  /// hands us an unsorted/duplicated `Set`. Out-of-range positions are
+  /// silently skipped (same tolerance as `remove`); no-op on an empty
+  /// queue or when nothing valid was picked. Cheap on the queue's
+  /// expected scale (~10 entries) — single in-place rearrange.
+  func moveToTop(positions: [Int]) {
+    guard !entries.isEmpty else { return }
+    let valid = 1...entries.count
+    let ascending = Set(positions).sorted().filter { valid.contains($0) }
+    guard !ascending.isEmpty, ascending.count < entries.count else {
+      // Either nothing selected or every entry selected — both no-op.
+      return
+    }
+    let pickedIndices = ascending.map { $0 - 1 }
+    let pickedIndexSet = Set(pickedIndices)
+    let picked = pickedIndices.map { entries[$0] }
+    let rest = entries.enumerated()
+      .compactMap { pickedIndexSet.contains($0.offset) ? nil : $0.element }
+    entries = picked + rest
+  }
+
   /// Remove + return the head entry (1-based position 1). Used by the
   /// playback-dominance hook: end-of-song / Next pops the head and
   /// starts a one-song queue with it.

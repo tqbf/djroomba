@@ -64,6 +64,16 @@ final class MusicController {
   /// would.
   static let recentlyPlayedLandingID = "__djroomba.recentlyPlayedLanding__"
 
+  /// Sentinel id for the **Up Next** sidebar row (peer of the
+  /// recently-played landing). Lives below `RecentlyPlayedLandingRow`
+  /// in the same "Recently Played" section so the two landings read as
+  /// siblings. Same reservation discipline as the recently-played
+  /// sentinel — leading double underscore + dotted namespace — so it
+  /// can never collide with a real Apple/app playlist id and is exempt
+  /// from `reconcileSelectionAfterImport` / `restoreSelection`'s
+  /// existence check.
+  static let upNextLandingID = "__djroomba.upNextLanding__"
+
   let authorization = MusicAuthorizationService()
   let subscription = MusicSubscriptionService()
   let playback = PlaybackService()
@@ -416,10 +426,23 @@ final class MusicController {
   /// (2) the user explicitly picked the "All Recently Played Tracks"
   ///     sidebar row (sentinel id).
   /// Either way the surface is the same view, just reached two ways.
+  /// The **Up Next** sentinel is explicitly excluded — otherwise both
+  /// landings would light up at once when the user picks the queue row.
   var isShowingRecentlyPlayedLanding: Bool {
     guard selectedGenre == nil else { return false }
+    guard selectedPlaylistID != Self.upNextLandingID else { return false }
     return selectedPlaylistID == nil
       || selectedPlaylistID == Self.recentlyPlayedLandingID
+  }
+
+  /// `true` when the detail pane should render `UpNextView`. Sibling of
+  /// `isShowingRecentlyPlayedLanding`: the user explicitly picked the
+  /// **Up Next** sidebar row (sentinel id) and no genre is selected.
+  /// Unlike the recently-played landing this is NOT also the
+  /// nothing-selected default — Up Next is a dedicated destination.
+  var isShowingUpNextLanding: Bool {
+    guard selectedGenre == nil else { return false }
+    return selectedPlaylistID == Self.upNextLandingID
   }
 
   /// O(1) index lookup (was an O(n) scan over a freshly concatenated
@@ -1114,6 +1137,55 @@ final class MusicController {
     upNext.clear()
   }
 
+  /// 1-based "move these queue rows to the top", preserving relative
+  /// order. Funnels through the controller so any future side-effect
+  /// (logging, auto-fill bookkeeping) lands in one place — even though
+  /// the service does the mechanical work today.
+  func moveToTopOfUpNext(positions: [Int]) {
+    upNext.moveToTop(positions: positions)
+  }
+
+  /// PHASE 2 SEED — remove after Phase 3 lands. Developer/computer-use
+  /// affordance for the Debug menu while the user-facing routes to
+  /// add to Up Next (track-context-menu in Phase 3, GPT tools in Phase
+  /// 4) don't exist yet. Picks the first `count` tracks of whichever
+  /// surface the user is looking at — the selected playlist's detail
+  /// (already loaded), or the Recently Played landing's rows — and
+  /// funnels them through `addToUpNext`. Looks up the full `Song`
+  /// snapshots in one batched store fetch (NOT a per-row loop;
+  /// `[[djroomba-sqlite-batch-idioms]]`). No-op if there's no source
+  /// to seed from.
+  func seedUpNextFromCurrentSelection(count: Int = 3) async {
+    guard let store, count > 0 else { return }
+    let sourceRows: [TrackRow]
+    if let detail = detailService.detail, !detail.tracks.isEmpty {
+      sourceRows = Array(detail.tracks.prefix(count))
+    } else if !recentlyPlayed.rows.isEmpty {
+      sourceRows = Array(recentlyPlayed.rows.prefix(count))
+    } else {
+      return
+    }
+    let songIDs = sourceRows.map(\.songID)
+    let songsByID: [String: Song]
+    do {
+      let songs = try await store.songs(byIDs: songIDs)
+      songsByID = Dictionary(uniqueKeysWithValues: songs.map { ($0.id, $0) })
+    } catch {
+      storeError = error.localizedDescription
+      return
+    }
+    var orderedSongs = [Song]()
+    var orderedIDs = [MusicItemID]()
+    orderedSongs.reserveCapacity(sourceRows.count)
+    orderedIDs.reserveCapacity(sourceRows.count)
+    for row in sourceRows {
+      guard let song = songsByID[row.songID] else { continue }
+      orderedSongs.append(song)
+      orderedIDs.append(MusicItemID(row.musicItemID))
+    }
+    addToUpNext(orderedSongs, musicItemIDs: orderedIDs)
+  }
+
   /// Click-to-play on a queue row: consume everything above `position`
   /// (inclusive) and play the row at `position`. Resolves the entry's
   /// `MusicItemID` against MusicKit on the spot (the same per-id
@@ -1372,11 +1444,13 @@ final class MusicController {
     if
       let id = selectedPlaylistID,
       id != Self.recentlyPlayedLandingID,
+      id != Self.upNextLandingID,
       !allSummaries.contains(where: { $0.id == id })
     {
       // Playlist disappeared between refreshes — clear silently.
-      // The Recently-Played-landing sentinel isn't a playlist and isn't
-      // expected to appear in `allSummaries`, so it's excepted here.
+      // The Recently-Played-landing + Up-Next-landing sentinels aren't
+      // playlists and aren't expected to appear in `allSummaries`, so
+      // they're excepted here.
       selectedPlaylistID = nil
     } else if let summary = selectedSummary {
       // Re-fetch fresh detail for the still-selected playlist.
@@ -1523,14 +1597,17 @@ final class MusicController {
       preferences.lastSelectedPlaylistID = summary.id
       detailService.select(summary)
     } else {
-      // The Recently-Played-landing sentinel resolves to no `summary`
-      // (it's not in `summariesByID`) but is still a real, restorable
-      // selection — persist the id so a relaunch lands back on the
-      // tracks view. Other "no summary" cases (nil / cleared) reset
-      // the pref as before.
-      if selectedPlaylistID == Self.recentlyPlayedLandingID {
+      // The Recently-Played-landing + Up-Next-landing sentinels
+      // resolve to no `summary` (they're not in `summariesByID`) but
+      // are still real, restorable selections — persist the id so a
+      // relaunch lands back on the right tracks view. Other "no
+      // summary" cases (nil / cleared) reset the pref as before.
+      switch selectedPlaylistID {
+      case Self.recentlyPlayedLandingID:
         preferences.lastSelectedPlaylistID = Self.recentlyPlayedLandingID
-      } else {
+      case Self.upNextLandingID:
+        preferences.lastSelectedPlaylistID = Self.upNextLandingID
+      default:
         preferences.lastSelectedPlaylistID = nil
       }
       detailService.clear()
@@ -1540,6 +1617,7 @@ final class MusicController {
   private func restoreSelection() {
     guard let raw = preferences.lastSelectedPlaylistID else { return }
     let isLanding = raw == Self.recentlyPlayedLandingID
+      || raw == Self.upNextLandingID
     if isLanding || allSummaries.contains(where: { $0.id == raw }) {
       // Launch restore must not create phantom Back history and must
       // not touch `selectedGenre` — `navBackStack` is in-memory only

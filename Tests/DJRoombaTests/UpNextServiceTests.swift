@@ -327,6 +327,64 @@ struct UpNextServiceTests {
     #expect(svc.entries[0].id != svc.entries[1].id)
   }
 
+  @Test
+  func `moveToTop on an empty queue is a no-op`() {
+    let svc = UpNextService()
+    svc.moveToTop(positions: [1, 2])
+    #expect(svc.isEmpty)
+  }
+
+  @Test
+  func `moveToTop with no valid positions is a no-op`() {
+    let svc = UpNextService()
+    seed(svc, ids: ["a", "b", "c"])
+    svc.moveToTop(positions: [0, -1, 99])
+    #expect(svc.entries.map(\.song.musicItemID) == ["a", "b", "c"])
+  }
+
+  @Test
+  func `moveToTop selecting every entry is a no-op`() {
+    let svc = UpNextService()
+    seed(svc, ids: ["a", "b", "c"])
+    svc.moveToTop(positions: [1, 2, 3])
+    #expect(svc.entries.map(\.song.musicItemID) == ["a", "b", "c"])
+  }
+
+  @Test
+  func `moveToTop of a single tail entry promotes it to head`() {
+    let svc = UpNextService()
+    seed(svc, ids: ["a", "b", "c", "d"])
+    svc.moveToTop(positions: [4])
+    #expect(svc.entries.map(\.song.musicItemID) == ["d", "a", "b", "c"])
+  }
+
+  @Test
+  func `moveToTop preserves the relative order of picked rows`() {
+    let svc = UpNextService()
+    seed(svc, ids: ["a", "b", "c", "d", "e"])
+    svc.moveToTop(positions: [2, 4])
+    // b and d picked → land at top in their existing relative order
+    // (b before d), then the remaining rows in their existing order
+    // (a, c, e).
+    #expect(svc.entries.map(\.song.musicItemID) == ["b", "d", "a", "c", "e"])
+  }
+
+  @Test
+  func `moveToTop is robust to duplicate and unsorted positions`() {
+    let svc = UpNextService()
+    seed(svc, ids: ["a", "b", "c", "d", "e"])
+    svc.moveToTop(positions: [4, 2, 4, 2])
+    #expect(svc.entries.map(\.song.musicItemID) == ["b", "d", "a", "c", "e"])
+  }
+
+  @Test
+  func `moveToTop drops out-of-range positions silently`() {
+    let svc = UpNextService()
+    seed(svc, ids: ["a", "b", "c"])
+    svc.moveToTop(positions: [2, 99, -1])
+    #expect(svc.entries.map(\.song.musicItemID) == ["b", "a", "c"])
+  }
+
   // MARK: Private
 
   private typealias Pair = (song: DJRoomba.Song, id: MusicItemID)

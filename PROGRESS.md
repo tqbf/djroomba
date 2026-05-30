@@ -5,6 +5,198 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Up Next queue — Phase 2: sidebar landing row + UpNextView detail surface
+
+Phase 2 of `plans/up-next-queue.md` lands on `feature/up-next-queue`
+(NOT merged). The first user-reachable Up Next surface: a sidebar
+landing peer of "All Recently Played Tracks" with a live count chip,
+and a `UpNextView` detail surface mirroring `RecentlyPlayedView`'s
+shape so the two read as siblings. The Phase-1 playback-dominance
+hook lights up live for the first time here — verified end-to-end via
+computer-use that pressing Next drains the queue head before falling
+through to the playlist advance.
+
+**Files added.**
+- `DJRoomba/Views/Sidebar/UpNextLandingRow.swift` — peer of
+  `RecentlyPlayedLandingRow`. Same 28×28 rounded-square icon disc,
+  same body label, same trailing monospaced-digit count chip; the
+  only visible differences are the icon (Apple Music's own
+  `text.line.first.and.arrowtriangle.forward` Up Next glyph), the
+  hue (teal — cool-side neighbour of the recently-played indigo,
+  harmonious but clearly distinct from purple per the macos-design
+  call), and the label ("Up Next"). Reads `controller.upNext.count`
+  via `@Environment(MusicController.self)`; `@Observable` makes the
+  chip invalidate exactly when the queue mutates.
+- `DJRoomba/Views/UpNext/UpNextView.swift` — the detail surface.
+  20pt-padded header (largeTitle "Up Next" + `^[N track](inflect:)`
+  subtitle + trailing destructive Clear button with
+  `.confirmationDialog`) over a Divider over either a
+  `ContentUnavailableView` ("No Up Next Tracks") or a native
+  `Table(of: TrackRow.self, selection: Set<TrackRow.ID>)` populated
+  from `controller.upNext.entries.enumerated()` mapped to
+  1-based-position `TrackRow`s. Columns deliberately omit the `value:`
+  comparator (the queue is inherently ordered by play position;
+  click-to-sort the header would actively mislead). Context menu via
+  `.contextMenu(forSelectionType:)`: Play (single → consume above +
+  play), Move to Top (multi, relative-order-preserving), Remove from
+  Up Next (multi, destructive). Double-click (`primaryAction:`) plays
+  the row through the same `playFromUpNext` path. The dialog mounts
+  at the VStack root, not on the Clear button, so any future
+  keyboard-shortcut clear path triggers the same confirmation.
+- `Tests/DJRoombaTests/UpNextServiceTests.swift` — **7 new tests**
+  for `UpNextService.moveToTop(positions:)`: empty / no-valid-positions
+  / select-everything no-ops, single-tail promotion, relative-order
+  preservation, dedup + out-of-order robustness, mixed-validity
+  tolerance.
+
+**Files changed.**
+- `DJRoomba/Music/UpNextService.swift` — `moveToTop(positions:)`
+  added. 1-based, dedup + sort-ascending, validity-filtered; picked
+  rows land in their existing order at the head, the rest in their
+  existing order behind. Cheap on the queue's expected scale
+  (~10 entries); empty / no-valid / select-everything are explicit
+  no-ops.
+- `DJRoomba/Music/MusicController.swift` — `upNextLandingID =
+  "__djroomba.upNextLanding__"` sentinel (same reservation discipline
+  as the recently-played one). New `isShowingUpNextLanding`
+  predicate; **and** `isShowingRecentlyPlayedLanding` tightened to
+  explicitly reject the new sentinel so the two landings can never
+  light up simultaneously. `moveToTopOfUpNext(positions:)` controller
+  funnel. New `seedUpNextFromCurrentSelection(count:)` for the Debug
+  menu (PHASE 2 SEED — comment marked for Phase-3 cleanup): one
+  batched `store.songs(byIDs:)` fetch + a paired-array build, no
+  per-row loop. The triple `recentlyPlayedLandingID || upNextLandingID`
+  membership now lives in `reconcileSelectionAfterImport`,
+  `restoreSelection`, and `handleSelectionChange` (the last is a
+  switch instead of nested ifs).
+- `DJRoomba/Persistence/LibraryStore.swift` — batched
+  `songs(byIDs:)` helper. Chunked under `Self.sqliteVariableLimit`;
+  one read transaction per chunk; return order is **not** guaranteed
+  to match the input — callers index by `Song.id` and rebuild. Drops
+  missing ids silently (matches `song(id:)` returning nil).
+- `DJRoomba/Views/Sidebar/PlaylistSidebarList.swift` — one-line
+  insert of `UpNextLandingRow().tag(MusicController.upNextLandingID)`
+  immediately below `RecentlyPlayedLandingRow` inside the existing
+  `Section("Recently Played")` block.
+- `DJRoomba/Views/Playlist/PlaylistDetailView.swift` — new first
+  branch `if controller.isShowingUpNextLanding { UpNextView() }` so
+  the queue surface wins cleanly when its sentinel is selected.
+- `DJRoomba/App/PlaylistPlayerApp.swift` — Debug menu entry "Seed Up
+  Next from Current Selection (3 tracks)" calling
+  `controller.seedUpNextFromCurrentSelection(count: 3)`. Comment-
+  marked `// PHASE 2 SEED — remove after Phase 3 lands` so the
+  track-context-menu route can swap it out.
+
+**Tests count delta.** 403/54 → **410/54** (+7 / +0). `swift test`
+clean; the new moveToTop suite runs in <1 ms (pure in-memory).
+
+**Verification gates.**
+- `make check` clean.
+- `swift test` 410/54 green.
+- `swiftformat --lint` clean (0/192 files require formatting).
+- `swiftlint --strict` clean (0 violations across 192 files).
+- `make` (signed Apple Development cert build) clean.
+- Live computer-use verification end-to-end (see below).
+
+**Live verification via computer-use (all steps PASS).** Path per the
+plan's verification gates:
+1. Sidebar shows the new "Up Next" row right below "All Recently
+   Played Tracks", same visual treatment, no chip when empty:
+   `/tmp/upnext-phase2-step-2.png`.
+2. Clicking the row selects it (blue selection state in the sidebar)
+   and switches the detail pane to `UpNextView` with the empty-state
+   ContentUnavailableView and a disabled Clear button:
+   `/tmp/upnext-phase2-step-3.png`. Critically, the
+   recently-played row is NOT also selected — proves the two
+   landings are mutually exclusive (the `isShowingRecentlyPlayedLanding`
+   tightening).
+3. Select Rob Crow Music (15 tracks) in the sidebar → Debug → Seed
+   Up Next from Current Selection (3 tracks). Sidebar chip
+   immediately reads **3**.
+4. Re-open Up Next: three rows numbered 1/2/3 — Proceed to Memory,
+   Seville, O.B. 1 (the first three of the source playlist), header
+   subtitle "3 tracks", Clear now enabled:
+   `/tmp/upnext-phase2-step-5.png`.
+5. Right-click row 2 → context menu shows Play (single-select hidden
+   when multi), Move to Top, Remove from Up Next (red destructive).
+   Click Remove. Two rows remain, renumbered 1/2 (Proceed to Memory,
+   O.B. 1), sidebar chip = **2**:
+   `/tmp/upnext-phase2-step-6.png`.
+6. Right-click row 1 → Play. Row 1 consumed, only O.B. 1 left, but
+   chip now reads **1** because Phase 1's
+   `playFromUpNext(position:)` calls `consumeThrough(1)` — which
+   drops `[1...1]` and starts a one-song player queue with the picked
+   entry. Now-playing bar updates to Proceed to Memory — Pinback
+   (verified at 0:35/3:51 in the post-clear screenshot below):
+   `/tmp/upnext-phase2-step-7.png`.
+7. Click Clear → confirmation dialog "Clear Up Next?" with red Clear
+   button + Cancel. Confirm. Queue empties, sidebar chip gone,
+   detail pane reverts to "No Up Next Tracks":
+   `/tmp/upnext-phase2-step-8.png`.
+
+**Playback-dominance verification (Phase 1's hook now user-reachable
+live for the first time).** Steps 9-12 of the Phase 2 brief:
+1. Select Rob Crow Music, hit the playlist Play button → Proceed to
+   Memory starts from the playlist.
+2. Debug → Seed Up Next (3 tracks: Proceed to Memory, Seville, O.B.
+   1). Chip = 3.
+3. Playback menu → Next (⌘→). Chip drops to **2**. Queue head was
+   Proceed to Memory (same song as the playlist's current); the
+   `dispatchUpNextIfNeeded` hook popped it and restarted it from the
+   queue context (now-playing time reset).
+4. Press ⌘→ again. Chip drops to **1**. Now-playing bar updates to
+   **Seville — Pinback at 0:09**. THIS is the load-bearing
+   observation: the playlist's structural next was *also* Seville
+   (position #2), but the chip-drop proves the queue path was taken
+   — the song started from the in-memory queue's denormalised
+   snapshot, not from the playlist's resolved row.
+5. Press ⌘→ once more. Chip drops to **0**. Now-playing shows
+   **O.B. 1 — Thingy at 0:11**, the third queue entry (also
+   position #3 in the source playlist). Queue is now empty and the
+   detail pane shows the empty state.
+
+The queue drained in queue-head order on every Next press; each
+queue exhaustion left the player on the queue's last track per the
+plan's documented v1 limitation ("replacing the player queue with a
+single song loses the previously-selected playlist's 'next track'
+— … the player has nothing to fall back to and stops").
+
+**Skills.** `swiftui-pro` pre-pass: confirmed `@MainActor @Observable
++ Set<TrackRow.ID>` selection is idiomatic, that mapping `entries →
+[TrackRow]` inline in `body` is fine at the queue's expected scale
+(no `@State` cache needed since `@Observable` invalidates on
+mutation, not per-tick), that `.confirmationDialog` at the VStack
+root is the correct mount point. Post-pass clean: no deprecated API,
+the `TableColumn`-without-`value:` choice (inherent order, sorting
+would mislead) reads right, the LocalizedStringKey usage for
+`^[…](inflect:)` is correct. `macos-design` pre-pass made three
+decisions: SF Symbol = `text.line.first.and.arrowtriangle.forward`
+(Apple Music's own Up Next glyph), hue = teal (cool-side neighbour
+of indigo, harmonious-but-distinct), Clear = `.bordered` + `role:
+.destructive` (not `.borderedProminent` — reserve that for play /
+commit). Post-pass clean: the sidebar row reads as an indistinguishable
+peer of the recently-played row except for icon/hue/label/chip; the
+detail header right-aligns the destructive action where macOS users
+expect it; the empty state uses the system `ContentUnavailableView`.
+`typography-designer` pass: the header re-uses the app's existing
+type tokens (`.largeTitle.weight(.bold)` + `.subheadline` secondary +
+`.caption.monospacedDigit()` chip) — no new scale introduced.
+`airbnb-swift-style`: final lint clean (`swiftformat --lint` +
+`swiftlint --strict` both 0 violations). `toms-laws` final cleanup:
+spot-check found no A/B/C improvements worth inlining; the suggested
+DRY of "extract a shared LandingHeader from
+UpNextView/RecentlyPlayedView" was rejected per Law 7 (only two
+callsites today; wait for the third).
+
+**PR.** https://github.com/tqbf/djroomba/pull/13 (draft, NOT merged).
+Phase 2 checkbox ticked.
+
+**Phase 3 next.** Track-context-menu "Add to Up Next" path (peer of
+"Add to Playlist"); `UpNextLandingRow` accepts `SongDragItem` drops
+(append); the Debug-menu seed entry from this phase can be removed
+or left as a permanent affordance — Phase 3's brief flagged it as
+their call.
+
 ## 2026-05-30 — Up Next queue — Phase 1: in-memory service + controller plumbing + playback dominance hook
 
 Phase 1 of `plans/up-next-queue.md` lands on `feature/up-next-queue`
