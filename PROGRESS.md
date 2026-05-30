@@ -5,6 +5,46 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Fix: clicking a previous conversation doesn't load its transcript
+
+User report: "when I open up the app and click on a previous
+conversation, it is not loaded into the conversation view, even
+though I know it has associated content."
+
+**Cause.** Two layered issues:
+
+1. **Launch-state mismatch.** `loadConversationsFromDisk()` (called
+   from `AssistantPaneView.task` on appear) sets
+   `currentConversationID` from `UserDefaults` but never loads the
+   transcript — the session is lazy and only builds on first send.
+   So the chat surface shows the empty placeholder while the
+   sidebar highlights the "last used" conversation as if it were
+   active.
+2. **Bail-out guard.** `switchConversation(to:)` had
+   `guard id != currentConversationID else { return }`. The user
+   clicks the already-highlighted row hoping to load it — the
+   guard fires, nothing happens.
+
+**Fix.** Two complementary changes:
+
+- New `loadTranscriptFromDisk(contextName:store:)` reads records for
+  a context directly out of the `SQLiteContextStore` and projects
+  them through the existing `Self.message(from:)` mapper into
+  `messages`. No API key required, no `ContextWindow` needed.
+- `loadConversationsFromDisk` now calls it for the current
+  conversation, so the transcript appears on launch.
+- `switchConversation` drops the bail-out, sets the pointer +
+  loads from disk first (instant, no key required), then builds /
+  switches the session for future sends. When no key is configured
+  we skip the session entirely — disk-load already surfaced what's
+  there; we just can't send into it yet.
+
+Live verified on the signed/installed build: launching the app
+shows the prior conversation's full transcript ("Top 300 Most
+Played…", "Tell me how many tracks…", "Your GPT Mix playlist has 5
+tracks") immediately, with no clicks. Clicking the highlighted
+sidebar row also re-loads cleanly.
+
 ## 2026-05-29 — Fix: instant crash on macOS 14.4 (ArtworkProvider concurrency bound)
 
 User report: signed app on a second MacBook (macOS 14.4) crashed
