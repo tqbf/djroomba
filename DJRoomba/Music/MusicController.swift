@@ -1442,6 +1442,19 @@ final class MusicController {
       self?.detectAndRecordAdvance()
       self?.refreshPlaybackHeaderFlags()
     }
+    // Natural end-of-song for a single-song queue (the Up Next dispatch
+    // shape): `detectAndRecordAdvance` can't see it (no `queueIndex`
+    // transition — a single-song `ApplicationMusicPlayer.Queue` either
+    // wraps to entry 0 with no index change or stops outright with
+    // `queueIndex == nil`), so the queue head never gets popped without
+    // this second signal. PlaybackService fires `onQueueEmptied` when
+    // `currentEntry == nil` AND no F1a chunk swap is pending; we share
+    // the single "consume head + start" path with the ⌘→ and watermark
+    // triggers via `dispatchUpNextIfNeeded`, whose `upNextDispatchInFlight`
+    // guard collapses any 0.5 s-tick double-fires.
+    playback.onQueueEmptied = { [weak self] in
+      self?.dispatchUpNextIfNeeded()
+    }
     playback.startMonitoring()
 
     // One-shot UserDefaults → SQLite migration of M2 favorites/recents.
