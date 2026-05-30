@@ -5,6 +5,284 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Up Next queue — Phase 5: auto-fill on queue drain + Settings toggle (FEATURE COMPLETE)
+
+Phase 5 of `plans/up-next-queue.md` lands on `feature/up-next-queue`
+(NOT merged). Closes out the five-phase Up Next feature: an opt-in
+`djroomba.upNext.autoFillEnabled` UserDefaults toggle in **Settings
+→ OpenAI**, a controller-level non-empty → empty drain detector
+wired into every queue mutator, and a `GPTService.autoFillUpNext()`
+that — when the toggle's on, the API key is configured, and no
+prior auto-fill is still resolving — mints a fresh conversation and
+sends a tight seed message instructing the model to pick ten tracks
+via `recently_played` + `up_next_add`. The system prompt's Phase-4
+"Up Next" paragraph gets one extra sentence telling the model that
+an "queue is empty, queue more tracks" message in a fresh
+conversation IS the auto-fill — fulfil silently, no preamble.
+
+**Files added.**
+- `DJRoomba/Music/UpNextDrainDetector.swift` — single-purpose enum
+  with one `static func didDrain(previousWasNonEmpty:isEmptyNow:)
+  -> Bool` predicate. Extracted from the controller so the rule
+  ("non-empty → empty is the edge, every other transition is not")
+  can be unit-tested without spinning up a `MusicController`. The
+  live gating (UserDefaults read + `gpt.isKeyConfigured` + the
+  single-flight check) stays on the controller / service where it
+  can reach those collaborators.
+- `Tests/DJRoombaTests/UpNextDrainDetectorTests.swift` — **4 new
+  tests** covering the predicate's four boolean cases: non-empty →
+  empty fires, empty → empty doesn't (queue was already drained),
+  non-empty → non-empty doesn't (mid-queue mutation), empty →
+  non-empty doesn't (queue is being filled).
+
+**Files changed.**
+- `DJRoomba/Views/Settings/OpenAISettingsPane.swift` — new
+  `upNextSection` peer of the existing `apiKeySection` /
+  `assistantSection`. One `Toggle("Auto-fill Up Next when empty",
+  isOn: $autoFillEnabled)` bound to
+  `@AppStorage("djroomba.upNext.autoFillEnabled") private var
+  autoFillEnabled = false`. macos-design call: a dedicated Section
+  with header "Up Next" rather than folding into the existing
+  "Assistant" section because the toggle is a behaviour-level
+  preference (what-happens-when-toggled), not a credential or a
+  discoverability nudge — System Settings consistently groups
+  preferences by feature, and a feature-named Section header makes
+  the toggle findable. Footer: "When the queue drains to zero, DJ
+  Roomba starts a new conversation and adds ten more tracks based
+  on what you've been playing. Off by default." The pane's Form
+  thus reads top-to-bottom: API key → Up Next behaviour → Where to
+  find the chat — credential → opt-in → entry point, the natural
+  Settings narrative.
+- `DJRoomba/Music/GPTService.swift` —
+  - `nonisolated static let autoFillToggleKey =
+    "djroomba.upNext.autoFillEnabled"` — single canonical key
+    string the view's `@AppStorage` and the controller's
+    `UserDefaults.standard.bool(forKey:)` both reference.
+  - `static let autoFillSeed = "The Up Next queue just emptied
+    and I need ten more tracks. Use \`recently_played\` (and
+    \`app_state\` if useful) to pick what I'm likely to want next,
+    then call \`up_next_add\` with the chosen track ids. Don't ask
+    follow-up questions — just queue them."` — kept as a sibling
+    static `let` immediately below `urlSession` (the Internal-tier
+    `nonisolated static let` band) so the systemPrompt's auto-fill
+    paragraph and the seed prompt are easy to read side-by-side.
+  - `func autoFillUpNext()` + `@ObservationIgnored private var
+    autoFillTask: Task<Void, Never>?` — single-flight guard.
+    `guard autoFillTask == nil else { return }` short-circuits a
+    second drain dispatch while the first is still resolving;
+    `autoFillTask = Task { @MainActor [weak self] in defer {
+    self?.autoFillTask = nil }; guard let self else { return };
+    await self.newConversation(); await
+    self.sendMessage(Self.autoFillSeed) }` runs the
+    fresh-conversation + seed-message dance on the MainActor,
+    clears the handle in `defer` so a clean exit re-arms the next
+    drain. One `AssistantLog.logger.info("→ auto-fill: queue
+    drained, dispatching")` line so `log show` makes the trigger
+    grep-able.
+  - `systemPrompt` Phase-4 "Up Next" paragraph gains one extra
+    sentence: "If the user's first message in a fresh
+    conversation says the queue is empty and asks for tracks,
+    the user has auto-fill enabled — silently fulfil it via
+    `recently_played` + `up_next_add`, no preamble." This makes
+    the model treat auto-fill turns as quiet tool runs rather
+    than narrating its work — verified live, see below.
+- `DJRoomba/Music/MusicController.swift` —
+  - `@ObservationIgnored private var previousUpNextWasNonEmpty =
+    false` — drain detector's "was the queue non-empty at the
+    most recently observed callsite?" flag. Initial `false`
+    matches an empty initial queue.
+  - `private func notifyUpNextMutated()` — the drain detector.
+    Reads `upNext.isEmpty`, computes the transition via
+    `UpNextDrainDetector.didDrain(...)`, updates the flag
+    unconditionally at the tail (so the detector fires once per
+    drain, not on every empty → empty no-op call afterwards),
+    and dispatches `gpt.autoFillUpNext()` when all three live
+    conditions hold: drained edge, `UserDefaults` toggle ON,
+    `gpt.isKeyConfigured`. The GPT side's single-flight guard is
+    the fourth gate (in the service, where the task handle
+    lives).
+  - Called from **6 mutation callsites**: `addToUpNext(_:musicItemIDs:
+    insertAt:)` (so an add flips the flag false → true and primes a
+    later drain detection — adds can't drain by themselves but they
+    update the flag), `removeFromUpNext(positions:)`, `clearUpNext()`,
+    `playFromUpNext(position:)`, the dispatch path's
+    `dispatchUpNextIfNeeded`, and the `skipNext()` pop branch.
+    Phase 2's `moveToTopOfUpNext` is non-mutating in count — skip.
+    Phase 3's `addToUpNext(songIDs:)` ultimately routes through the
+    paired-array `addToUpNext` overload — exactly one notify per
+    user action. Phase 4's GPT tools fan in the same way.
+
+**Tests count delta.** 410/54 → **414/55** (+4 / +1 — the new
+`UpNextDrainDetectorTests` suite). `swift test` clean; the new
+tests run in <1 ms each (pure boolean predicate).
+
+**Verification gates.**
+- `make check` clean.
+- `swift test` 414/55 green.
+- `swiftformat --lint` clean across changed files (0
+  violations; one organizeDeclarations + indent issue caught
+  during the SwiftFormat pass and corrected by `swiftformat
+  GPTService.swift` — the new statics moved to the
+  Internal-section band per the file's existing layout).
+- `swiftlint lint --strict` clean across `DJRoomba/` + `Tests/`
+  (0 violations).
+- `make` (signed Apple Development cert build) clean.
+- Live computer-use verification end-to-end on `gpt-5.4` + `flex`
+  tier (all 9 steps PASS — see below).
+
+**Live verification via computer-use (all 9 steps PASS).** Path
+per the plan's verification gates. Show tool calls toggled ON so
+each step's tool-call trace is visible inline.
+
+1. Launch the signed build. Settings → OpenAI: new **"Up Next"**
+   Section visible between "OpenAI API Key" and "Assistant", with
+   the **"Auto-fill Up Next when empty"** Toggle OFF by default
+   and the footer "When the queue drains to zero, DJ Roomba
+   starts a new conversation and adds ten more tracks based on
+   what you've been playing. Off by default."
+   `/tmp/upnext-phase5-step-1.png`.
+2. Toggle the Auto-fill ON (blue slider state confirmed in the
+   screenshot). Close Settings (⌘W).
+3. Selected Rob Crow Music in sidebar. Opened DJ Roomba pane —
+   sidebar conversation count = **3** (Phase 4 leftovers).
+4. Debug → Seed Up Next from Current Selection (3 tracks). Up Next
+   chip on sidebar row = **3** (Proceed to Memory, Seville, O.B.
+   1).
+5. **Drain test (the load-bearing step).** Pressed ⌘→ three times.
+   - 1st press: chip 3 → 2, now-playing "Proceed to Memory" (from
+     the queue head).
+   - 2nd press: chip 2 → 1, now-playing "Seville".
+   - 3rd press: chip 1 → 0, now-playing "O.B. 1" — and the auto-
+     fill detector fires. Within ~3 seconds: conversation count
+     in the sidebar ticks from 3 to **4**, the new "Untitled"
+     conversation is selected, and its transcript shows:
+     - User: the verbatim `autoFillSeed` ("The Up Next queue just
+       emptied and I need ten more tracks. Use `recently_played`
+       …").
+     - Tool: `recently_played({"limit":25})` → 25-track payload.
+     - Tool: `up_next_add({"trackIds":[10 song IDs]})` →
+       `{"added":10,"count":10}`.
+     - DJ Roomba: "Queued 10 tracks to Up Next."
+     - Up Next chip jumps 0 → **10**. Detail surface shows the
+       refilled queue: O.B. 1 / Seville / Proceed to Memory /
+       From Nothing to Nowhere / Dancing Queen / This Is a Low /
+       Tom Petty etc — a sensible "what was just playing" mix
+       picked by `gpt-5.4` from the 25-track recently-played
+       payload it pulled, exactly the contract the seed prompt
+       described.
+   - `/tmp/upnext-phase5-step-5.png`.
+6. Settings → OpenAI → toggled Auto-fill OFF. Close Settings.
+7. Clicked Up Next sidebar row → header Clear button →
+   confirmation dialog "Clear Up Next? / This removes every track
+   from the queue. The queue can't be undone." → red Clear. Queue
+   empties, chip gone, detail pane reverts to "No Up Next
+   Tracks".
+8. **OFF-toggle gate test (the failure mode the user explicitly
+   wanted opt-in for).** Waited 10 seconds. Conversation count
+   stays at **4** — no new conversation appeared. The auto-fill
+   gate held: drain detector fired (the controller can see the
+   empty → ⌧ → empty path), but the `UserDefaults.standard.bool
+   (forKey: GPTService.autoFillToggleKey)` guard short-circuited
+   the dispatch before reaching `gpt.autoFillUpNext()`.
+   `/tmp/upnext-phase5-step-8.png`.
+9. **Re-arm test (single-flight guard releases cleanly after a
+   completed task).** Settings → OpenAI → toggled Auto-fill back
+   ON. Closed Settings. Re-selected Rob Crow Music → Debug → Seed
+   Up Next (3 tracks). Chip = 3. Pressed ⌘→ three times to drain
+   again. Conversation count went 4 → **5** (the previous
+   auto-fill conversation now auto-titled "Up Next Queue
+   Refresh"), new conversation transcript shows the same seed +
+   `recently_played` + `app_state` + `up_next_add` sequence, chip
+   refills to **10**. DJ Roomba reply this round: "Queued 10
+   tracks Up Next, leaning toward the recent Rob Crow/indie
+   thread and adjacent picks." — proves the `autoFillTask`
+   handle cleared in the `defer` after the first task's
+   `sendMessage` returned, and a clean second dispatch fires.
+
+**Phase 1-4 regression re-verification (all PASS via the live
+flow).**
+- Phase 1 dominance: ⌘→ drained the queue head on every press
+  in steps 5 and 9 (six consecutive successful pops across two
+  drain cycles, the dominance hook fires identically on
+  Debug-menu-seeded entries and auto-fill-tool-added entries).
+- Phase 2 detail surface: Up Next sidebar row + chip + landing
+  pane + Clear button + confirmation dialog all rendered and
+  worked in step 7.
+- Phase 3 user-facing add paths: implicit via the Debug-menu
+  seed which routes through `seedUpNextFromCurrentSelection` →
+  `addToUpNext(songIDs:)` → the same Phase-3 funnel the
+  context-menu and drag-drop exercise.
+- Phase 4 tool calls: the auto-fill conversation's
+  `recently_played` + `app_state` + `up_next_add` trace IS a
+  Phase-4 tool exercise — observed twice in steps 5 and 9.
+
+**System prompt behaviour check.** The auto-fill seed worked
+exactly as the system-prompt nudge promised: the model fulfilled
+silently with no preamble, no follow-up questions, and chose to
+combine `recently_played` (always) with `app_state` (in the
+second run, for additional grounding on what's currently
+playing). The "10 tracks, no narration" contract held across
+both runs.
+
+**Skills.** `swiftui-pro` pre-pass: confirmed `@AppStorage` is
+correct in a SwiftUI View (data.md's "Never use @AppStorage
+inside @Observable" rule doesn't apply to views), confirmed the
+callsite-flag drain pattern matches the file's existing
+`upNextDispatchInFlight` idiom (the in-flight guard one
+paragraph down in the same file), confirmed the `Task {
+@MainActor [weak self] in defer { self?.autoFillTask = nil } }`
+pattern under Swift 6 (defer runs on the MainActor because the
+closure is @MainActor; weak self never extends the GPTService's
+lifetime). Post-pass clean. `macos-design` pass picked a
+dedicated "Up Next" Section header rather than folding into the
+existing "Assistant" section: the toggle is a behaviour
+preference, not a discoverability nudge, and System Settings
+groups by feature for a reason. `airbnb-swift-style`:
+swiftformat caught one MARK / organizeDeclarations issue when
+the new statics initially landed under `// MARK: Private` —
+moved them to the Internal-tier `nonisolated static let` band
+where their access level matches the file's stratification.
+SwiftFormat + SwiftLint both 0 violations after that. `toms-laws`
+final cleanup pass: spot-checked three candidates, applied none.
+(1) `notifyUpNextMutated` + the `previousUpNextWasNonEmpty` flag
+pays its freight — the alternative is six callsites each
+duplicating the gate logic, and DRY-waits-for-the-third is well
+past satisfied at six. (2) `UpNextDrainDetector` in its own file
+IS ceremonial for a two-line predicate, BUT the user's brief
+explicitly asked for a testable seam ("the pure transition
+detection is a few lines and worth a small test"), and the
+predicate's `private` access from the controller would block the
+test target — the current shape is the minimum-ceremony
+testable version. (3) Considered pushing the UserDefaults read
+INTO `gpt.autoFillUpNext()` so the controller could call
+unconditionally; vetoed self-proposal — would spam the unified
+log on the toggle-off case (the controller's drain detector
+would fire and the GPT service would no-op + log on every clear
+the user does). Controller-side gating is cheaper.
+
+**PR.** https://github.com/tqbf/djroomba/pull/13 (NOT merged).
+Phase 5 checkbox ticked; PR marked **ready for review** via
+`gh pr ready 13`.
+
+**Feature complete.** Five phases, five commits, four
+GPT tools, one drain detector, one auto-fill loop. The user
+can now ask "queue up some Pinback" via the assistant
+(Phase 4), the queue plays through with playback dominance
+(Phase 1), they can `Add to Up Next` from any track row or
+drop tracks onto the sidebar landing (Phase 3), they can see
++ Play / Move-to-Top / Remove / Clear the queue from a
+dedicated detail surface (Phase 2), and when the toggle is
+on they can let the queue self-perpetuate — drain to zero
+triggers a fresh GPT conversation that picks ten more
+tracks based on what's been playing (Phase 5). All five
+phases live on `feature/up-next-queue` (PR #13, ready for
+review): Phase 1 `UpNextService` + controller plumbing +
+playback dominance hook; Phase 2 sidebar landing +
+`UpNextView` + Clear flow; Phase 3 track-context-menu "Add
+to Up Next" + sidebar drop target; Phase 4 four `up_next_*`
+GPT tools + system-prompt paragraph; Phase 5 auto-fill on
+queue drain + Settings toggle.
+
 ## 2026-05-30 — Up Next queue — Phase 4: four up_next_* GPT tools + system-prompt paragraph
 
 Phase 4 of `plans/up-next-queue.md` lands on `feature/up-next-queue`

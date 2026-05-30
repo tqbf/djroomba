@@ -912,6 +912,7 @@ final class MusicController {
     // transport rather than racing a second resolve against the first.
     if !upNext.isEmpty, !upNextDispatchInFlight, let entry = upNext.popHead() {
       upNextDispatchInFlight = true
+      notifyUpNextMutated()
       await playUpNextEntry(entry)
       upNextDispatchInFlight = false
       return
@@ -1127,6 +1128,13 @@ final class MusicController {
     } else {
       upNext.append(songs, musicItemIDs: musicItemIDs)
     }
+    // Phase-5 bookkeeping: an add can't drain the queue (it's
+    // non-decreasing in count), but it does flip the
+    // `previousUpNextWasNonEmpty` flag from false → true so the next
+    // genuine drain after this add actually fires the detector. Routing
+    // through the same helper keeps the flag-update discipline in one
+    // place — the helper short-circuits on a non-transition.
+    notifyUpNextMutated()
   }
 
   /// Convenience funnel for the Phase-3 user-facing add paths
@@ -1163,10 +1171,12 @@ final class MusicController {
 
   func removeFromUpNext(positions: [Int]) {
     upNext.remove(at: positions)
+    notifyUpNextMutated()
   }
 
   func clearUpNext() {
     upNext.clear()
+    notifyUpNextMutated()
   }
 
   /// 1-based "move these queue rows to the top", preserving relative
@@ -1206,6 +1216,7 @@ final class MusicController {
   /// exist (the queue mutated under a stale selection).
   func playFromUpNext(position: Int) async {
     guard let entry = upNext.consumeThrough(position: position) else { return }
+    notifyUpNextMutated()
     await playUpNextEntry(entry)
   }
 
@@ -1355,6 +1366,19 @@ final class MusicController {
   /// from the 0.5 s monitor tick — no view path reads it. See
   /// `dispatchUpNextIfNeeded` for the bounded re-entry argument.
   @ObservationIgnored private var upNextDispatchInFlight = false
+
+  /// Phase-5 auto-fill: was the Up Next queue non-empty at the most
+  /// recently observed callsite? Every controller-level mutator that
+  /// can shrink the queue calls `notifyUpNextMutated` after touching
+  /// the service; the helper compares this flag with the new
+  /// `upNext.isEmpty` and dispatches the auto-fill task on the
+  /// non-empty → empty transition. The plan deliberately chose this
+  /// callsite-flag idiom over `withObservationTracking` on the
+  /// `@MainActor @Observable` controller to match the file's existing
+  /// direct-reaction style (`dispatchUpNextIfNeeded`, the watermark
+  /// guard, etc.) and to keep the trigger sites grep-able.
+  /// `@ObservationIgnored` because no view reads it.
+  @ObservationIgnored private var previousUpNextWasNonEmpty = false
 
   /// The destination currently shown in the top pane: a genre takes
   /// precedence (it's mutually exclusive with a playlist), else the
@@ -2069,10 +2093,39 @@ final class MusicController {
     guard !upNext.isEmpty, !upNextDispatchInFlight else { return }
     guard let entry = upNext.popHead() else { return }
     upNextDispatchInFlight = true
+    notifyUpNextMutated()
     Task {
       await playUpNextEntry(entry)
       upNextDispatchInFlight = false
     }
+  }
+
+  /// Phase-5 drain detector. Called by every controller-level mutator
+  /// that can shrink the Up Next queue (`skipNext`'s pop branch,
+  /// `dispatchUpNextIfNeeded`, `playFromUpNext`, `removeFromUpNext`,
+  /// `clearUpNext`). Compares the queue's pre-mutation emptiness flag
+  /// (`previousUpNextWasNonEmpty`) with the post-mutation `isEmpty`
+  /// and fires `GPTService.autoFillUpNext()` on the non-empty → empty
+  /// transition, gated on the user's opt-in toggle + a configured API
+  /// key. The GPT side single-flight-guards itself, so calling this
+  /// twice in a row across a re-drain after the first auto-fill task
+  /// returned is fine.
+  ///
+  /// Note we update `previousUpNextWasNonEmpty` unconditionally at the
+  /// tail — the transition detector only fires once per drain because
+  /// the next call's `previousUpNextWasNonEmpty = false` short-circuits
+  /// the predicate until the queue refills and is then re-emptied.
+  private func notifyUpNextMutated() {
+    let isEmptyNow = upNext.isEmpty
+    let drained = UpNextDrainDetector.didDrain(
+      previousWasNonEmpty: previousUpNextWasNonEmpty,
+      isEmptyNow: isEmptyNow,
+    )
+    previousUpNextWasNonEmpty = !isEmptyNow
+    guard drained else { return }
+    guard UserDefaults.standard.bool(forKey: GPTService.autoFillToggleKey) else { return }
+    guard gpt.isKeyConfigured else { return }
+    gpt.autoFillUpNext()
   }
 
   /// The single funnel for the membership-mutating app-playlist edits

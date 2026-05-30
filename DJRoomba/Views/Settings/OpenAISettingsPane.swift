@@ -19,6 +19,7 @@ struct OpenAISettingsPane: View {
   var body: some View {
     Form {
       apiKeySection
+      upNextSection
       assistantSection
     }
     .formStyle(.grouped)
@@ -29,6 +30,16 @@ struct OpenAISettingsPane: View {
   @Environment(MusicController.self) private var controller
 
   @State private var keyDraft = ""
+
+  /// Opt-in: when the Up Next queue drains to empty, fire a new
+  /// assistant conversation that picks ten more tracks (Phase 5 of
+  /// `plans/up-next-queue.md`). Default OFF; the controller's
+  /// drain detector gates on this value plus `gpt.isKeyConfigured`.
+  /// `@AppStorage` is the right shape here — the toggle's only
+  /// consumer outside the view is `UserDefaults.standard.bool(forKey:)`
+  /// inside `MusicController`, and `@AppStorage` writes through to
+  /// the same store so the two reads always agree.
+  @AppStorage("djroomba.upNext.autoFillEnabled") private var autoFillEnabled = false
 
   private var gpt: GPTService {
     controller.gpt
@@ -65,6 +76,20 @@ struct OpenAISettingsPane: View {
         OpenAI doesn’t offer a sign-in that issues a key to a desktop app, so \
         paste one you created at platform.openai.com. It’s stored in the \
         macOS Keychain, never in app preferences.
+        """)
+    }
+  }
+
+  private var upNextSection: some View {
+    Section {
+      Toggle("Auto-fill Up Next when empty", isOn: $autoFillEnabled)
+    } header: {
+      Text("Up Next")
+    } footer: {
+      Text("""
+        When the queue drains to zero, DJ Roomba starts a new \
+        conversation and adds ten more tracks based on what you’ve \
+        been playing. Off by default.
         """)
     }
   }
