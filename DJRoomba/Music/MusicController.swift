@@ -43,9 +43,24 @@ final class MusicController {
     if openedStore == nil {
       storeError = "The local library database could not be opened."
     }
+    // Late-bind the controller into GPTService so the assistant's
+    // playback/state tools can dispatch back here. Weakly held inside
+    // GPTService — controller owns the service, not vice versa.
+    gpt.attach(controller: self)
   }
 
   // MARK: Internal
+
+  /// Sentinel id for the "All Recently Played Tracks" sidebar row — a
+  /// non-playlist landing that surfaces the full recently-played
+  /// tracks view (`RecentlyPlayedView`) in the detail pane. Chosen so
+  /// it can never collide with a real playlist id (the leading double
+  /// underscore + dotted namespace is reserved). Exempt from the
+  /// "playlist disappeared between refreshes — clear" cleanup in
+  /// `reconcileSelectionAfterImport` and from `restoreSelection`'s
+  /// existence check so it survives the same way a real selection
+  /// would.
+  static let recentlyPlayedLandingID = "__djroomba.recentlyPlayedLanding__"
 
   let authorization = MusicAuthorizationService()
   let subscription = MusicSubscriptionService()
@@ -162,14 +177,25 @@ final class MusicController {
   /// app-level sheet state under `@Observable`).
   var catalogSearchPresented = false
 
-  /// Collapse state of the genre-tree pane docked below the track
+  /// Collapse state of the bottom dock pane docked below the track
   /// list in the detail column. `false` ⇒ expanded (visible). Lives
-  /// on the controller (not `@SceneStorage`) so the menu command, the
-  /// toolbar button, and the pane's own header chevron all drive one
-  /// shared value. Phase B of `plans/son-of-genre-map.md` first shipped
-  /// the tree as a sheet; per user direction (2026-05-22) it now lives
-  /// inline as a docked pane, matching the retired ForceGraph's home.
-  var genreTreePaneCollapsed = false
+  /// on the controller (not `@SceneStorage`) so the menu commands, the
+  /// toolbar buttons, and the pane's own header chevron all drive one
+  /// shared value. The pane hosts two tabs — the DJ Roomba assistant
+  /// chat and the genre map — switched by `bottomDockTab`; previously
+  /// the pane was genre-map-only (the genre tree first shipped here as
+  /// a sheet, then inline per user direction 2026-05-22, then shared
+  /// with the assistant via tabs per user direction 2026-05-29 — the
+  /// assistant moved out of its old standalone Window scene at the
+  /// same time).
+  var bottomDockCollapsed = false
+
+  /// Which surface is showing in the bottom dock pane right now. Set
+  /// by the segmented picker in the pane header, the two toolbar
+  /// buttons (Genre Map / DJ Roomba), and the menu commands. Defaults
+  /// to `.genreMap` because the genre map is the older + still-primary
+  /// surface; users opt into the assistant explicitly.
+  var bottomDockTab = BottomDockTab.genreMap
 
   /// Derived summary collections — **stored, input-driven state**, not
   /// per-`body` computed properties (Phase A spry fix; see
@@ -373,6 +399,19 @@ final class MusicController {
     )
   }
 
+  /// `true` when the detail pane should render `RecentlyPlayedView`
+  /// (the Recently-Played landing). Two equivalent cases:
+  /// (1) nothing selected (nil playlist AND nil genre) — the natural
+  ///     empty-state default, same as the pre-sentinel behaviour, and
+  /// (2) the user explicitly picked the "All Recently Played Tracks"
+  ///     sidebar row (sentinel id).
+  /// Either way the surface is the same view, just reached two ways.
+  var isShowingRecentlyPlayedLanding: Bool {
+    guard selectedGenre == nil else { return false }
+    return selectedPlaylistID == nil
+      || selectedPlaylistID == Self.recentlyPlayedLandingID
+  }
+
   /// O(1) index lookup (was an O(n) scan over a freshly concatenated
   /// `allSummaries` on every `body`).
   var selectedSummary: PlaylistSummary? {
@@ -447,6 +486,23 @@ final class MusicController {
         startSongID: activePlayContext.startSongID,
       )
     return PlaybackResolver.storedSongID(in: activePlayContext.songIDs, at: index)
+  }
+
+  /// Expand the bottom dock pane and switch to the DJ Roomba tab.
+  /// Single entry point for the ⌥⌘\ menu command, the toolbar button,
+  /// and Settings → "Open DJ Roomba" — keeps the show-the-assistant
+  /// intent in one place so the three call sites can't drift.
+  func showAssistant() {
+    bottomDockTab = .djroomba
+    bottomDockCollapsed = false
+  }
+
+  /// Expand the bottom dock pane and switch to the Genre Map tab.
+  /// Mirror of `showAssistant()` for the genre-map side. Used by the
+  /// "Show Genre Map" menu command (⌥⇧⌘A) and the toolbar button.
+  func showGenreMap() {
+    bottomDockTab = .genreMap
+    bottomDockCollapsed = false
   }
 
   func requestSidebarFocus() {
@@ -1208,9 +1264,12 @@ final class MusicController {
   private func reconcileSelectionAfterImport() {
     if
       let id = selectedPlaylistID,
+      id != Self.recentlyPlayedLandingID,
       !allSummaries.contains(where: { $0.id == id })
     {
       // Playlist disappeared between refreshes — clear silently.
+      // The Recently-Played-landing sentinel isn't a playlist and isn't
+      // expected to appear in `allSummaries`, so it's excepted here.
       selectedPlaylistID = nil
     } else if let summary = selectedSummary {
       // Re-fetch fresh detail for the still-selected playlist.
@@ -1382,17 +1441,29 @@ final class MusicController {
       preferences.lastSelectedPlaylistID = summary.id
       detailService.select(summary)
     } else {
-      preferences.lastSelectedPlaylistID = nil
+      // The Recently-Played-landing sentinel resolves to no `summary`
+      // (it's not in `summariesByID`) but is still a real, restorable
+      // selection — persist the id so a relaunch lands back on the
+      // tracks view. Other "no summary" cases (nil / cleared) reset
+      // the pref as before.
+      if selectedPlaylistID == Self.recentlyPlayedLandingID {
+        preferences.lastSelectedPlaylistID = Self.recentlyPlayedLandingID
+      } else {
+        preferences.lastSelectedPlaylistID = nil
+      }
       detailService.clear()
     }
   }
 
   private func restoreSelection() {
     guard let raw = preferences.lastSelectedPlaylistID else { return }
-    if allSummaries.contains(where: { $0.id == raw }) {
-      // Launch restore must not create phantom Back history and must not
-      // touch `selectedGenre` — `navBackStack` is in-memory only and
-      // starts empty each session.
+    let isLanding = raw == Self.recentlyPlayedLandingID
+    if isLanding || allSummaries.contains(where: { $0.id == raw }) {
+      // Launch restore must not create phantom Back history and must
+      // not touch `selectedGenre` — `navBackStack` is in-memory only
+      // and starts empty each session. The Recently-Played-landing
+      // sentinel isn't a playlist but is still a legitimate restore
+      // target (the user explicitly picked it).
       suppressNavRecording = true
       selectedPlaylistID = raw
       suppressNavRecording = false

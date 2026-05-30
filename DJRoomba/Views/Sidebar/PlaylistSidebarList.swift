@@ -35,8 +35,29 @@ struct PlaylistSidebarList: View {
           if !favorites.isEmpty {
             PlaylistSidebarSection(title: "Favorites", summaries: favorites)
           }
-          if !recents.isEmpty {
-            PlaylistSidebarSection(title: "Recently Played", summaries: recents)
+          // Recently Played is always present so the "All Recently
+          // Played Tracks" landing row is always reachable, even when
+          // no playlists have been played yet (the landing surface
+          // itself has its own empty state).
+          Section("Recently Played") {
+            RecentlyPlayedLandingRow()
+              .tag(MusicController.recentlyPlayedLandingID)
+            ForEach(recents) { summary in
+              PlaylistSidebarRow(
+                summary: summary,
+                isFavorite: controller.isFavorite(summary),
+              )
+              .tag(summary.id)
+              .contextMenu {
+                let favorited = controller.isFavorite(summary)
+                Button(
+                  favorited ? "Remove from Favorites" : "Add to Favorites",
+                  systemImage: favorited ? "star.slash" : "star",
+                ) {
+                  controller.toggleFavorite(summary)
+                }
+              }
+            }
           }
           // User-owned section: always present (even with zero
           // playlists) so the inline "+" / ⌘N create is reachable.

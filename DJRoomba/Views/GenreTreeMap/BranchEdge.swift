@@ -45,7 +45,7 @@ struct BranchEdge: View {
   /// `start` and `end` are consulted by the L renderer; the Bezier
   /// control points are left on the layout API for backward
   /// compatibility (the type is shared with the projection-time
-  /// `projectedCurve` helper in `GenreTreeMapPanel`).
+  /// `projectedCurve` helper in `GenreTreeMapBody`).
   var curve: GenreTreeLayout.BezierCurve
   /// Tree depth of the *child* node. Edge width tapers with depth.
   var childDepth: Int

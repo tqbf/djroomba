@@ -6,7 +6,7 @@ import SwiftUI
 /// Maps the panel's `(selectedGenre, compareGenre)` pair to one of
 /// three modes the inspector dispatches on. The inspector is **pure
 /// presentational** — every async load + every state change comes in
-/// via the parent `GenreTreeMapPanel`.
+/// via the parent `GenreTreeMapBody`.
 enum GenreTreeInspectorSelection: Equatable {
   case empty
   case single(GenreMapNode)
@@ -157,7 +157,7 @@ struct GenreTreeInspector: View {
 
   @ViewBuilder
   private func singleSections(node: GenreMapNode) -> some View {
-    let hullColour = GenreTreeMapPanel.communityColour(for: node.communityID)
+    let hullColour = GenreTreeMapBody.communityColour(for: node.communityID)
     // Clean inline header — colour swatch + name + a single condensed
     // counts line. (Replaces the metro-era `EvidenceHeader`, which
     // stacked the name, an "Ordinary / Junction / Transfer station ·
@@ -278,8 +278,8 @@ struct GenreTreeInspector: View {
 
   @ViewBuilder
   private func compareSections(lhs: GenreMapNode, rhs: GenreMapNode) -> some View {
-    let lhsColour = GenreTreeMapPanel.communityColour(for: lhs.communityID)
-    let rhsColour = GenreTreeMapPanel.communityColour(for: rhs.communityID)
+    let lhsColour = GenreTreeMapBody.communityColour(for: lhs.communityID)
+    let rhsColour = GenreTreeMapBody.communityColour(for: rhs.communityID)
     VStack(alignment: .leading, spacing: 6) {
       HStack(spacing: 8) {
         Circle().fill(lhsColour).frame(width: 8, height: 8)

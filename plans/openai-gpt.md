@@ -57,7 +57,7 @@ Smallest end-to-end proof: store a key + send one message + see the reply.
 computer-use: opened **Settings → OpenAI**, pasted a key, sent `"Hi"`,
 saw GPT's reply in the Response area.
 
-## Phase 1 — Persistent conversation + tools + Assistant window (✅ 2026-05-29)
+## Phase 1 — Persistent conversation + tools + Assistant surface (✅ 2026-05-29)
 
 Phase 1 collapsed what had been planned as three sub-phases into one
 landing because the substrate matured cleanly together.
@@ -90,16 +90,22 @@ landing because the substrate matured cleanly together.
     songIDs:)` after asserting the target is an app (writable) playlist.
   Every runner is wrapped in `LoggedToolRunner` so each tool call + its
   output is observable via `log show` (see PLAN.md → Observability).
-- **Standalone Assistant `Window` scene** (⌥⌘\\), separate from the
-  main library `WindowGroup`. Transcript at top (user / assistant /
-  tool turns, each iconified, tool turns muted; JSON outputs truncated
+- **Assistant surface** (⌥⌘\\). Originally shipped 2026-05-29 morning
+  as a standalone `Window("DJ Roomba Assistant", id: AssistantWindowID)`
+  scene; later that day the user asked it to share the bottom dock
+  pane with the genre map via tabs, so the standalone window was
+  retired and `AssistantPaneView` now lives in the **DJ Roomba** tab
+  of `BottomDockPane`. Transcript at top (user / assistant / tool
+  turns, each iconified, tool turns muted; JSON outputs truncated
   in the transcript view), composer at bottom (multiline `TextField`,
-  arrow-up Send button, error banner above the divider). The Assistant
-  reads `controller.gpt` via `@Environment(MusicController.self)`; the
+  arrow-up Send button, error banner above the divider). Reads
+  `controller.gpt` via `@Environment(MusicController.self)`; the
   Settings → OpenAI pane reads the same instance.
 - **Settings reshape.** The Phase-0 "Connection Test" section is gone —
-  the Assistant window IS the test now. The OpenAI Settings pane keeps
-  the API-key field + adds an "Open Assistant Window" button.
+  the assistant surface IS the test now. The OpenAI Settings pane
+  keeps the API-key field + a "Show DJ Roomba" button that calls
+  `controller.showAssistant()` to expand the bottom dock onto the
+  DJ Roomba tab.
 - **MusicController.gpt** — one canonical instance, constructed in
   `MusicController.init` with the `LibraryStore` + `CatalogIngestService`
   it needs. No retain cycle (the dependencies are values / @MainActor
@@ -134,20 +140,139 @@ per-record entry point. Live-verified end-to-end across two turns via
 (`.package(path: "Vendor/contextwindow-swift")`). The remote 0.1.0
 dependency is gone.
 
+## Phase 1.5 — Multi-conversation sidebar + gpt-5.4-mini titles (✅ 2026-05-29)
+
+Hours after Phase 1 shipped the single-context Assistant, the user
+asked for a sidebar with past conversations, save-on-restart, a
+**New Request** button that archives the current chat off, and
+`gpt-5.4-mini` to label them.
+
+- **Library multi-context is the substrate.** `ContextWindow` already
+  supports `listContexts` / `switchContext` / `createContext` /
+  `deleteContext` on one actor sharing one `SQLiteContextStore`. Each
+  conversation = one library `Context`. No second SQLite file.
+- **`AssistantConversationStore`** is the app-side title storage —
+  the library has no title concept, so titles + last-activity +
+  current-context pointer live in `UserDefaults` (one read, one write
+  per change, fully recoverable on wipe).
+- **`AssistantSummarizer.modelName = "gpt-5.4-mini"`** (looked up via
+  WebFetch against `developers.openai.com/api/docs/models` —
+  confirmed available). Single `OpenAIChatModel(toolExecutor: nil)`
+  per archive event; no `ContextWindow` (synthetic `Record`s on the
+  stack). Strips quotes / trailing punctuation before writing.
+- **`AssistantConversationSidebar`** is the new view. Per-conversation
+  avatar discs (one of 8 hues, hash-keyed on the context id so each
+  conversation owns its colour across relaunches), a cream → lavender
+  vertical wash background (NSColor-backed, flips in dark mode),
+  count chip in the header. Hideable via a per-tab toggle
+  (`@SceneStorage("djroomba.assistant.sidebarVisible")`).
+- **`loadConversationsFromDisk()`** on `GPTService` populates the
+  sidebar feed + current-conversation pointer the moment the pane
+  appears — `ensureSession()` is otherwise lazy and only runs on the
+  first send.
+
+## Phase 1.6 — More tools (✅ 2026-05-29)
+
+Six more tools landed alongside the original seven, bringing the
+total to **13**. All MainActor-hop through `Task { @MainActor … }`
+since `MusicController` is main-actor-isolated.
+
+- **`play_playlist` / `play_track`** dispatch `MusicCommand.playPlaylist`
+  / `playTrack` through the existing `MusicController.handle(_:)` path
+  — same code the sidebar Play button uses. `play_track` falls back
+  to `controller.selectedPlaylistID` when no `playlistId` is given.
+- **`add_genre_to_tracks` / `rename_genre`** wrap
+  `LibraryStore.addGenre` / `renameGenre` (the existing
+  one-way-isolated, pure-SQLite paths used by the genre editor UI).
+- **`sql_query`** runs read-only `SELECT` / `WITH … SELECT` against
+  `library.sqlite` via `database.dbQueue.read { db in Row.fetchAll … }`.
+  Pre-flight `validateSelectOnly(_:)` rejects multi-statement strings
+  and DDL/DML keywords with a clean error; GRDB's read block is the
+  engine-level second line of defence. Cap 200 rows. Tool
+  description embeds the schema summary inline and tells the model
+  to `SELECT sql FROM sqlite_master WHERE type IN ('table','view')`
+  for the full DDL — live verified the model can write a JOIN
+  against `song_stat` + `song` and return top-played artists
+  without an `sqlite_master` round-trip first.
+- **`app_state`** reads `controller.selectedSummary` /
+  `controller.playback.snapshot` / `controller.currentStoredSongID`
+  and returns `{ selectedPlaylist, nowPlaying }`. Lets the model
+  answer "what's selected / playing" without guessing — verified by
+  the chain `app_state → play_playlist` on "play what's selected".
+
+`GPTService` got `weak var hostController: MusicController?` + an
+`attach(controller:)` method called from `MusicController.init` so
+the controller is wired in without a retain cycle. A
+`ControllerProvider = @Sendable @MainActor () -> MusicController?`
+typealias plumbs the weak reference through to tool runners.
+
+## Phase 1.7 — gpt-5.4 + service_tier:"flex" + DJROOMBA PATCH 2 (✅ 2026-05-29)
+
+Per user direction: bump the chat model from `gpt-4.1-mini` to
+**`gpt-5.4`**, opt into the cheaper / higher-latency **`flex`**
+tier (the assistant is user-initiated but not latency-sensitive),
+and surface the tool-call transcript as a togglable subtle checkbox
+(some users want the trace, some find it noisy).
+
+- **`DJROOMBA PATCH 2`** in `Vendor/contextwindow-swift/Sources/
+  ContextWindowOpenAI/OpenAIChatModel.swift`: `OpenAIChatModel.init`
+  gains a `serviceTier: String?` parameter; `ChatCompletionRequest`
+  gains a `service_tier: String?` wire field. `nil` ⇒ omitted from
+  the JSON body, server default applies; `"flex"` opts in.
+  Sequenced alongside PATCH 1 (the multi-turn `tool_call_id` fix);
+  same vendor + future-upstream story.
+- **`GPTService.modelName = "gpt-5.4"`**; new `nonisolated static
+  let serviceTier = "flex"` + `static let urlSession` configured
+  with `timeoutIntervalForRequest = 900s` /
+  `timeoutIntervalForResource = 1800s` so the flex tier's queue
+  waits don't trip the default 60s `URLSession` timeout. Both the
+  chat model and `AssistantSummarizer` (`gpt-5.4-mini`) ride the
+  same session + tier.
+- **Tool-call transcript toggle**
+  (`@AppStorage("djroomba.assistant.showToolCalls") = true`): a
+  caption-font, secondary-foreground `Toggle("…").toggleStyle(.checkbox)`
+  in the per-tab header. When off, `visibleMessages` strips tool
+  turns from the rendered transcript while the underlying records
+  are preserved (the model still sees them on the next turn).
+- **Live verified**: "Hi, say 'hello' so I can confirm gpt-5.4 +
+  flex is working." → DJ Roomba replied "hello" — full chat
+  round-trip on `gpt-5.4` + `service_tier: flex` succeeded.
+
+## Phase 1.8 — Delete conversations (✅ 2026-05-29)
+
+Sidebar swipe-left + right-click delete; the canonical macOS
+trackpad gesture path plus a parallel mouse-friendly affordance.
+
+- **`GPTService.deleteConversation(_ id:)`** dispatches
+  `ContextWindow.deleteContext(name:)`, clears the app-side title
+  + last-activity caches, and when the deleted conversation was
+  current, reads `await session.window.currentContext.name` (the
+  library's auto-switch picks the earliest remaining, or mints a
+  fresh one) and adopts that as the new pointer — re-applying the
+  system prompt + reloading the transcript.
+- **`AssistantConversationSidebar`** converted from
+  `ScrollView + LazyVStack` to `List` so `.swipeActions(edge:
+  .trailing, allowsFullSwipe: false)` works. `.listStyle(.plain)` +
+  `.scrollContentBackground(.hidden)` + zeroed row insets preserve
+  the custom row treatment (avatars + gradient).
+- **Parallel `.contextMenu`** with the same Delete action for mouse
+  / accessibility users (and the only path verifiable via
+  computer-use, since simulated mouse drags don't trigger trackpad
+  swipe).
+
 ## Deferred (next phases)
 
-- **Phase 2 — More tools / state mutation.** Today's surface is read +
-  app-playlist writes. Future tools: `play_playlist`, `set_favorite`,
-  rename/delete/reorder for app playlists, genre rename/merge.
-- **Phase 3 — Streaming + model picker.** Today's spike uses the
-  Chat-Completions adapter and a hardcoded `gpt-4.1-mini`. Pull model
-  choice into Settings; consider the Responses adapter
-  (`OpenAIResponsesModel` exists in the same package). Stream the
-  assistant turn so the transcript shows the reply progressively rather
-  than after the whole loop completes.
-- **Phase 4 — Surface polish.** The Assistant lives in its own Window
-  today; an inspector column on the main library window is a likely
-  future home (per `macos-design`), driven by user feedback.
+- **Phase 3 — Streaming + model picker.** Pull model choice into
+  Settings. Consider the Responses adapter (`OpenAIResponsesModel`
+  already in the vendored package). Stream the assistant turn so the
+  transcript reveals progressively.
+- **Phase 4 — Tool surface polish.** A one-shot single-song queue
+  path so `play_track` doesn't need a playlist context. Token spend
+  surfaced in the Assistant pane / Settings (the `ContextWindow`
+  metrics actor already accumulates this).
+- **Phase 5 — Vendoring graduation.** Send PATCH 1 + PATCH 2
+  upstream to `tqbf/contextwindow-swift`, retire `Vendor/
+  contextwindow-swift`.
 
 ## Risks carried forward
 
@@ -155,9 +280,14 @@ dependency is gone.
   carry status + body but not the `Authorization` header). The Keychain
   item is `WhenUnlocked` — the app only ever reads it while the user is
   actively driving it.
-- **Cost discipline.** `gpt-4.1-mini` for the spike is cheap, but Phase 2's
-  tool loop can iterate (`maxToolRoundTrips: 8` default). Surface token
-  spend in the UI before any prolonged use.
-- **Library DB coupling.** The future `ContextWindow` store **must** be a
-  separate SQLite file from `library.sqlite` — GRDB is shared as a transitive
-  dep, the *databases* are not.
+- **Cost discipline.** `gpt-5.4` is materially more expensive per token
+  than `gpt-4.1-mini`; the flex tier blunts but does not erase that.
+  The 8-round-trip tool loop cap (`maxToolRoundTrips`) is unchanged
+  from Phase 0; consider lowering it to 4 if observed runs cluster
+  high. Surface token spend in the UI before any prolonged use —
+  `ContextWindow.tokenUsage()` is already accumulating.
+- **Library DB coupling.** The `ContextWindow` store stays a separate
+  SQLite file from `library.sqlite` — GRDB is shared as a transitive
+  dep, the *databases* are not. The `sql_query` tool reads
+  `library.sqlite` only (`store.database.dbQueue.read`); the
+  assistant's own SQLite (`assistant.sqlite`) is not exposed.

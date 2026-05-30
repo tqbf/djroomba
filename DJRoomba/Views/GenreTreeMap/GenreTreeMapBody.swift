@@ -1,14 +1,12 @@
 import SwiftUI
 
-// MARK: - GenreTreeMapPanel
+// MARK: - GenreTreeMapBody
 
-/// The genre-tree pane (`plans/son-of-genre-map.md`), docked below the
-/// track list in `DetailPaneView` (per user direction 2026-05-22 — it
-/// first shipped as a sheet, now lives inline). The successor to
-/// `GenreMapPanel`. Renders the trunk-tree at default state: trunk
-/// pills along the diagonal, branches fanning radially, faint
-/// back-edges underneath. Collapsible/resizable like the retired
-/// ForceGraph panel it replaced. Phase C adds radial-focus mode:
+/// The genre-tree surface (`plans/son-of-genre-map.md`), one of the two
+/// tabs hosted in the bottom dock pane (`BottomDockPane`). The
+/// successor to `GenreMapPanel`. Renders the trunk-tree at default
+/// state: trunk pills along the diagonal, branches fanning radially,
+/// faint back-edges underneath. Phase C adds radial-focus mode:
 /// clicking any pill animates the layout into a centred fan of 1-hop
 /// + 2-hop neighbours around the clicked genre; clicking empty
 /// canvas or pressing Escape animates back to the trunk-tree.
@@ -37,70 +35,54 @@ import SwiftUI
 ///   tried + failed during Phase C live verification. The Clear
 ///   Focus button is the visible affordance; click-empty-area is the
 ///   incidental gesture.)
-/// - Animation duration is exposed in the header as a segmented
-///   Picker so the user can flip 200 / 300 / 400 / 500 ms live and
-///   pick the eventual ship default.
-struct GenreTreeMapPanel: View {
+///
+/// **Containment refactor 2026-05-29:** the collapse chevron, the
+/// pane height, the "Genre Map" title and the slim collapsed bar all
+/// moved up into the surrounding `BottomDockPane` — those affordances
+/// are now shared with the DJ Roomba assistant tab. What stays here
+/// is the genre-tree-specific header strip (status + Re-Analyze +
+/// Inspector toggle), the canvas, the footer, and the side inspector
+/// column. Scene storage for the inspector's width + visibility stays
+/// here too because it is genre-map-only state.
+struct GenreTreeMapBody: View {
 
   // MARK: Internal
 
   var body: some View {
-    // Bottom-docked pane below the track list (`DetailPaneView`). The
-    // top divider + resize handle + always-visible header bar are the
-    // native "debug area" idiom; collapsed, only the bar remains so the
-    // pane is always re-discoverable. Replaces the sheet the tree first
-    // shipped in (per user direction 2026-05-22 — "it needs to live in
-    // a pane below the track list, not a separate window").
-    VStack(spacing: 0) {
-      Divider()
-      if collapsed {
-        // Slim, fixed-height bar — the only thing left when collapsed,
-        // so the pane is always re-discoverable. Explicit height so the
-        // greedy track list above can't compress it to nothing.
-        collapsedBar
-          .frame(height: 36)
-      } else {
-        GenreTreePaneResizeHandle(
-          height: $panelHeight,
-          range: Self.minBodyHeight ... Self.maxBodyHeight,
-        )
+    HStack(spacing: 0) {
+      VStack(spacing: 0) {
         header
         Divider()
-        HStack(spacing: 0) {
-          VStack(spacing: 0) {
-            content
-            Divider()
-            footer
-          }
-          if inspectorPresented {
-            // Drag handle on the inspector's leading edge — narrow it to
-            // give the graph more width, widen it for the evidence lists.
-            GenreTreeInspectorResizeHandle(
-              width: $inspectorWidth,
-              range: Self.minInspectorWidth ... Self.maxInspectorWidth,
-            )
-            GenreTreeInspector(
-              selection: inspectorSelection,
-              model: controller.genreMapService.model ?? Self.emptyMapModel,
-              representativeEvidence: representativeEvidence,
-              isLoadingRepresentative: isLoadingRepresentative,
-              comparePaths: comparePaths,
-              compareEvidence: compareEvidence,
-              isLoadingCompare: isLoadingCompare,
-              twoHopNeighbours: twoHopNeighboursForSelection(),
-              onSelectNeighbour: selectByName,
-              onExitCompare: endCompare,
-            )
-            .frame(width: CGFloat(inspectorWidth))
-            .background(Color(nsColor: .windowBackgroundColor))
-            .transition(.move(edge: .trailing).combined(with: .opacity))
-          }
-        }
-        .frame(height: CGFloat(panelHeight))
+        content
+        Divider()
+        footer
+      }
+      if inspectorPresented {
+        // Drag handle on the inspector's leading edge — narrow it to
+        // give the graph more width, widen it for the evidence lists.
+        GenreTreeInspectorResizeHandle(
+          width: $inspectorWidth,
+          range: Self.minInspectorWidth ... Self.maxInspectorWidth,
+        )
+        GenreTreeInspector(
+          selection: inspectorSelection,
+          model: controller.genreMapService.model ?? Self.emptyMapModel,
+          representativeEvidence: representativeEvidence,
+          isLoadingRepresentative: isLoadingRepresentative,
+          comparePaths: comparePaths,
+          compareEvidence: compareEvidence,
+          isLoadingCompare: isLoadingCompare,
+          twoHopNeighbours: twoHopNeighboursForSelection(),
+          onSelectNeighbour: selectByName,
+          onExitCompare: endCompare,
+        )
+        .frame(width: CGFloat(inspectorWidth))
+        .background(Color(nsColor: .windowBackgroundColor))
+        .transition(.move(edge: .trailing).combined(with: .opacity))
       }
     }
+    .frame(maxHeight: .infinity)
     .background(.background)
-    .animation(.easeOut(duration: 0.22), value: collapsed)
     .animation(.easeInOut(duration: 0.18), value: inspectorPresented)
     .task {
       if controller.genreTreeService.renderModel == nil {
@@ -195,12 +177,6 @@ struct GenreTreeMapPanel: View {
     worldBounds: .zero,
   )
 
-  /// The docked body's resizable bounds. The min keeps the tree
-  /// readable; the max stops the pane from swallowing the track list
-  /// above it on a tall window (the user can still collapse it).
-  private static let minBodyHeight: Double = 240
-  private static let maxBodyHeight: Double = 900
-
   /// Inspector width bounds. Narrow gives the graph more room; wide
   /// gives the evidence lists more room.
   private static let minInspectorWidth: Double = 260
@@ -223,15 +199,12 @@ struct GenreTreeMapPanel: View {
 
   @Environment(MusicController.self) private var controller
 
-  /// Pane body height — view-layer concern, scene-persisted so a
+  /// Inspector column width — view-layer concern, scene-persisted so a
   /// resize survives relaunch (scene state must not live inside an
   /// `@Observable`).
-  @SceneStorage("genreTreePanelHeight") private var panelHeight = 440.0
-
-  /// Inspector column width — scene-persisted like the body height.
   @SceneStorage("genreTreeInspectorWidth") private var inspectorWidth = 320.0
 
-  @State private var scale: CGFloat = GenreTreeMapPanel.defaultScale
+  @State private var scale: CGFloat = GenreTreeMapBody.defaultScale
   @State private var offset = CGSize.zero
   /// Live viewport size, updated by `mapBody`'s `GeometryReader`.
   @State private var viewportSize = CGSize(width: 900, height: 600)
@@ -298,13 +271,6 @@ struct GenreTreeMapPanel: View {
     controller.genreTreeService
   }
 
-  /// Collapse state lives on the controller so the toolbar button,
-  /// the menu command, and this pane's header chevron all drive one
-  /// shared value.
-  private var collapsed: Bool {
-    controller.genreTreePaneCollapsed
-  }
-
   /// Resolve the inspector mode from the current selection state +
   /// the substrate's loaded `GenreMapModel`. The substrate is
   /// guaranteed loaded by the time `selectedGenre` is non-nil
@@ -329,56 +295,12 @@ struct GenreTreeMapPanel: View {
     return .empty
   }
 
-  /// The slim bar shown when the pane is collapsed: chevron + title +
-  /// count + Re-Analyze. Mirrors the docked debug-area idiom; clicking
-  /// the chevron re-expands.
-  private var collapsedBar: some View {
-    HStack(spacing: 12) {
-      collapseChevron
-      Text("Genre Map")
-        .font(.headline)
-      if let model = service.renderModel {
-        Text("\(model.layout.placedNodes.count) genres")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
-      }
-      Spacer()
-      Button {
-        Task { await controller.analyzeGenreTree() }
-      } label: {
-        Label("Re-Analyze", systemImage: "arrow.clockwise")
-      }
-      .labelStyle(.iconOnly)
-      .buttonStyle(.borderless)
-      .help("Rebuild the genre map from the current library")
-      .disabled(service.isBuilding)
-    }
-    .padding(.horizontal, 16)
-    .contentShape(Rectangle())
-  }
-
-  /// Shared collapse/expand chevron button.
-  private var collapseChevron: some View {
-    Button {
-      controller.genreTreePaneCollapsed.toggle()
-    } label: {
-      Image(systemName: collapsed ? "chevron.up" : "chevron.down")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .frame(width: 16, height: 16)
-        .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain)
-    .help(collapsed ? "Show the genre map" : "Hide the genre map")
-  }
-
+  /// Genre-tree-specific header strip — status (building / count /
+  /// error), Re-Analyze, Inspector toggle. The pane title + collapse
+  /// chevron live in `BottomDockPane` because they are shared with
+  /// the DJ Roomba tab; what stays here is genre-map-only.
   private var header: some View {
     HStack(spacing: 12) {
-      collapseChevron
-
-      Text("Genre Map")
-        .font(.headline)
       if service.isBuilding {
         ProgressView()
           .controlSize(.small)
@@ -410,17 +332,15 @@ struct GenreTreeMapPanel: View {
       .help("Rebuild the genre map from the current library")
       .disabled(service.isBuilding)
 
-      if !collapsed {
-        Button {
-          inspectorPresented.toggle()
-        } label: {
-          Label("Inspector", systemImage: "sidebar.trailing")
-        }
-        .labelStyle(.iconOnly)
-        .buttonStyle(.borderless)
-        .help("Show or hide the inspector (⌘⌥I)")
-        .keyboardShortcut("i", modifiers: [.command, .option])
+      Button {
+        inspectorPresented.toggle()
+      } label: {
+        Label("Inspector", systemImage: "sidebar.trailing")
       }
+      .labelStyle(.iconOnly)
+      .buttonStyle(.borderless)
+      .help("Show or hide the inspector (⌘⌥I)")
+      .keyboardShortcut("i", modifiers: [.command, .option])
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 8)

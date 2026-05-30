@@ -1,6 +1,7 @@
 import ContextWindow
 import ContextWindowOpenAI
 import Foundation
+import GRDB
 import MusicKit
 
 /// The set of tools the assistant can call.
@@ -20,21 +21,36 @@ enum GPTToolRegistration {
 
   // MARK: Internal
 
-  /// Produce the registered tools for one session. The order is the order
-  /// the model sees in the system list — alphabetical, so it's stable.
-  /// Every runner is wrapped in `LoggedToolRunner` so the tool boundary is
-  /// fully observable via `log show` / `log stream` (see `AssistantLog`).
+  /// Closure pattern for tools that need to talk to `MusicController`.
+  /// Held weakly inside `GPTService`; this provider returns `nil` after
+  /// the controller has been torn down. Tool runners hop to the main
+  /// actor (`Task { @MainActor … }.value`) before reading the
+  /// controller, since `MusicController` is `@MainActor`-isolated.
+  typealias ControllerProvider = @Sendable @MainActor () -> MusicController?
+
+  /// Produce the registered tools for one session. The order is the
+  /// order the model sees in the system list — alphabetical, so it's
+  /// stable. Every runner is wrapped in `LoggedToolRunner` so the tool
+  /// boundary is fully observable via `log show` / `log stream` (see
+  /// `AssistantLog`).
   static func tools(
     store: LibraryStore?,
     catalogIngest: CatalogIngestService?,
+    controllerProvider: @escaping ControllerProvider = { nil },
   ) -> [ToolDefinition] {
     let raw = [
       addTracksToPlaylist(store: store),
+      appState(controllerProvider: controllerProvider),
       createPlaylist(store: store),
       listPlaylists(store: store),
+      playPlaylist(controllerProvider: controllerProvider),
+      playTrack(store: store, controllerProvider: controllerProvider),
       playlistContents(store: store),
       recentlyPlayed(store: store),
+      renameGenre(store: store),
       searchAppleMusic(store: store, catalogIngest: catalogIngest),
+      setTrackGenres(store: store),
+      sqlQuery(store: store),
       trackGenres(store: store),
     ]
     return raw.map { def in
@@ -47,9 +63,62 @@ enum GPTToolRegistration {
 
   // MARK: Private
 
+  /// Internal carrier for `app_state` — avoids leaking the controller
+  /// types into the JSON builder.
+  private struct AppStateSnapshot {
+    struct Selected {
+      var id: String
+      var name: String
+      var source: String
+    }
+
+    struct NowPlaying {
+      var songId: String?
+      var title: String
+      var artist: String?
+      var playlistId: String?
+    }
+
+    static let empty = AppStateSnapshot(selectedPlaylist: nil, nowPlaying: nil)
+
+    var selectedPlaylist: Selected?
+    var nowPlaying: NowPlaying?
+
+    var json: JSONValue {
+      var dict = [String: JSONValue]()
+      if let selected = selectedPlaylist {
+        dict["selectedPlaylist"] = .object([
+          "id": .string(selected.id),
+          "name": .string(selected.name),
+          "source": .string(selected.source),
+        ])
+      } else {
+        dict["selectedPlaylist"] = .null
+      }
+      if let playing = nowPlaying {
+        var nowDict: [String: JSONValue] = [
+          "title": .string(playing.title)
+        ]
+        if let id = playing.songId { nowDict["songId"] = .string(id) }
+        if let artist = playing.artist { nowDict["artist"] = .string(artist) }
+        if let playlist = playing.playlistId {
+          nowDict["playlistId"] = .string(playlist)
+        }
+        dict["nowPlaying"] = .object(nowDict)
+      } else {
+        dict["nowPlaying"] = .null
+      }
+      return .object(dict)
+    }
+  }
+
   /// Cap how many rows any single tool returns. Big enough to be useful in
   /// chat ("show me my favourites"), small enough to not blow context.
   private static let playlistTrackCap = 200
+
+  /// Maximum rows returned by `sql_query` in one call. Big enough for
+  /// real use, small enough to never blow context.
+  private static let sqlRowCap = 200
 
   private static func listPlaylists(store: LibraryStore?) -> ToolDefinition {
     let schema = JSONSchemaToolDefinition(
@@ -407,6 +476,403 @@ enum GPTToolRegistration {
       ]))
     }
     return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Start playing a playlist by id (library or app-owned). Dispatches
+  /// via `MusicCommand.playPlaylist` so the existing handle path owns
+  /// the queue + context plumbing.
+  private static func playPlaylist(
+    controllerProvider: @escaping ControllerProvider
+  ) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "play_playlist",
+      description: """
+        Start playing a playlist by id (library or app-owned). Same path \
+        the sidebar's Play button uses. Returns the playlist's name on \
+        success so the model can echo back what's now playing.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "playlistId": stringSchema("Playlist id from `list_playlists`.")
+        ],
+        required: ["playlistId"],
+      ),
+    )
+    let runner = ClosureToolRunner { args in
+      struct Input: Decodable { var playlistId: String }
+      guard let input = try? JSONDecoder().decode(Input.self, from: args) else {
+        return errorJSON("expected { playlistId }")
+      }
+      let provider = controllerProvider
+      let resolved: String? = await Task { @MainActor () -> String? in
+        guard let controller = provider() else { return nil }
+        guard
+          let summary = controller.allSummaries.first(where: { $0.id == input.playlistId })
+        else { return nil }
+        await controller.handle(.playPlaylist(input.playlistId))
+        return summary.name
+      }.value
+      guard let name = resolved else {
+        return errorJSON("no playlist with id \(input.playlistId), or playback unavailable")
+      }
+      return encodeJSON(.object([
+        "playlistId": .string(input.playlistId),
+        "playing": .string(name),
+      ]))
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Play a single track. Resolves our internal `song.id` to its
+  /// MusicKit `musicItemID`, sets the playlist context (the model can
+  /// pass one, or we default to the currently-selected playlist), and
+  /// dispatches `MusicCommand.playTrack`. If no playlist context is
+  /// available the call errors so the model can guide the user back to
+  /// `play_playlist` instead — a single arbitrary-song queue is a
+  /// future enhancement.
+  private static func playTrack(
+    store: LibraryStore?,
+    controllerProvider: @escaping ControllerProvider,
+  ) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "play_track",
+      description: """
+        Play a single track. Pass the internal `trackId` from \
+        `playlist_contents`, `recently_played`, or `search_apple_music`. \
+        Optionally pass a `playlistId` to set the queue context — if \
+        omitted, the currently-selected playlist is used. Returns the \
+        track title + artist on success.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "trackId": stringSchema("Internal song id."),
+          "playlistId": stringSchema("""
+            Optional playlist id to set as the playing queue context. \
+            Defaults to the currently-selected playlist.
+            """),
+        ],
+        required: ["trackId"],
+      ),
+    )
+    let runner = ClosureToolRunner { [store] args in
+      guard let store else { return errorJSON("library is unavailable") }
+      struct Input: Decodable {
+        var trackId: String
+        var playlistId: String?
+      }
+      guard let input = try? JSONDecoder().decode(Input.self, from: args) else {
+        return errorJSON("expected { trackId }")
+      }
+      guard let song = try await store.song(id: input.trackId) else {
+        return errorJSON("no song with id \(input.trackId)")
+      }
+      let provider = controllerProvider
+      let outcome: (title: String, artist: String)? = await Task {
+        @MainActor () -> (title: String, artist: String)? in
+        guard let controller = provider() else { return nil }
+        let playlistID = input.playlistId ?? controller.selectedPlaylistID
+        guard let playlistID else { return nil }
+        await controller.handle(
+          .playTrack(song.musicItemID, playlistID: playlistID)
+        )
+        return (song.title, song.artistName)
+      }.value
+      guard let outcome else {
+        return errorJSON(
+          "no playlist context — pass `playlistId` or select a playlist first"
+        )
+      }
+      return encodeJSON(.object([
+        "trackId": .string(input.trackId),
+        "title": .string(outcome.title),
+        "artist": .string(outcome.artist),
+      ]))
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Add a genre tag to one or many tracks. Idempotent — songs already
+  /// carrying the tag are left alone (counted in `skipped`). Pure
+  /// SQLite, no MusicKit. Returns how many rows were rewritten.
+  private static func setTrackGenres(store: LibraryStore?) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "add_genre_to_tracks",
+      description: """
+        Append a genre tag to one or many tracks. The tag is a literal \
+        string match — there is no genre entity. Idempotent: songs that \
+        already carry the tag are unchanged. Use `rename_genre` to \
+        rewrite an existing tag everywhere it appears.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "genre": stringSchema("Genre tag to add (e.g. \"Synthwave\")."),
+          "trackIds": arraySchema(
+            of: .object(["type": .string("string")]),
+            description: "Internal song ids to tag.",
+          ),
+        ],
+        required: ["genre", "trackIds"],
+      ),
+    )
+    let runner = ClosureToolRunner { [store] args in
+      guard let store else { return errorJSON("library is unavailable") }
+      struct Input: Decodable {
+        var genre: String
+        var trackIds: [String]
+      }
+      guard let input = try? JSONDecoder().decode(Input.self, from: args) else {
+        return errorJSON("expected { genre, trackIds }")
+      }
+      let trimmed = input.genre.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { return errorJSON("genre is empty") }
+      guard !input.trackIds.isEmpty else { return errorJSON("trackIds is empty") }
+      let changed = try await store.addGenre(trimmed, toSongIDs: input.trackIds)
+      return encodeJSON(.object([
+        "genre": .string(trimmed),
+        "tracksRequested": .number(Double(input.trackIds.count)),
+        "tracksChanged": .number(Double(changed)),
+        "skipped": .number(Double(max(0, input.trackIds.count - changed))),
+      ]))
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Globally rename a genre tag across every song that carries it.
+  /// Renaming onto an existing tag merges them (dedupe-on-write). Pure
+  /// SQLite, no MusicKit. Returns rows changed.
+  private static func renameGenre(store: LibraryStore?) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "rename_genre",
+      description: """
+        Globally rename a genre tag across the whole library. Every \
+        song carrying `from` ends up carrying `to`. If `to` is already \
+        present on a song, the two collapse to one (merge). Use \
+        `add_genre_to_tracks` for non-global tagging.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "from": stringSchema("Existing genre tag to rewrite."),
+          "to": stringSchema("New tag — may already exist (merges)."),
+        ],
+        required: ["from", "to"],
+      ),
+    )
+    let runner = ClosureToolRunner { [store] args in
+      guard let store else { return errorJSON("library is unavailable") }
+      struct Input: Decodable {
+        var from: String
+        var to: String
+      }
+      guard let input = try? JSONDecoder().decode(Input.self, from: args) else {
+        return errorJSON("expected { from, to }")
+      }
+      let from = input.from.trimmingCharacters(in: .whitespacesAndNewlines)
+      let to = input.to.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !from.isEmpty, !to.isEmpty else { return errorJSON("from/to is empty") }
+      let changed = try await store.renameGenre(from: from, to: to)
+      return encodeJSON(.object([
+        "from": .string(from),
+        "to": .string(to),
+        "tracksChanged": .number(Double(changed)),
+      ]))
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Read-only SQL against `library.sqlite`. Statements must start with
+  /// `SELECT` or `WITH` (a CTE that yields a final `SELECT`); anything
+  /// else is rejected up-front, and the call runs inside GRDB's
+  /// `dbQueue.read` block which prevents writes at the engine level.
+  /// Multiple statements (semicolon-separated) are also rejected.
+  ///
+  /// Schema hint: the main tables are `song(id, music_item_id, \
+  /// id_namespace, title, artist_name, album_title, duration, \
+  /// genre_names /* JSON array */, local_id, …)`, `apple_playlist(id, \
+  /// name, …)`, `apple_playlist_track(playlist_id, song_id, position)`, \
+  /// `app_playlist(id, name, …)`, `app_playlist_track(playlist_id, \
+  /// song_id, position)`, `song_stat(song_local_id PK, play_count, \
+  /// skip_count, last_played_at)`, `play_history(song_local_id, \
+  /// played_at, sequence)`, `song_genre(song_id, genre)` (materialised \
+  /// view), `genre_node`, `genre_edge_evidence`. For full DDL, run \
+  /// `SELECT sql FROM sqlite_master WHERE type IN ('table', 'view') \
+  /// ORDER BY name`.
+  private static func sqlQuery(store: LibraryStore?) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "sql_query",
+      description: """
+        Run a read-only SQL SELECT against the library database \
+        (library.sqlite). Statements must start with SELECT or WITH; \
+        INSERT / UPDATE / DELETE / DDL are rejected, and the read \
+        block enforces this at the engine level too. Multiple \
+        statements (semicolon-separated) are not allowed. Results are \
+        capped at 200 rows with `truncated: true` past that.
+
+        Main tables: `song` (id, music_item_id, id_namespace, title, \
+        artist_name, album_title, duration, genre_names JSON, \
+        local_id, …), `apple_playlist`, `apple_playlist_track`, \
+        `app_playlist`, `app_playlist_track`, `song_stat` (per-song \
+        play_count / skip_count / last_played_at), `play_history`, \
+        `song_genre` (materialised view of song↔genre), `genre_node`, \
+        `genre_edge_evidence`. For full DDL run \
+        `SELECT sql FROM sqlite_master WHERE type IN ('table','view') \
+        ORDER BY name`.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "query": stringSchema("SELECT (or WITH … SELECT) SQL statement.")
+        ],
+        required: ["query"],
+      ),
+    )
+    let runner = ClosureToolRunner { [store] args in
+      guard let store else { return errorJSON("library is unavailable") }
+      struct Input: Decodable { var query: String }
+      guard let input = try? JSONDecoder().decode(Input.self, from: args) else {
+        return errorJSON("expected { query }")
+      }
+      let trimmed = input.query.trimmingCharacters(in: .whitespacesAndNewlines)
+      if let violation = validateSelectOnly(trimmed) {
+        return errorJSON(violation)
+      }
+      do {
+        let result = try await store.database.dbQueue.read { db -> (rows: [JSONValue], columns: [String], truncated: Bool) in
+          let rows = try Row.fetchAll(db, sql: trimmed)
+          let capped = Array(rows.prefix(sqlRowCap))
+          let columns: [String] = capped.first.map { Array($0.columnNames) } ?? []
+          let payload = capped.map { row -> JSONValue in
+            var dict = [String: JSONValue]()
+            for name in row.columnNames {
+              dict[name] = jsonValue(from: row[name] as DatabaseValue)
+            }
+            return .object(dict)
+          }
+          return (payload, columns, rows.count > sqlRowCap)
+        }
+        return encodeJSON(.object([
+          "columns": .array(result.columns.map { .string($0) }),
+          "rows": .array(result.rows),
+          "rowCount": .number(Double(result.rows.count)),
+          "truncated": .bool(result.truncated),
+        ]))
+      } catch {
+        return errorJSON("sql failed: \(error.localizedDescription)")
+      }
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Snapshot of the UI: currently-selected playlist, currently-playing
+  /// song, and the playlist context backing the queue. Cheap O(1)
+  /// reads against `MusicController`. Useful when the user says "play
+  /// this" / "tag this" without an id — the model can grab the
+  /// current state instead of guessing.
+  private static func appState(
+    controllerProvider: @escaping ControllerProvider
+  ) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "app_state",
+      description: """
+        Return what's selected + what's playing right now. Useful when \
+        the user refers to "this playlist" / "this song" / "what's \
+        currently playing" — read the state instead of asking. Empty \
+        sections are returned as `null` so a closed app or an idle \
+        player don't break decoding.
+        """,
+      parameters: objectSchema(properties: [:]),
+    )
+    let runner = ClosureToolRunner { _ in
+      let provider = controllerProvider
+      let snapshot = await Task { @MainActor in
+        guard let controller = provider() else { return AppStateSnapshot.empty }
+        var state = AppStateSnapshot.empty
+        if
+          let id = controller.selectedPlaylistID,
+          let summary = controller.selectedSummary
+        {
+          state.selectedPlaylist = .init(
+            id: id,
+            name: summary.name,
+            source: summary.source == .appPlaylist ? "app" : "library",
+          )
+        }
+        let snapshot = controller.playback.snapshot
+        if
+          let title = snapshot.title, !title.isEmpty
+        {
+          state.nowPlaying = .init(
+            songId: controller.currentStoredSongID,
+            title: title,
+            artist: snapshot.artist,
+            playlistId: snapshot.playlistContextID,
+          )
+        }
+        return state
+      }.value
+      return encodeJSON(snapshot.json)
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Pre-flight validate a SQL string for the read-only tool. Returns
+  /// a human-readable reason for rejection, or `nil` if it looks safe
+  /// at the textual level (GRDB's `read` block is the second line of
+  /// defence at the engine level).
+  private static func validateSelectOnly(_ raw: String) -> String? {
+    guard !raw.isEmpty else { return "query is empty" }
+    // Reject multiple statements. SQLite accepts `;` only as a
+    // separator; allow a single trailing `;` for convenience.
+    let collapsed = raw.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r;"))
+    if collapsed.contains(";") {
+      return "multiple statements are not allowed"
+    }
+    let upper = collapsed.uppercased()
+    let prefix = upper.prefix { !$0.isWhitespace }
+    guard prefix == "SELECT" || prefix == "WITH" else {
+      return "only SELECT or WITH … SELECT statements are allowed"
+    }
+    // Defence-in-depth: forbid a handful of write/attach verbs that
+    // would otherwise sneak past the prefix check via comments + the
+    // engine. GRDB's `read` block also blocks them; this gives a
+    // cleaner error message before round-tripping to SQLite.
+    let banned = [
+      "INSERT ",
+      "UPDATE ",
+      "DELETE ",
+      "DROP ",
+      "ALTER ",
+      "CREATE ",
+      "ATTACH ",
+      "DETACH ",
+      "REPLACE ",
+      "PRAGMA ",
+      "VACUUM",
+    ]
+    for keyword in banned where upper.contains(keyword) {
+      return "write/DDL keywords are not allowed (\(keyword.trimmingCharacters(in: .whitespaces)))"
+    }
+    return nil
+  }
+
+  /// Convert a GRDB `DatabaseValue` to our `JSONValue` carrier. Nil
+  /// → `.null`, integers/doubles → `.number`, strings → `.string`,
+  /// blobs → base64 strings (rare; safest neutral encoding).
+  private static func jsonValue(from db: DatabaseValue) -> JSONValue {
+    switch db.storage {
+    case .null:
+      .null
+
+    case .int64(let value):
+      .number(Double(value))
+
+    case .double(let value):
+      .number(value)
+
+    case .string(let value):
+      .string(value)
+
+    case .blob(let data):
+      .string(data.base64EncodedString())
+    }
   }
 
   private static func trackJSON(_ song: Song) -> JSONValue {

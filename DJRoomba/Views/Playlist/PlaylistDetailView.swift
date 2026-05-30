@@ -13,12 +13,13 @@ struct PlaylistDetailView: View {
     @Bindable var controller = controller
 
     return Group {
-      if controller.selectedPlaylistID == nil, controller.selectedGenre == nil {
-        // Neither a playlist nor a genre selected → the app's landing
-        // surface is the user's Recently Played, not a dead "select
-        // something" prompt. A selected genre falls through to the
-        // loading/error/`detail` rendering below (the detail service
-        // holds the synthetic genre detail).
+      if controller.isShowingRecentlyPlayedLanding {
+        // Either nothing is selected, or the user picked the explicit
+        // "All Recently Played Tracks" sidebar row (sentinel id) — the
+        // landing surface is the user's Recently Played, not a dead
+        // "select something" prompt. A selected genre falls through to
+        // the loading/error/`detail` rendering below (the detail
+        // service holds the synthetic genre detail).
         RecentlyPlayedView()
       } else if
         controller.detailService.isLoading,
