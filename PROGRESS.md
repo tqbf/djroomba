@@ -5,6 +5,128 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Up Next queue — Phase 1: in-memory service + controller plumbing + playback dominance hook
+
+Phase 1 of `plans/up-next-queue.md` lands on `feature/up-next-queue`
+(NOT merged). The substrate the next four phases hang off: a pure
+in-memory queue model, the controller funnels Phase 2-4 will call,
+and the playback interception that makes "queue dominates advance"
+actually true. No UI yet (Phase 2) and no GPT tools (Phase 4) — those
+phases compose against this surface unchanged.
+
+**Files added.**
+- `DJRoomba/Music/UpNextService.swift` — `@MainActor @Observable
+  final class`, peer of `RecentlyPlayedService`. Owns
+  `private(set) var entries: [Entry]`; `Entry` carries `id: UUID`
+  (stable for `ForEach` / `Set` selection across mutations) + a
+  denormalised `Song` snapshot + the resolved `MusicItemID`. Public
+  API: `count` / `isEmpty`; `append(_:musicItemIDs:)` /
+  `insert(_:musicItemIDs:at:)` (1-based, clamped to `[1, count + 1]`,
+  paired-array precondition) / `remove(at:)` (1-based, dedup +
+  sort-descending so multi-remove is index-stable) / `clear()` /
+  `popHead()` / `consumeThrough(position:)` (drops `[1...position]` +
+  returns the entry at `position` — the "user clicked queue row #5"
+  path) / `range(_:_:)` (1-based inclusive, clamped, swapped-args ⇒
+  `[]`). Pure synchronous mutators, zero I/O.
+- `Tests/DJRoombaTests/UpNextServiceTests.swift` — **36** tests
+  exhaustively covering append/insert ordering, the 1-based clamp at
+  every boundary (positions 0, 1, count, count+1, count+5, negative),
+  remove dedup + out-of-range tolerance + the multi-remove
+  index-stability invariant, `popHead` on empty + non-empty + drain,
+  `consumeThrough` semantics (incl. the spec's "consumeThrough(3) on
+  5 leaves 2 returns the 3rd" assertion), `range` clamping on empty
+  / over-long / swapped / negative inputs, and that re-adding the
+  same `Song` mints distinct `Entry.id`s.
+
+**Files changed.**
+- `DJRoomba/Music/MusicController.swift` — `import MusicKit`;
+  `let upNext: UpNextService` constructed in `init`. Controller
+  mutators `addToUpNext(_:musicItemIDs:insertAt:)` /
+  `removeFromUpNext(positions:)` / `clearUpNext()` /
+  `playFromUpNext(position:)` funnel everything (Phase 3 menu, Phase 4
+  GPT tools) through one path. Private `playUpNextEntry(_:)` builds a
+  single-row `TrackRow` from the entry's denormalised snapshot, runs
+  `resolver.resolveAppPlaylist` (the verified per-id `equalTo` path),
+  and starts the resolved one-song queue through the existing F1a
+  `startResolvedQueue` helper — no new playback infrastructure.
+  Playback dominance hook: `skipNext()` (`MusicController.swift:881`)
+  and the existing auto-advance detector
+  (`detectAndRecordAdvance()` at `:1660` — formerly `:1617`) both
+  branch on `!upNext.isEmpty` and pop the head before delegating to
+  the unchanged transport / falling through to the playlist advance.
+  Bounded re-entry guard: `@ObservationIgnored private var
+  upNextDispatchInFlight = false` blocks a second pop while the
+  prior async resolve is in flight (the 0.5 s monitor tick could
+  otherwise see the still-old `activePlayContext` past another song
+  boundary and double-pop).
+- `PLAN.md` — already carried the `plans/up-next-queue.md` index row
+  from the spec-write commit.
+
+**How the playback hook intercepts.** The hook composes on top of
+the unchanged Phase-4 `advanceToRecord` watermark: the detector
+fires once per genuine queueIndex transition; we synchronously bump
+the watermark, **then** call `dispatchUpNextIfNeeded()`. That pops
+the head + spawns a `Task` that resolves the entry off-actor +
+swaps the player queue via `startResolvedQueue`. Once that lands,
+`activePlayContext` is reset to the new single-song context with
+`lastRecordedQueueIndex` seeded to 0, so subsequent ticks see "no
+transition" until the queued song itself ends and the cycle repeats.
+`skipNext` is the sibling path for explicit user presses — same
+in-flight guard, awaits inline rather than spawning a `Task`. The
+unchanged `recordPlay(songID:)` for the now-superseded playlist
+track still fires (the song was the current queue position at the
+tick we observed, even briefly); accepted as the Phase-1 trade
+rather than re-shuffling the well-understood
+record-then-preempt ordering. The empty-transition hook for Phase
+5's auto-fill is deliberately NOT in this phase.
+
+**Tests count delta.** 367/53 → **403/54** (+36 / +1). `swift test`
+clean; the new suite runs in <1 ms (pure in-memory).
+
+**Verification gates.** `make check` clean; `swift test` 403/54
+green; `swiftformat --lint` clean across all new/changed Swift;
+`swiftlint --strict` clean across `DJRoomba/` + `Tests/`
+(pre-existing Vendor/ violations untouched); `make` (signed Apple
+Development cert build) clean; the resulting `build/DJRoomba.app`
+launches without smoke regression. No live computer-use verification
+this phase by design — the queue has no user-reachable UI yet
+(Phase 2). Phase 2 will live-verify the whole stack including this
+phase's playback hook.
+
+**Skills.** `swiftui-pro` pre-pass confirmed `@MainActor @Observable
+final class` is the right shape, that views observing `entries`
+directly is enough (no separate revision counter needed for Phase 1
+— the plan's `revisionToken` is Phase 5 auto-fill machinery and can
+be added there). Post-pass clean. `toms-laws` pass dropped a dead
+`label:` parameter on `playUpNextEntry` (was `label _` — speculative
+generality, Law 14) and the spurious `storeError` assignment for an
+Apple-resolve miss (`storeError` is the SQLite sink, not the
+resolver's; matches `playRecentlyPlayed`'s silent-drop, Law 9
+lateral coupling). `airbnb-swift-style` final read: clean (naming,
+access control, `guard` precondition usage all idiomatic).
+
+**One contradiction surfaced.** The Phase-1 brief described the
+playback hook's preempt guard as "only pop … AND that index
+represents an end-of-content state (queue end)" — but
+`plans/up-next-queue.md`'s product-decisions table explicitly says
+"Queue **always preempts** the natural playlist advance. End-of-song
+and Next both drain the queue head first." I implemented the plan
+(every detected advance preempts), per the brief's own "the plan is
+the contract Phases 2-5 are written against" instruction. If the
+"end-of-content only" reading was actually intended, Phase 2's
+live-verification will catch it (the user will say "I added five
+tracks but my playlist is still advancing past them") and we tighten
+the guard there; no other Phase-2 code depends on which side this
+lands on.
+
+**PR.** https://github.com/tqbf/djroomba/pull/13 (draft, NOT merged).
+
+**Phase 2 next.** Sidebar landing (`upNextLandingID` sentinel +
+`UpNextLandingRow` inside the Recently Played section) +
+`UpNextView` (reusing `TrackTableView`) + header chip / Clear +
+row-tap → `playFromUpNext`. Live-verified end-to-end via
+computer-use.
+
 ## 2026-05-29 — Fix (round 2): tool-calls toggle still wedged on macOS 14
 
 User report: "I can see this clearly working here, but when I copy

@@ -1,4 +1,5 @@
 import Foundation
+import MusicKit
 import Observation
 
 /// Top-level coordinator. Owns the service instances and the app-level state
@@ -30,6 +31,7 @@ final class MusicController {
     appPlaylistService = AppPlaylistService(store: safeStore)
     detailService = PlaylistDetailService(store: safeStore)
     recentlyPlayed = RecentlyPlayedService(store: safeStore)
+    upNext = UpNextService()
     importService = ImportService(store: safeStore)
     genreImportService = GenreImportService(store: safeStore)
     genreGraphService = GenreGraphService(store: safeStore)
@@ -73,6 +75,14 @@ final class MusicController {
   /// The "Recently Played" landing surface's view-model (shown when no
   /// playlist is selected). Reads the keyset-paginated distinct history.
   let recentlyPlayed: RecentlyPlayedService
+  /// The ephemeral **Up Next** queue (`plans/up-next-queue.md`). Lives in
+  /// memory only; lost on quit by design. Mutated via the controller's
+  /// `addToUpNext` / `removeFromUpNext` / `clearUpNext` /
+  /// `playFromUpNext(position:)` funnels so the GPT tools (Phase 4) and
+  /// the view layer (Phase 2/3) go through one path. The playback
+  /// dominance hook (`detectAndRecordAdvance` + `skipNext`) pops the
+  /// head whenever the queue is non-empty.
+  let upNext: UpNextService
   let importService: ImportService
   /// Album→track genre enrichment. Runs **only** on a full import
   /// (Reimport Everything ⇧⌘R) or the empty-DB first import — never on the
@@ -870,6 +880,19 @@ final class MusicController {
   /// this is a skip (Phase 3, ask #2), then run the unchanged transport.
   func skipNext() async {
     recordTransportStat(button: .next)
+    // Up Next dominance: an explicit Next pops the queue head before
+    // touching the player's transport (so the song the user wanted next
+    // *is* what plays next, never the playlist's natural next track).
+    // Empty queue falls through to the unchanged transport. The
+    // in-flight flag mirrors `dispatchUpNextIfNeeded` — a user pounding
+    // Next during a still-resolving previous pop falls through to the
+    // transport rather than racing a second resolve against the first.
+    if !upNext.isEmpty, !upNextDispatchInFlight, let entry = upNext.popHead() {
+      upNextDispatchInFlight = true
+      await playUpNextEntry(entry)
+      upNextDispatchInFlight = false
+      return
+    }
     await playback.skipNext()
   }
 
@@ -1065,6 +1088,44 @@ final class MusicController {
     }
   }
 
+  /// Controller-level Up Next funnel — every queue mutator (track-table
+  /// context menu in Phase 3, GPT `up_next_add` tool in Phase 4) routes
+  /// through here so the service stays the single source of truth and
+  /// the dominance hook + auto-fill (Phase 5) see one canonical event.
+  /// `insertAt` is 1-based; `nil` appends. Paired arrays — caller has
+  /// already resolved the MusicKit `MusicItemID` for each song.
+  func addToUpNext(
+    _ songs: [Song],
+    musicItemIDs: [MusicItemID],
+    insertAt position: Int? = nil,
+  ) {
+    if let position {
+      upNext.insert(songs, musicItemIDs: musicItemIDs, at: position)
+    } else {
+      upNext.append(songs, musicItemIDs: musicItemIDs)
+    }
+  }
+
+  func removeFromUpNext(positions: [Int]) {
+    upNext.remove(at: positions)
+  }
+
+  func clearUpNext() {
+    upNext.clear()
+  }
+
+  /// Click-to-play on a queue row: consume everything above `position`
+  /// (inclusive) and play the row at `position`. Resolves the entry's
+  /// `MusicItemID` against MusicKit on the spot (the same per-id
+  /// `equalTo` round-trip the app-playlist path uses) and starts a
+  /// one-song queue through the existing F1a `startResolvedQueue`
+  /// path — no new playback infra. No-op on a position that doesn't
+  /// exist (the queue mutated under a stale selection).
+  func playFromUpNext(position: Int) async {
+    guard let entry = upNext.consumeThrough(position: position) else { return }
+    await playUpNextEntry(entry)
+  }
+
   /// Show a synthetic genre collection in the top pane (genre-graph
   /// navigation). Records the pre-change destination, clears the sidebar
   /// selection (so no playlist row stays highlighted) WITHOUT recording a
@@ -1205,6 +1266,12 @@ final class MusicController {
   /// `plans/memory-and-laziness.md` / swiftui-pro warn against). Nothing
   /// reads it from a view body, and it must stay that way.
   @ObservationIgnored private var activePlayContext = ActivePlayContext()
+
+  /// `true` while an Up Next pop's async resolve+play is in flight.
+  /// `@ObservationIgnored` because the playback hook reads/writes it
+  /// from the 0.5 s monitor tick — no view path reads it. See
+  /// `dispatchUpNextIfNeeded` for the bounded re-entry argument.
+  @ObservationIgnored private var upNextDispatchInFlight = false
 
   /// The destination currently shown in the top pane: a genre takes
   /// precedence (it's mutually exclusive with a playlist), else the
@@ -1630,6 +1697,17 @@ final class MusicController {
     // still detected. A `nil` position simply records nothing.
     activePlayContext.lastRecordedQueueIndex = recordIndex
 
+    // Up Next dominance: a transition is the moment the playlist
+    // *would* have advanced; preempt with the queue head before the
+    // user hears more than a tick of the playlist's own next track.
+    // Idempotent — `popHead` mutates `upNext.entries` synchronously
+    // and `playUpNextEntry` will reset `activePlayContext` once its
+    // resolve lands, so subsequent ticks see "no transition" until
+    // the queue song itself ends. Recording the play stat for the
+    // now-superseded playlist track below is the accepted Phase-1
+    // edge — the song was current at this tick, even if briefly.
+    dispatchUpNextIfNeeded()
+
     guard
       let songID = PlaybackResolver.storedSongID(
         in: activePlayContext.songIDs,
@@ -1844,6 +1922,67 @@ final class MusicController {
     } catch {
       storeError = error.localizedDescription
       return false
+    }
+  }
+
+  /// Build a one-song `Resolution` for `entry` (resolving via the
+  /// per-id `equalTo` path the app-playlist branch uses), then start
+  /// it through the canonical `startResolvedQueue` helper so the
+  /// Phase-2 canonical context, the Phase-4 watermark seed, and the
+  /// F1a chunk wiring all land on the same invariant-sensitive
+  /// sequence as a normal play. A resolve miss is silently tolerated
+  /// (matches `playRecentlyPlayed`) — the queue's denormalised
+  /// snapshot is fine for rendering but Apple may have de-listed the
+  /// song since add-time; the error surface is `resolver.lastError`,
+  /// not `storeError`.
+  private func playUpNextEntry(_ entry: UpNextService.Entry) async {
+    let row = TrackRow(song: entry.song, position: 1)
+    guard let resolution = await resolver.resolveAppPlaylist(rows: [row], startAt: row) else {
+      return
+    }
+    let didStart = await startResolvedQueue(
+      resolution,
+      // No backing playlist — the queue context id is nil, exactly as the
+      // Recently-Played start path. Stats attribution stays the Phase-2
+      // structural-position path (never an Apple id).
+      contextID: nil,
+      beforePlay: nil,
+    )
+    if didStart {
+      await recordPlayStart(startedSongID: resolution.startSongID ?? entry.song.id)
+    }
+  }
+
+  /// Playback-dominance hook (`plans/up-next-queue.md` — "Playback
+  /// dominance hook"). The Up Next queue always preempts the natural
+  /// playlist advance: on a detected end-of-song transition (the
+  /// existing `detectAndRecordAdvance` watermark guard makes this
+  /// fire exactly once per real transition) OR an explicit Next press,
+  /// if the queue is non-empty we pop the head and start a one-song
+  /// resolved queue with it. When the queue is empty this is a no-op
+  /// and the player falls through to whatever it was going to do
+  /// (advance to the next playlist track / stop at the end). Idempotent
+  /// re-entry is bounded by the watermark: once we pop and swap the
+  /// player queue, `activePlayContext` is reset to the new single-song
+  /// context with `lastRecordedQueueIndex` seeded to 0, so subsequent
+  /// 0.5 s ticks see "no transition" until that song ends and the cycle
+  /// repeats. Phase 5 will hook the queue's non-empty-to-empty
+  /// transition here for auto-fill; do NOT add that here.
+  private func dispatchUpNextIfNeeded() {
+    // In-flight guard: the resolve + queue-swap inside
+    // `playUpNextEntry` is async, so a 0.5 s monitor tick that fires
+    // mid-resolve would otherwise see the still-old `activePlayContext`
+    // transition past *another* song boundary and pop a second queue
+    // head before the first has even started playing. The flag is set
+    // synchronously before the dispatch and cleared synchronously after
+    // the resolve+play finishes on the main actor — single-threaded
+    // `@MainActor` makes this a safe bool, no lock.
+    guard !upNext.isEmpty, !upNextDispatchInFlight else { return }
+    guard let entry = upNext.popHead() else { return }
+    upNextDispatchInFlight = true
+    Task {
+      await playUpNextEntry(entry)
+      upNextDispatchInFlight = false
     }
   }
 
