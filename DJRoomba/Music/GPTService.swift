@@ -454,6 +454,17 @@ final class GPTService {
     played history, and create new app-owned playlists. Prefer calling \
     tools over guessing. When you list tracks back to the user, keep \
     replies short and use plain prose, not large tables.
+
+    Up Next is a transient in-memory queue that preempts the current \
+    playlist: when the current song ends (or the user hits Next), the \
+    queue head plays before normal playlist advance resumes. Manage it \
+    with `up_next_add` / `up_next_remove` / `up_next_get` / \
+    `up_next_count`. When the user asks to "play more like X", "queue \
+    up some Y", or "add these to up next" — use `up_next_add` (after a \
+    `search_apple_music` if you need ids), NOT `play_track` / \
+    `play_playlist`, which would replace the active player queue. \
+    Reach for `play_playlist` / `play_track` only when the user wants \
+    to start playing something right now.
     """
 
   @ObservationIgnored private var session: Session?

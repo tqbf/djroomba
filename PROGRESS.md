@@ -5,6 +5,192 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Up Next queue — Phase 4: four up_next_* GPT tools + system-prompt paragraph
+
+Phase 4 of `plans/up-next-queue.md` lands on `feature/up-next-queue`
+(NOT merged). The Up Next queue becomes assistant-reachable for the
+first time: four new `up_next_*` tools registered alphabetically into
+the GPT tool list (bringing the total from 13 → **17**), plus a
+4-line paragraph in the system prompt that teaches `gpt-5.4` that the
+queue exists, preempts the active playlist, and is the right target
+for "play more like X" / "queue up some Y" intents (vs `play_track`
+/ `play_playlist`, which would replace the player queue).
+
+**Files changed.**
+- `DJRoomba/Music/GPTToolRegistration.swift` — four new private
+  static `upNextAdd` / `upNextCount` / `upNextGet` / `upNextRemove`
+  builders registered alphabetically in `tools(...)`. Each clones
+  the `play_track` shape exactly: `ClosureToolRunner` whose
+  `@Sendable` body hops to the main actor via
+  `await Task { @MainActor in ... }.value` using the existing
+  `ControllerProvider` typealias, then reads / mutates `upNext`
+  through the controller funnels Phase 1 + 3 already shipped. The
+  registry helper wraps every runner in `LoggedToolRunner` so each
+  tool call + output lands in unified log under
+  `category = openai`.
+  - **`up_next_add`** — `{ trackIds: [Int], position?: Int }`
+    → `{ added: Int, count: Int }`. Pre-resolves via
+    `store.songs(byIDs:)` ([[djroomba-sqlite-batch-idioms]],
+    never per-row) to distinguish "all junk" (clean error)
+    from "some skipped" (silent), then routes through
+    `controller.addToUpNext(songIDs:insertAt:) async` — the exact
+    Phase-3 funnel the context-menu + drop-target use, so the
+    dominance hook + Phase-5 auto-fill bookkeeping see one
+    canonical event. `position` clamps via the service's existing
+    `[1, count + 1]` rule.
+  - **`up_next_count`** — `{}` → `{ count: Int }`. O(1) read of
+    `controller.upNext.count`. Cheap enough that the model can
+    pre-check before adding.
+  - **`up_next_get`** — `{ start: Int, end: Int }`
+    → `{ entries: [{ position, songId, title, artist, album }],
+    total: Int, truncated: Bool }`. 1-based inclusive on both
+    ends; capped at 200 entries (matches `playlistTrackCap`); the
+    cap collapses to "total > 200 ⇒ truncated: true". Calls
+    `controller.upNext.range(start, end)` (Phase 1 primitive,
+    swapped-args / out-of-range collapse to `[]` is the
+    service's contract).
+  - **`up_next_remove`** — `{ positions: [Int] }`
+    → `{ removed: Int, count: Int }`. ANY invalid or duplicated
+    position rejects the WHOLE call with a clean error (no
+    partial application — plan-spelled-out). On success calls
+    `controller.removeFromUpNext(positions:)`, then re-reads
+    `controller.upNext.count` for `count`.
+- `DJRoomba/Music/GPTService.swift` — 9-line paragraph appended to
+  `systemPrompt`. Teaches the queue's preemption semantics, names
+  all four `up_next_*` tools, and gives one explicit "use these,
+  NOT `play_track` / `play_playlist`" disambiguation rule for the
+  "play more like X" / "queue up some Y" / "add these to up next"
+  intent class. Per-tool affordances live in each tool's schema
+  `description`, not duplicated here.
+
+**Tests count delta.** 410/54 → **410/54** (+0 / +0). The runner
+bodies are dispatching wrappers over already-tested seams (Phase 1
+`UpNextService.range` / `remove` clamping + dedup tests cover the
+semantics, Phase 1-3 controller-funnel tests cover the add path).
+The reject-on-any-invalid logic in `up_next_remove` is a 1-liner
+linear scan over `controller.upNext.count`; covering it in
+isolation would require either spinning up a real `ContextWindow`
+session or extracting the predicate into a free function — neither
+pays for itself when the live-verification gate exercises it
+end-to-end.
+
+**Verification gates.**
+- `make check` clean.
+- `swift test` 410/54 green.
+- `swiftformat --lint` clean (0/192 files require formatting).
+- `swiftlint --strict` clean (0 violations across 192 files).
+- `make` (signed Apple Development cert build) clean.
+- Live computer-use verification end-to-end on `gpt-5.4` + `flex`
+  tier (all steps PASS — see below).
+
+**Live verification via computer-use (all 7 steps PASS).** Path per
+the plan's verification gates. **Show tool calls** toggled ON so
+each step's tool-call trace is visible inline.
+
+1. Launch signed build, opened the assistant pane (DJ Roomba tab of
+   the bottom dock). Up Next sidebar row already empty.
+2. **New Request** → fresh conversation.
+3. "What's in my up-next queue right now?" → model called
+   `up_next_count({})` → `{"count":0}` → reply: "Your Up Next queue
+   is empty right now."
+4. "Add five tracks by Pinback to my up-next queue." → exactly the
+   expected sequence: `search_apple_music({"query":"Pinback","limit":5})`
+   → returns 5 song ids → `up_next_add({"trackIds":[5 uuid strings]})`
+   → `{"added":5,"count":5}` → reply: "Added 5 Pinback tracks to Up
+   Next: Good to Sea, Penelope, Fortress, Loro, and Non Photo-Blue."
+   Sidebar chip on Up Next row jumped 0 → **5**. Queue detail shows
+   5 Pinback tracks numbered 1-5 with title / artist / album / time
+   columns. `/tmp/upnext-phase4-step-4.png`.
+5. "Remove the second and fourth ones." →
+   `up_next_remove({"positions":[2,4]})` → `{"count":3,"removed":2}`
+   → reply: "Done — removed positions 2 and 4. Up Next now has 3
+   tracks." Sidebar chip 5 → **3**. Detail shows positions 1/3/5
+   from the original list renumbered 1/2/3 (Good to Sea, Fortress,
+   Non Photo-Blue) — confirms the Phase-1 multi-remove index-
+   stability invariant still holds end-to-end through the tool path.
+   `/tmp/upnext-phase4-step-5.png`.
+6. "What's left?" → model called
+   `up_next_get({"start":1,"end":10})` → returned the 3 entries with
+   `{position, songId, title, artist, album}` — reply: "You've got 3
+   tracks left in Up Next: Good to Sea, Fortress, and Non Photo-
+   Blue." `/tmp/upnext-phase4-step-6.png`.
+7. Selected Rob Crow Music in sidebar, hit Play → "Proceed to
+   Memory" started. ⌘→ once. Sidebar chip dropped **3 → 2**;
+   now-playing bar updated to "Good to Sea" (the Phase-3-added
+   queue head, NOT the playlist's structural next #2 Seville).
+   Confirms the Phase-1 dominance hook fires identically on
+   tool-added queue entries. (Transient
+   `MPMusicPlayerControllerErrorDomain error 6` banner appeared
+   briefly during the swap — known MusicKit symptom of the
+   documented v1 "single-song queue exhausts → player has nothing
+   to fall back to" limitation called out in the plan's "What this
+   gives up" section. Playback DID start successfully.)
+
+**Phase 1-3 regression re-verification (all PASS).**
+- Phase 1 playback dominance: ⌘→ on a playing playlist with queue
+  items pulled the queue head before falling through (step 7 above).
+- Phase 2 detail surface: clicking the Up Next sidebar row after
+  step 5 lands on `UpNextView` with the 3-entry table + header
+  "3 tracks" subtitle + active Clear button (post-step-7, "2 tracks"
+  / Fortress + Non Photo-Blue, Clear still enabled, dominance hook
+  did exactly what Phase 1 promised through a tool-added queue).
+- Phase 3 context-menu add: not directly retested this round; the
+  Phase-4 add uses the same `addToUpNext(songIDs:insertAt:)` funnel
+  Phase 3 exercised exhaustively three commits ago, so the path is
+  observationally identical.
+
+**System prompt behaviour check.** `gpt-5.4` picked `up_next_add`
+(not `play_track` / `play_playlist`) for "add five Pinback tracks
+to my up-next queue" on the first try, without needing system-
+prompt tightening — the four sentences added were sufficient. The
+"queue ≠ player queue" disambiguation rule held under the test
+prompt. If a future "play me more like X" intent class slips and
+the model reaches for `play_track`, the fix is in the system
+prompt or each tool's schema description, not in the runner.
+
+**Skills.** `swiftui-pro` pre-pass: no view code touched, but
+confirmed the @Sendable closure capture of `controllerProvider` +
+the `Task { @MainActor in ... }.value` hop is the established
+project pattern (used by 8 prior controller-facing tools).
+Returns from the closures are Sendable scalars / `[JSONValue]`,
+no actor-isolation leaks. Post-pass clean. `airbnb-swift-style`:
+SwiftFormat autofixed one indentation / trailing-comma run, then
+SwiftFormat --lint + SwiftLint --strict 0 violations across 192
+files; new tool runners match the prior 13's shape exactly.
+`toms-laws` final cleanup: spot-checked three candidates, vetoed
+all three. (1) The pre-resolve `store.songs(byIDs:)` in
+`up_next_add` is technically redundant with the controller
+funnel's internal resolve — but extracting the "added count"
+through the funnel would ripple through three callsites for a
+saving of one sub-millisecond batched read on a ~5-row input;
+freight not paid. (2) The 4-line validation in `up_next_remove`'s
+@MainActor closure could be extracted into a helper — but it's
+one callsite; DRY waits for the third. (3) Real finding: the
+`let provider = controllerProvider` / `await Task { @MainActor ...
+}.value` / `guard let ... else { return errorJSON("controller
+unavailable") }` triple repeats across all twelve controller-
+facing tools (eight prior + four Phase 4). A generic
+`withController<T>(_ block: @Sendable @MainActor (MusicController)
+async -> T?) async -> Result<T, ...>` helper would collapse them
+— but it touches every tool, not just the new four, so it belongs
+in a follow-up cleanup phase, not a Phase 4 surprise. Flagged for
+post-Phase-5 / `DESIGN-TODO.md`.
+
+**PR.** https://github.com/tqbf/djroomba/pull/13 (draft, NOT
+merged). Phase 4 checkbox ticked.
+
+**Phase 5 next** (per the plan): auto-fill toggle (UserDefaults
+key `djroomba.upNext.autoFillEnabled`, default OFF, surfaced as a
+"Auto-fill Up Next when empty" checkbox in OpenAI Settings) +
+non-empty → empty transition detector on `MusicController` that,
+when the toggle is on and `gpt.isKeyConfigured` and no auto-fill
+is in flight, calls a new `GPTService.autoFillUpNext()` which
+`await gpt.newConversation()` + sends a short "pick ten tracks
+similar to what's been playing and call `up_next_add`" seed
+message. Phase 4's `up_next_add` is the load-bearing primitive
+for the auto-fill loop; the live verification above proves the
+model uses it correctly for that intent class.
+
 ## 2026-05-30 — Up Next queue — Phase 3: track-list "Add to Up Next" + sidebar drop target
 
 Phase 3 of `plans/up-next-queue.md` lands on `feature/up-next-queue`

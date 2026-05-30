@@ -52,6 +52,10 @@ enum GPTToolRegistration {
       setTrackGenres(store: store, controllerProvider: controllerProvider),
       sqlQuery(store: store),
       trackGenres(store: store),
+      upNextAdd(store: store, controllerProvider: controllerProvider),
+      upNextCount(controllerProvider: controllerProvider),
+      upNextGet(controllerProvider: controllerProvider),
+      upNextRemove(controllerProvider: controllerProvider),
     ]
     return raw.map { def in
       ToolDefinition(
@@ -890,6 +894,261 @@ enum GPTToolRegistration {
         return state
       }.value
       return encodeJSON(snapshot.json)
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Append (or insert) tracks into the in-memory Up Next queue. The
+  /// queue dominates playback — when the current song ends or the user
+  /// hits Next, the queue head plays before falling through to the
+  /// active playlist. Track ids resolve via `store.songs(byIDs:)` (one
+  /// batched fetch, never per-row); any id that doesn't resolve is
+  /// silently dropped + reflected in `added`. If EVERY id was invalid
+  /// the whole call errors so the model knows it accomplished nothing.
+  private static func upNextAdd(
+    store: LibraryStore?,
+    controllerProvider: @escaping ControllerProvider,
+  ) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "up_next_add",
+      description: """
+        Append tracks to the Up Next queue — a transient in-memory \
+        queue that plays one track at a time and PREEMPTS the active \
+        playlist (every Next press / song-end drains the queue head \
+        first). Track ids come from `search_apple_music`, \
+        `playlist_contents`, or `recently_played`. Pass `position` \
+        (1-based) to insert at a specific slot; omit it to append. \
+        Use this — NOT `play_track` / `play_playlist` — when the user \
+        wants to queue something up to play next or "play more like \
+        X" without disturbing the current playlist queue. Returns \
+        `{ added, count }` where `added` is how many ids resolved \
+        (silently skipped if missing) and `count` is the post-add \
+        queue length.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "trackIds": arraySchema(
+            of: .object(["type": .string("string")]),
+            description: "Internal song ids to enqueue, in order.",
+          ),
+          "position": .object([
+            "type": .string("integer"),
+            "description": .string("""
+              Optional 1-based insert position. Omit to append to the tail; \
+              `1` pushes to the head. Clamped to `[1, count + 1]`.
+              """),
+          ]),
+        ],
+        required: ["trackIds"],
+      ),
+    )
+    let runner = ClosureToolRunner { [store] args in
+      guard let store else { return errorJSON("library is unavailable") }
+      struct Input: Decodable {
+        var trackIds: [String]
+        var position: Int?
+      }
+      guard let input = try? JSONDecoder().decode(Input.self, from: args) else {
+        return errorJSON("expected { trackIds }")
+      }
+      guard !input.trackIds.isEmpty else {
+        return errorJSON("trackIds is empty")
+      }
+      // Pre-resolve so we can tell "model gave us all junk" from "we
+      // appended something". The controller funnel re-does this work
+      // internally, but a second batched read on a ~10-row queue is
+      // free + lets us reject the whole call when nothing resolves.
+      let resolved: Int
+      do {
+        let songs = try await store.songs(byIDs: input.trackIds)
+        let ids = Set(songs.map(\.id))
+        resolved = input.trackIds.reduce(into: 0) { ids.contains($1) ? $0 += 1 : () }
+      } catch {
+        return errorJSON("lookup failed: \(error.localizedDescription)")
+      }
+      guard resolved > 0 else {
+        return errorJSON("none of the supplied trackIds matched a song")
+      }
+      let provider = controllerProvider
+      let trackIDs = input.trackIds
+      let insertAt = input.position
+      let count: Int? = await Task { @MainActor () -> Int? in
+        guard let controller = provider() else { return nil }
+        await controller.addToUpNext(songIDs: trackIDs, insertAt: insertAt)
+        return controller.upNext.count
+      }.value
+      guard let count else {
+        return errorJSON("controller unavailable")
+      }
+      return encodeJSON(.object([
+        "added": .number(Double(resolved)),
+        "count": .number(Double(count)),
+      ]))
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Return the current Up Next queue length. O(1) read.
+  private static func upNextCount(
+    controllerProvider: @escaping ControllerProvider
+  ) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "up_next_count",
+      description: """
+        Return how many tracks are currently in the Up Next queue. \
+        Use this when you only need the size — to confirm the queue \
+        is empty, to check whether adding more makes sense — rather \
+        than dragging back the contents.
+        """,
+      parameters: objectSchema(properties: [:]),
+    )
+    let runner = ClosureToolRunner { _ in
+      let provider = controllerProvider
+      let count: Int? = await Task { @MainActor () -> Int? in
+        guard let controller = provider() else { return nil }
+        return controller.upNext.count
+      }.value
+      guard let count else {
+        return errorJSON("controller unavailable")
+      }
+      return encodeJSON(.object([
+        "count": .number(Double(count))
+      ]))
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Read a 1-based-inclusive slice of the Up Next queue. Out-of-range
+  /// / swapped args collapse to an empty list; `total` always reflects
+  /// the un-truncated range size so the model can ask for more.
+  private static func upNextGet(
+    controllerProvider: @escaping ControllerProvider
+  ) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "up_next_get",
+      description: """
+        Return a slice of the Up Next queue, 1-based inclusive on both \
+        ends (`start = 1, end = 10` returns positions 1 through 10). \
+        Each entry carries `{ position, songId, title, artist, album }`. \
+        Capped at 200 entries per call; `truncated: true` past that, \
+        and `total` reports the un-truncated range size.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "start": .object([
+            "type": .string("integer"),
+            "description": .string("First position to return (1-based, inclusive)."),
+          ]),
+          "end": .object([
+            "type": .string("integer"),
+            "description": .string("Last position to return (1-based, inclusive)."),
+          ]),
+        ],
+        required: ["start", "end"],
+      ),
+    )
+    let runner = ClosureToolRunner { args in
+      struct Input: Decodable {
+        var start: Int
+        var end: Int
+      }
+      guard let input = try? JSONDecoder().decode(Input.self, from: args) else {
+        return errorJSON("expected { start, end }")
+      }
+      let provider = controllerProvider
+      let result: (entries: [JSONValue], total: Int, truncated: Bool)? = await Task {
+        @MainActor () -> (entries: [JSONValue], total: Int, truncated: Bool)? in
+        guard let controller = provider() else { return nil }
+        let slice = controller.upNext.range(input.start, input.end)
+        let total = slice.count
+        let capped = Array(slice.prefix(playlistTrackCap))
+        let startBase = max(input.start, 1)
+        let rows = capped.enumerated().map { offset, entry -> JSONValue in
+          .object([
+            "position": .number(Double(startBase + offset)),
+            "songId": .string(entry.song.id),
+            "title": .string(entry.song.title),
+            "artist": .string(entry.song.artistName),
+            "album": .string(entry.song.albumTitle ?? ""),
+          ])
+        }
+        return (rows, total, total > playlistTrackCap)
+      }.value
+      guard let result else {
+        return errorJSON("controller unavailable")
+      }
+      return encodeJSON(.object([
+        "entries": .array(result.entries),
+        "total": .number(Double(result.total)),
+        "truncated": .bool(result.truncated),
+      ]))
+    }
+    return ToolDefinition(schema: schema, runner: runner)
+  }
+
+  /// Remove tracks from the Up Next queue by 1-based position. ANY
+  /// invalid position rejects the WHOLE call (no partial application);
+  /// the model gets a clean error and can retry with a corrected
+  /// list rather than guess what landed.
+  private static func upNextRemove(
+    controllerProvider: @escaping ControllerProvider
+  ) -> ToolDefinition {
+    let schema = JSONSchemaToolDefinition(
+      name: "up_next_remove",
+      description: """
+        Remove tracks from the Up Next queue by 1-based position. If \
+        ANY supplied position is out of range or duplicated the WHOLE \
+        call errors and nothing is removed (no partial application) — \
+        check `up_next_count` first or include only positions you \
+        know are live. Returns `{ removed, count }` where `count` is \
+        the post-remove queue length.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "positions": arraySchema(
+            of: .object(["type": .string("integer")]),
+            description: "1-based positions to remove. Must all be in range.",
+          )
+        ],
+        required: ["positions"],
+      ),
+    )
+    let runner = ClosureToolRunner { args in
+      struct Input: Decodable { var positions: [Int] }
+      guard let input = try? JSONDecoder().decode(Input.self, from: args) else {
+        return errorJSON("expected { positions }")
+      }
+      guard !input.positions.isEmpty else {
+        return errorJSON("positions is empty")
+      }
+      let positions = input.positions
+      if Set(positions).count != positions.count {
+        return errorJSON("positions contains duplicates")
+      }
+      let provider = controllerProvider
+      let outcome: (removed: Int, count: Int, error: String?) = await Task {
+        @MainActor () -> (removed: Int, count: Int, error: String?) in
+        guard let controller = provider() else {
+          return (0, 0, "controller unavailable")
+        }
+        let total = controller.upNext.count
+        let valid = 1...total
+        if total == 0 {
+          return (0, 0, "Up Next queue is empty")
+        }
+        for position in positions where !valid.contains(position) {
+          return (0, total, "position \(position) is out of range (1...\(total))")
+        }
+        controller.removeFromUpNext(positions: positions)
+        return (positions.count, controller.upNext.count, nil)
+      }.value
+      if let error = outcome.error {
+        return errorJSON(error)
+      }
+      return encodeJSON(.object([
+        "removed": .number(Double(outcome.removed)),
+        "count": .number(Double(outcome.count)),
+      ]))
     }
     return ToolDefinition(schema: schema, runner: runner)
   }
