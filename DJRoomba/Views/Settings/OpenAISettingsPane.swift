@@ -31,10 +31,13 @@ struct OpenAISettingsPane: View {
 
   @State private var keyDraft = ""
 
-  /// Opt-in: when the Up Next queue drains to empty, fire a new
-  /// assistant conversation that picks ten more tracks (Phase 5 of
-  /// `plans/up-next-queue.md`). Default OFF; the controller's
-  /// drain detector gates on this value plus `gpt.isKeyConfigured`.
+  /// Opt-in: when the Up Next queue depth drops to one, fire a new
+  /// assistant conversation that picks eleven more tracks (Phase 5 of
+  /// `plans/up-next-queue.md`, refined by the 2026-05-30 grace note
+  /// to refill at low-water instead of empty so the assistant turn
+  /// runs under the cover of a still-playing song). Default OFF; the
+  /// controller's detector gates on this value plus
+  /// `gpt.isKeyConfigured`.
   /// `@AppStorage` is the right shape here — the toggle's only
   /// consumer outside the view is `UserDefaults.standard.bool(forKey:)`
   /// inside `MusicController`, and `@AppStorage` writes through to
@@ -87,9 +90,9 @@ struct OpenAISettingsPane: View {
       Text("Up Next")
     } footer: {
       Text("""
-        When the queue drains to zero, DJ Roomba starts a new \
-        conversation and adds ten more tracks based on what you’ve \
-        been playing. Off by default.
+        When the queue depth drops to one, DJ Roomba starts a new \
+        conversation and queues up eleven more tracks based on what \
+        you’ve been playing. Off by default.
         """)
     }
   }

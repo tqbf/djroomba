@@ -1137,12 +1137,12 @@ final class MusicController {
     } else {
       upNext.append(songs, musicItemIDs: musicItemIDs)
     }
-    // Phase-5 bookkeeping: an add can't drain the queue (it's
-    // non-decreasing in count), but it does flip the
-    // `previousUpNextWasNonEmpty` flag from false → true so the next
-    // genuine drain after this add actually fires the detector. Routing
-    // through the same helper keeps the flag-update discipline in one
-    // place — the helper short-circuits on a non-transition.
+    // Phase-5 bookkeeping: an add can't cross the low-water mark on
+    // the way down (it's non-decreasing in count), but it does update
+    // `previousUpNextCount` so the next genuine drain after this add
+    // fires the detector against the correct baseline. Routing
+    // through the same helper keeps the count-update discipline in
+    // one place — the predicate short-circuits on a non-crossing.
     notifyUpNextMutated()
   }
 
@@ -1376,18 +1376,19 @@ final class MusicController {
   /// `dispatchUpNextIfNeeded` for the bounded re-entry argument.
   @ObservationIgnored private var upNextDispatchInFlight = false
 
-  /// Phase-5 auto-fill: was the Up Next queue non-empty at the most
-  /// recently observed callsite? Every controller-level mutator that
-  /// can shrink the queue calls `notifyUpNextMutated` after touching
-  /// the service; the helper compares this flag with the new
-  /// `upNext.isEmpty` and dispatches the auto-fill task on the
-  /// non-empty → empty transition. The plan deliberately chose this
-  /// callsite-flag idiom over `withObservationTracking` on the
-  /// `@MainActor @Observable` controller to match the file's existing
-  /// direct-reaction style (`dispatchUpNextIfNeeded`, the watermark
-  /// guard, etc.) and to keep the trigger sites grep-able.
-  /// `@ObservationIgnored` because no view reads it.
-  @ObservationIgnored private var previousUpNextWasNonEmpty = false
+  /// Phase-5 auto-fill: the Up Next queue's count at the most recently
+  /// observed callsite. Every controller-level mutator that can shrink
+  /// the queue calls `notifyUpNextMutated` after touching the service;
+  /// the helper feeds the (old, new) pair to
+  /// `UpNextDrainDetector.didCrossLowWater` and dispatches the
+  /// auto-fill task on the threshold-crossing transition. The plan
+  /// deliberately chose this callsite-flag idiom over
+  /// `withObservationTracking` on the `@MainActor @Observable`
+  /// controller to match the file's existing direct-reaction style
+  /// (`dispatchUpNextIfNeeded`, the watermark guard, etc.) and to keep
+  /// the trigger sites grep-able. `@ObservationIgnored` because no
+  /// view reads it.
+  @ObservationIgnored private var previousUpNextCount = 0
 
   /// The destination currently shown in the top pane: a genre takes
   /// precedence (it's mutually exclusive with a playlist), else the
@@ -2122,29 +2123,31 @@ final class MusicController {
     }
   }
 
-  /// Phase-5 drain detector. Called by every controller-level mutator
-  /// that can shrink the Up Next queue (`skipNext`'s pop branch,
-  /// `dispatchUpNextIfNeeded`, `playFromUpNext`, `removeFromUpNext`,
-  /// `clearUpNext`). Compares the queue's pre-mutation emptiness flag
-  /// (`previousUpNextWasNonEmpty`) with the post-mutation `isEmpty`
-  /// and fires `GPTService.autoFillUpNext()` on the non-empty → empty
-  /// transition, gated on the user's opt-in toggle + a configured API
-  /// key. The GPT side single-flight-guards itself, so calling this
-  /// twice in a row across a re-drain after the first auto-fill task
-  /// returned is fine.
+  /// Phase-5 low-water detector. Called by every controller-level
+  /// mutator that can shrink the Up Next queue (`skipNext`'s pop
+  /// branch, `dispatchUpNextIfNeeded`, `playFromUpNext`,
+  /// `removeFromUpNext`, `clearUpNext`). Compares the queue's
+  /// pre-mutation depth (`previousUpNextCount`) with the post-mutation
+  /// `upNext.count` and fires `GPTService.autoFillUpNext()` when the
+  /// mutation crossed `UpNextDrainDetector.refillThreshold`, gated on
+  /// the user's opt-in toggle + a configured API key. The GPT side
+  /// single-flight-guards itself, so calling this twice in a row
+  /// across a re-cross after the first auto-fill task returned is
+  /// fine.
   ///
-  /// Note we update `previousUpNextWasNonEmpty` unconditionally at the
-  /// tail — the transition detector only fires once per drain because
-  /// the next call's `previousUpNextWasNonEmpty = false` short-circuits
-  /// the predicate until the queue refills and is then re-emptied.
+  /// Note we update `previousUpNextCount` unconditionally at the
+  /// tail — the predicate only fires once per crossing because the
+  /// next call's `previousUpNextCount <= refillThreshold` short-
+  /// circuits it until the queue refills past the threshold and is
+  /// then drained again.
   private func notifyUpNextMutated() {
-    let isEmptyNow = upNext.isEmpty
-    let drained = UpNextDrainDetector.didDrain(
-      previousWasNonEmpty: previousUpNextWasNonEmpty,
-      isEmptyNow: isEmptyNow,
+    let newCount = upNext.count
+    let crossed = UpNextDrainDetector.didCrossLowWater(
+      oldCount: previousUpNextCount,
+      newCount: newCount,
     )
-    previousUpNextWasNonEmpty = !isEmptyNow
-    guard drained else { return }
+    previousUpNextCount = newCount
+    guard crossed else { return }
     guard UserDefaults.standard.bool(forKey: GPTService.autoFillToggleKey) else { return }
     guard gpt.isKeyConfigured else { return }
     gpt.autoFillUpNext()

@@ -5,6 +5,134 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Grace note: refill Up Next at 1-remaining with 11-track batches
+
+Fourth grace note on `feature/grace-notes`. Phase 5's auto-fill
+trigger fired on `non-empty → empty`, leaving a dead-air gap of
+~10–30 s while the `gpt-5.4`-flex refill turn ran with nothing
+queued. Moves the trigger forward by one slot — refill is now
+initiated when queue depth crosses `oldCount > 1 → newCount <= 1`,
+and the seed prompt asks for 11 tracks instead of 10, so the
+steady-state floor is 1 (the depth-1 song plays while the assistant
+turn runs) and the ceiling is 12 (1 leftover + 11 added).
+
+**Files changed.**
+- `DJRoomba/Music/UpNextDrainDetector.swift` — predicate renamed
+  `didDrain(previousWasNonEmpty:isEmptyNow:)` → `didCrossLowWater(
+  oldCount:newCount:)`. Two named constants pinned together so the
+  pairing is obvious: `targetDepth = 11`, `refillThreshold = 1`.
+  File-doc + the file's whole framing shifted from "drain" to
+  "low-water"; the file path stays put to avoid churn.
+- `DJRoomba/Music/MusicController.swift` —
+  `previousUpNextWasNonEmpty: Bool` → `previousUpNextCount: Int`,
+  `notifyUpNextMutated` reads `upNext.count` and feeds the new
+  predicate. The `addToUpNext` bookkeeping comment updated to match.
+- `DJRoomba/Music/GPTService.swift` — `autoFillSeed` rewritten to
+  "running low … add 11 tracks via `up_next_add` in a single call";
+  system-prompt paragraph aligned ("queue is running low" + "adding
+  11 tracks"); `autoFillUpNext` docstring rewritten + log line
+  changed from "drained" to "at low-water".
+- `DJRoomba/Views/Settings/OpenAISettingsPane.swift` — footer copy
+  rewritten ("queue depth drops to one … queues up eleven more
+  tracks"); the toggle label itself stays "Auto-fill Up Next when
+  empty" (the user-facing label is a stable handle — the footer
+  carries the truth, and renaming the label would have spread the
+  user-facing copy churn across screenshots / muscle memory for no
+  win).
+- `Tests/DJRoombaTests/UpNextDrainDetectorTests.swift` — retargeted
+  at the new predicate. 4 → 8 tests covering 5→1, 5→0, 2→1
+  (all fire); 12→11, 1→1, 1→0, 0→0 (all don't fire); plus a
+  one-liner constants-pairing test pinning the (`targetDepth=11`,
+  `refillThreshold=1`) pair so a future agent who bumps one
+  without the other has to read the assertion.
+- `plans/up-next-queue.md` — opening paragraph, decisions-table
+  rationale, Architecture playback-dominance pseudocode, and the
+  whole "Auto-fill on queue low-water" subsection updated. Phase 5
+  bullet rewritten. Added a "Why low-water instead of empty"
+  paragraph explaining the flex-tier latency motivation.
+- `PLAN.md` — the `plans/up-next-queue.md` row updated to the
+  "queue depth crosses low-water" framing with the named-constants
+  citation.
+
+**Predicate, in one line:** `oldCount > refillThreshold &&
+newCount <= refillThreshold`. The single-flight guard on the
+controller side handles re-entry across the post-firing transition
+(`1 → 0`); the predicate stays pure and just measures the
+crossing. The `targetDepth=11` + `refillThreshold=1` pair is what
+gives the loop its steady-state floor=1 / ceiling=12 shape.
+
+**Verification gates (all PASS).**
+- `make check` clean.
+- `swift test` **426/56** green (+4 from grace note 3's 422/56
+  baseline: -4 old detector tests, +8 new ones). No regressions.
+- `swiftformat --lint` clean on the 5 changed files.
+- `swiftlint lint --strict` clean on the 5 changed files (0
+  violations).
+- `make build` (signed Apple Development cert) clean.
+
+**Live computer-use verification (all 8 steps PASS).**
+1. Launched the signed build. Settings → OpenAI: footer reads
+   "When the queue depth drops to one, DJ Roomba starts a new
+   conversation and queues up eleven more tracks based on what
+   you've been playing. Off by default." Enabled the toggle.
+   API key was already in Keychain.
+2. Debug → Seed Up Next from Current Selection (3 tracks from Rob
+   Crow Music: Proceed to Memory / Seville / O.B. 1). Up Next chip
+   = 3.
+3. Bottom-dock DJ Roomba pane open; sidebar showed 12 prior
+   conversations (the next mint will make 13).
+4. Double-clicked Up Next row 1 → "Proceed to Memory" started
+   playing, chip dropped 3 → 2 (no refill: 3→2 doesn't cross
+   threshold).
+5. Pressed ⌘→ to advance → chip went 2 → 1. **At the 2→1
+   transition** a new "Untitled" conversation minted in the sidebar
+   (13 → 13+1 = 14 wait — actually visible as the top "Untitled
+   in 0s" with the new seed prompt); the model called
+   `recently_played({"limit":25})` → `up_next_add({"trackIds":[…11
+   ids…]})` → returned `{"added":11,"count":12}` → assistant said
+   "Queued 11 more tracks. Up Next now has 12 total."
+   Screenshot `/tmp/grace-4-step-5.png`.
+6. Up Next chip jumped from 1 → 12 (1 leftover "Seville" still
+   playing + 11 newly added). Crucially, the refill landed
+   **before** the depth-1 song "Seville" (4:08) finished —
+   confirmed by the now-playing bar still showing Seville with
+   plenty of time left. Screenshot `/tmp/grace-4-step-6.png`.
+7. Clicked Clear → confirm → queue went 12 → 0. ONE refill turn
+   fired (12 → 0 crosses 1, so the predicate fires once), minted
+   the 14th conversation, which added 11 tracks back. Waited 10 s
+   afterward — no further turns minted (single-flight guard +
+   `previousUpNextCount = 0` short-circuits subsequent calls until
+   the queue refills past threshold and is then drained again).
+   Screenshot `/tmp/grace-4-step-7.png`.
+8. Settings → OpenAI → toggled OFF. Clear → queue → 0. Waited
+   10 s. Conversations stayed at 14, no new mint.
+   Screenshot `/tmp/grace-4-step-8.png`.
+
+**Latency observation (step 5).** Sit-to-refill was ~15–20 s on
+the flex tier — comfortably under the 4:08 of Seville left to
+play. The hypothesis the grace note's design is based on holds in
+practice: a song of playback is more than enough cover for the
+typical refill turn.
+
+**Regression checks.** Grace notes 1–3 (scrub bar, end-of-track
+auto-advance, in-progress indicator + cancel) and Up Next phases
+1–5 all still work — the predicate change is the only Phase-5
+semantic shift, and the upstream wiring (callers of
+`notifyUpNextMutated`, the single-flight guard, the `gpt-5.4` +
+`flex` model loop) is unchanged.
+
+**App-quit confirmation.** `osascript -e 'tell app "DJRoomba" to
+quit'` → `pgrep -lf DJRoomba` empty.
+
+**Branch state.** `feature/grace-notes` carries four commits on top
+of `feature/up-next-queue`:
+1. `738ef9f` — scrub bar
+2. `d68d855` — Up Next auto-advance
+3. `54c29f2` — assistant in-progress indicator + cancel button
+4. (this commit) — refill at 1-remaining with 11-track batches
+
+Pushed to origin. NO PR opened — grace note 5 will.
+
 ## 2026-05-30 — Grace note: assistant in-progress indicator + cancel button
 
 Third of the grace notes on `feature/grace-notes`. User report: "While

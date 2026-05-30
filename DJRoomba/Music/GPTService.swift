@@ -97,10 +97,10 @@ final class GPTService {
   /// arrive. `static let` so the system prompt's auto-fill
   /// paragraph and this seed stay easy to read side-by-side.
   static let autoFillSeed = """
-    The Up Next queue just emptied and I need ten more tracks. Use \
-    `recently_played` (and `app_state` if useful) to pick what I'm \
-    likely to want next, then call `up_next_add` with the chosen \
-    track ids. Don't ask follow-up questions — just queue them.
+    The Up Next queue is running low and I need eleven more tracks. \
+    Use `recently_played` (and `app_state` if useful) to pick what \
+    I'm likely to want next, then add 11 tracks via `up_next_add` \
+    in a single call. Don't ask follow-up questions — just queue them.
     """
 
   /// Whether an API key is stored in the Keychain.
@@ -386,22 +386,27 @@ final class GPTService {
   }
 
   /// Phase-5 auto-fill dispatch (`plans/up-next-queue.md` — "Auto-fill
-  /// on empty"). Called by `MusicController.notifyUpNextMutated` on the
-  /// non-empty → empty transition when the user's opt-in toggle is on
-  /// and the API key is configured. Single-flight: if a previous
-  /// auto-fill task is still running this call no-ops.
+  /// on queue low-water"). Called by
+  /// `MusicController.notifyUpNextMutated` when the queue depth crosses
+  /// `UpNextDrainDetector.refillThreshold` (=1) on the way down, with
+  /// the user's opt-in toggle on and the API key configured.
+  /// Single-flight: if a previous auto-fill task is still running this
+  /// call no-ops.
   ///
   /// The task mints a fresh conversation (the user explicitly wanted
   /// auto-fills isolated from any in-progress chat) and sends a tight
-  /// seed message instructing the model to pick ten tracks via
-  /// `recently_played` + `up_next_add`. Any failure inside `sendMessage`
-  /// surfaces via the assistant pane's `errorMessage` just like a
-  /// user-typed message would — we don't shadow-handle network errors
-  /// here. The task handle is cleared in `defer` so a re-drain after a
-  /// clean fill re-arms.
+  /// seed message instructing the model to add 11 tracks via
+  /// `recently_played` + `up_next_add`. The 11-track batch + 1-remaining
+  /// trigger gives the assistant a song's worth of playback to land
+  /// the refill, so the user doesn't sit through dead air between
+  /// batches. Any failure inside `sendMessage` surfaces via the
+  /// assistant pane's `errorMessage` just like a user-typed message
+  /// would — we don't shadow-handle network errors here. The task
+  /// handle is cleared in `defer` so a re-cross after a clean fill
+  /// re-arms.
   func autoFillUpNext() {
     guard autoFillTask == nil else { return }
-    AssistantLog.logger.info("→ auto-fill: queue drained, dispatching")
+    AssistantLog.logger.info("→ auto-fill: queue at low-water, dispatching")
     autoFillTask = Task { @MainActor [weak self] in
       defer { self?.autoFillTask = nil }
       guard let self else { return }
@@ -554,9 +559,9 @@ final class GPTService {
     `play_playlist`, which would replace the active player queue. \
     Reach for `play_playlist` / `play_track` only when the user wants \
     to start playing something right now. If the user's first message \
-    in a fresh conversation says the queue is empty and asks for \
-    tracks, the user has auto-fill enabled — silently fulfil it via \
-    `recently_played` + `up_next_add`, no preamble.
+    in a fresh conversation says the queue is running low and asks for \
+    tracks, the user has auto-fill enabled — silently fulfil it by \
+    adding 11 tracks via `recently_played` + `up_next_add`, no preamble.
     """
 
   @ObservationIgnored private var session: Session?
