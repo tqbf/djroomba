@@ -26,7 +26,17 @@ struct AssistantPaneView: View {
   // MARK: Internal
 
   var body: some View {
-    HStack(spacing: 0) {
+    // Touch `showToolCalls` at the body root so SwiftUI's invalidation
+    // tracking captures it as a top-level dependency. On SwiftUI 5.4
+    // (macOS 14), `@AppStorage` reads buried in deeply nested computed
+    // view-properties (`paneHeader`, `transcript`, `visibleMessages`)
+    // don't always propagate an invalidation up to the parent body
+    // — the toggle would commit to UserDefaults but the rendered
+    // transcript wouldn't redraw until another observable changed.
+    // The hoisted read is a no-op semantically; SwiftUI just sees it
+    // as a body-level dependency now.
+    let _ = showToolCalls
+    return HStack(spacing: 0) {
       if sidebarVisible {
         AssistantConversationSidebar(
           conversations: gpt.conversations,
@@ -190,24 +200,25 @@ struct AssistantPaneView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 32)
         } else {
-          // `.id(showToolCalls)` ties the LazyVStack's view identity
-          // to the filter flag so SwiftUI rebuilds it when the toggle
-          // changes. Without this, `@AppStorage`'s value change was
-          // not propagating into the LazyVStack's diff — its child
-          // ForEach kept rendering the pre-toggle set of rows. The
-          // user-observed symptom: toggling did nothing immediately,
-          // but switching conversations (which already changes the
-          // ForEach data shape) THEN flipping back showed the new
-          // filter state. Forcing a fresh identity here makes the
-          // toggle apply on the spot. Scroll re-anchor below keeps
-          // the bottom of the chat at the bottom of the viewport.
-          LazyVStack(alignment: .leading, spacing: 14) {
+          // Plain `VStack` (not `LazyVStack`) here on purpose. On
+          // SwiftUI 5.4 (macOS 14), `LazyVStack`'s child diff doesn't
+          // reliably drop rows that disappear from its `ForEach`
+          // source, even when the parent invalidates and `.id(...)`
+          // forces a fresh identity. The user-visible symptom was
+          // that toggling the "Show tool calls" filter on macOS 14
+          // did nothing until the conversation was switched (which
+          // changed the data shape enough to defeat the cached
+          // diff). `VStack` re-renders children eagerly when its
+          // input changes — the scroll view still virtualises
+          // bitmaps for off-screen rows, so the perf cost is
+          // negligible at our transcript scale. macOS 26 (SwiftUI 6)
+          // doesn't have the bug; the change is neutral there.
+          VStack(alignment: .leading, spacing: 14) {
             ForEach(visibleMessages) { message in
               MessageRow(message: message)
                 .id(message.id)
             }
           }
-          .id(showToolCalls)
           .padding(.horizontal, 16)
           .padding(.vertical, 16)
         }

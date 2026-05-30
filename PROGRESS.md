@@ -5,6 +5,46 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Fix (round 2): tool-calls toggle still wedged on macOS 14
+
+User report: "I can see this clearly working here, but when I copy
+the binary over to my macOS 14 host, the checkbox still has the old
+bug." Round 1's `.id(showToolCalls)` invalidation worked on
+macOS 26 (SwiftUI 6) but not on macOS 14 (SwiftUI 5.4).
+
+**Diagnosis.** SwiftUI 5.4 has two distinct rough edges this view
+was tripping:
+1. `LazyVStack`'s child diff doesn't reliably drop rows that
+   disappear from its `ForEach` source — even with `.id(...)`
+   forcing a fresh parent identity, the lazy materialiser keeps
+   showing the cached children.
+2. `@AppStorage` invalidation buried in nested computed
+   view-properties (`paneHeader`, `transcript`, `visibleMessages`)
+   sometimes doesn't propagate to body — the parent body never
+   re-renders, so the LazyVStack never gets a new source array.
+
+**Fix.** Two complementary changes:
+
+- **`LazyVStack` → `VStack`** in the transcript. Eager rendering
+  bypasses the lazy diff bug entirely. The enclosing `ScrollView`
+  still virtualises bitmaps for off-screen rows, so the perf cost
+  is negligible at our transcript scale (worst case a few hundred
+  message rows, all cheap View structs). macOS 26 unaffected; the
+  change is neutral there.
+- **Body-level read of `showToolCalls`** at the top of
+  `AssistantPaneView.body` (`let _ = showToolCalls`). Hoists the
+  `@AppStorage` dependency to the body root so SwiftUI 5.4's
+  invalidation tracking captures it as a top-level dependency
+  instead of one buried four computed properties deep. Semantically
+  a no-op; SwiftUI just sees the read at a level where its diff
+  pipeline acts on it.
+
+Round 1's `.id(showToolCalls)` removed (redundant now that VStack
+re-renders fully).
+
+Live verified on dev (macOS 26): toggle still flips instantly both
+directions. macOS 14 verification pending the user's binary copy.
+
 ## 2026-05-29 — Fix: "Show tool calls" toggle only applied after a conversation switch
 
 User report: "Clicking the checkbox does nothing immediately, but if
