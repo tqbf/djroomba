@@ -79,8 +79,28 @@ actor ArtworkProvider {
     if let cached = cache[key] { return cached }
     if let existing = inFlight[key] { return await existing.value }
 
-    let task = Task<Artwork?, Never> {
-      await Self.resolve(musicItemID: musicItemID, namespace: namespace, kind: kind)
+    // Bounded-concurrency permit lives INSIDE the task so the actor's
+    // `inFlight` dedupe upstream still works — without a suspension
+    // between the `inFlight[key]` check and the assignment below, a
+    // burst of concurrent requests for the same key all see the
+    // first task and share its result. Cap: see `maxConcurrentResolves`.
+    // On macOS 14.4 a real crash reproduced with ~20 parallel
+    // `MPModelLibraryRequest`s — MusicKit's underlying
+    // `MRMediaRemoteServiceIsMusicAppInstalled` synchronous XPC
+    // over-releases an autoreleased object under load and the next
+    // pool pop hits a dangling pointer. Bounding fixes that without
+    // a measurable UI slowdown (artwork is renderable out-of-order;
+    // rows just resolve a hair later).
+    let task = Task<Artwork?, Never> { [weak self] in
+      guard let self else { return nil }
+      await acquirePermit()
+      let result = await Self.resolve(
+        musicItemID: musicItemID,
+        namespace: namespace,
+        kind: kind,
+      )
+      await releasePermit()
+      return result
     }
     inFlight[key] = task
     let resolved = await task.value
@@ -107,12 +127,32 @@ actor ArtworkProvider {
   /// evicts something actively visible.
   private static let cacheCeiling = 1024
 
+  /// Maximum number of concurrent `MusicLibraryRequest` /
+  /// `MusicCatalogResourceRequest`s in flight at once. Chosen because
+  /// MusicKit on macOS 14.4 was observed crashing (over-release on an
+  /// XPC-returned autoreleased object in the next pool drain) when
+  /// ~20+ concurrent `MPModelLibraryRequest`s were issued together —
+  /// see the crash dump on this PR. Four is well below that bound,
+  /// large enough that artwork still streams visibly while scrolling,
+  /// and SwiftUI's own per-row task lifecycle cancels off-screen
+  /// resolves so we don't pile up dead work behind the permit.
+  private static let maxConcurrentResolves = 4
+
   /// `.some(nil)` = resolved-but-no-artwork (cache the negative so we don't
   /// re-request a known-artless item every scroll). Absent = never tried.
   private var cache = [Key: Artwork?]()
   private var inFlight = [Key: Task<Artwork?, Never>]()
   /// Insertion order for the FIFO bound below.
   private var insertionOrder = [Key]()
+
+  /// Current count of resolves in flight. Held on the actor; the
+  /// permit acquire/release pair is the only thing that touches it.
+  private var liveResolves = 0
+
+  /// FIFO of awaiters when all permits are taken. Each entry is the
+  /// continuation that's parked in `acquirePermit()` waiting for
+  /// `releasePermit()` to hand back a slot.
+  private var permitWaiters = [CheckedContinuation<Void, Never>]()
 
   /// Re-fetch the owning item by id and return its `Artwork`. Dispatches
   /// on `(namespace, kind)`:
@@ -165,6 +205,30 @@ actor ArtworkProvider {
       }
     } catch {
       return nil
+    }
+  }
+
+  /// Park until a resolve slot is free, then take it. Cheap path:
+  /// when there's headroom we increment and return synchronously.
+  private func acquirePermit() async {
+    if liveResolves < Self.maxConcurrentResolves {
+      liveResolves += 1
+      return
+    }
+    await withCheckedContinuation { continuation in
+      permitWaiters.append(continuation)
+    }
+    liveResolves += 1
+  }
+
+  /// Hand the slot back to the next awaiter (or just decrement when
+  /// nobody is waiting). Symmetric with `acquirePermit`; every taken
+  /// permit must be returned exactly once.
+  private func releasePermit() {
+    liveResolves -= 1
+    if !permitWaiters.isEmpty {
+      let next = permitWaiters.removeFirst()
+      next.resume()
     }
   }
 

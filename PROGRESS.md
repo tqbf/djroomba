@@ -5,6 +5,47 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Fix: instant crash on macOS 14.4 (ArtworkProvider concurrency bound)
+
+User report: signed app on a second MacBook (macOS 14.4) crashed
+~3 seconds after launch, before reaching steady state. Crash dump:
+
+- Thread 1 (crashed): `objc_release` → `objc_autoreleasePoolPop` —
+  pool pop hit a dangling pointer (`EXC_BAD_ACCESS` /
+  `KERN_INVALID_ADDRESS`) on an autoreleased object that had
+  already been freed.
+- ~20 worker threads simultaneously inside
+  `ArtworkProvider.resolve` → `MusicLibraryRequest.response()` →
+  `MPModelLibraryRequest.performWithCompletionHandler` →
+  `MRMediaRemoteServiceIsMusicAppInstalled` (synchronous XPC).
+- The dev machine runs Darwin 25.x (macOS 26); the user's other
+  Mac is macOS 14.4 — a known-touchier MusicKit substrate.
+
+**Diagnosis.** First-pane-paint fires artwork resolution for every
+visible row (playlist sidebar + track detail + the Recently-Played
+landing's track list + the now-playing bar). On the user's library
+that's ~20+ concurrent `MusicLibraryRequest`s. On macOS 14.4 the
+underlying synchronous XPC to MediaRemote over-releases an
+autoreleased return at saturation; the next pool pop hits the
+dangling pointer and segfaults. Existing per-key de-dupe doesn't
+help — different rows have different keys.
+
+**Fix.** `ArtworkProvider` gained an actor-internal permit pool:
+`maxConcurrentResolves = 4`, with `acquirePermit()` /
+`releasePermit()` parking awaiters in a FIFO of
+`CheckedContinuation<Void, Never>` when saturated. The permit
+acquire moved INSIDE the per-key `Task` so the actor's `inFlight`
+dedupe still works without a suspension between the check and the
+assignment (a burst on the same key sees one task and shares its
+result). Cap chosen empirically: well below the observed crash
+threshold, large enough that artwork still streams visibly while
+scrolling, and SwiftUI's per-row `.task` lifecycle cancels
+off-screen resolves so we don't pile dead work behind the permit.
+
+367/53 tests still green. No behaviour change on the dev (macOS 26)
+machine; the cap simply serialises a bit of work that previously
+ran in a hot burst.
+
 ## 2026-05-29 — Bug bundle: assistant playlist refresh, checkbox off-screen, scroll re-anchor
 
 Three small user-reported bugs from running the merged feature:
