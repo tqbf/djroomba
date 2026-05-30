@@ -5,6 +5,43 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — "All Recently Played Tracks" sidebar landing row
+
+**Branch `feature/dj-roomba-shared-pane`.** Per user direction: a
+row at the top of the playlist sidebar's Recently Played section
+that lands on the full recently-played tracks view.
+
+- **Sentinel selection.** New
+  `MusicController.recentlyPlayedLandingID = "__djroomba.recentlyPlayedLanding__"`
+  static constant. The row tags itself with this id, so the
+  existing `List(selection: $controller.selectedPlaylistID)` binding
+  highlights it natively without a parallel selection model.
+- **Derived flag** `controller.isShowingRecentlyPlayedLanding`
+  (`true` when `selectedGenre == nil` AND
+  `selectedPlaylistID ∈ {nil, sentinel}`) replaces the old
+  `selectedPlaylistID == nil` check in `PlaylistDetailView` — both
+  the implicit landing (nothing selected) and the explicit
+  sidebar-row landing now render the same `RecentlyPlayedView`.
+- **Sentinel exemptions** in `reconcileSelectionAfterImport` (won't
+  clear the selection just because the sentinel isn't a real
+  playlist id) and `restoreSelection` (the sentinel is a legitimate
+  restore target). `handleSelectionChange()` persists the sentinel
+  to `preferences.lastSelectedPlaylistID` so a relaunch resumes
+  here.
+- **`RecentlyPlayedLandingRow`** — indigo gradient disc with a
+  white `clock.fill` glyph (chosen so the icon stays legible
+  against the blue accent fill of a selected sidebar row, where a
+  tinted glyph would disappear), "All Recently Played Tracks"
+  label, count chip showing `controller.recentlyPlayed.rows.count`.
+- **Recently Played section is now always rendered** (not gated
+  on `!recents.isEmpty`) so the landing row stays reachable even
+  when no playlists have been played yet.
+- **Live verified** on the signed/installed build: row visible at
+  the top of Recently Played, click → selection highlights + the
+  detail pane swaps to "Recently Played / 50 songs" with the full
+  scroll. Quit + relaunch → selection restored, view re-loaded
+  (100 songs at second look — recent plays kept accumulating).
+
 ## 2026-05-29 — Delete conversations (swipe-left + right-click)
 
 **Branch `feature/openai-gpt-spike`.** Per user direction: "in the

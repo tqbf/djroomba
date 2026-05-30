@@ -51,6 +51,17 @@ final class MusicController {
 
   // MARK: Internal
 
+  /// Sentinel id for the "All Recently Played Tracks" sidebar row — a
+  /// non-playlist landing that surfaces the full recently-played
+  /// tracks view (`RecentlyPlayedView`) in the detail pane. Chosen so
+  /// it can never collide with a real playlist id (the leading double
+  /// underscore + dotted namespace is reserved). Exempt from the
+  /// "playlist disappeared between refreshes — clear" cleanup in
+  /// `reconcileSelectionAfterImport` and from `restoreSelection`'s
+  /// existence check so it survives the same way a real selection
+  /// would.
+  static let recentlyPlayedLandingID = "__djroomba.recentlyPlayedLanding__"
+
   let authorization = MusicAuthorizationService()
   let subscription = MusicSubscriptionService()
   let playback = PlaybackService()
@@ -386,6 +397,19 @@ final class MusicController {
       canBecomeSubscriber: subscription.canBecomeSubscriber,
       cloudLibraryEnabled: subscription.hasCloudLibraryEnabled,
     )
+  }
+
+  /// `true` when the detail pane should render `RecentlyPlayedView`
+  /// (the Recently-Played landing). Two equivalent cases:
+  /// (1) nothing selected (nil playlist AND nil genre) — the natural
+  ///     empty-state default, same as the pre-sentinel behaviour, and
+  /// (2) the user explicitly picked the "All Recently Played Tracks"
+  ///     sidebar row (sentinel id).
+  /// Either way the surface is the same view, just reached two ways.
+  var isShowingRecentlyPlayedLanding: Bool {
+    guard selectedGenre == nil else { return false }
+    return selectedPlaylistID == nil
+      || selectedPlaylistID == Self.recentlyPlayedLandingID
   }
 
   /// O(1) index lookup (was an O(n) scan over a freshly concatenated
@@ -1240,9 +1264,12 @@ final class MusicController {
   private func reconcileSelectionAfterImport() {
     if
       let id = selectedPlaylistID,
+      id != Self.recentlyPlayedLandingID,
       !allSummaries.contains(where: { $0.id == id })
     {
       // Playlist disappeared between refreshes — clear silently.
+      // The Recently-Played-landing sentinel isn't a playlist and isn't
+      // expected to appear in `allSummaries`, so it's excepted here.
       selectedPlaylistID = nil
     } else if let summary = selectedSummary {
       // Re-fetch fresh detail for the still-selected playlist.
@@ -1414,17 +1441,29 @@ final class MusicController {
       preferences.lastSelectedPlaylistID = summary.id
       detailService.select(summary)
     } else {
-      preferences.lastSelectedPlaylistID = nil
+      // The Recently-Played-landing sentinel resolves to no `summary`
+      // (it's not in `summariesByID`) but is still a real, restorable
+      // selection — persist the id so a relaunch lands back on the
+      // tracks view. Other "no summary" cases (nil / cleared) reset
+      // the pref as before.
+      if selectedPlaylistID == Self.recentlyPlayedLandingID {
+        preferences.lastSelectedPlaylistID = Self.recentlyPlayedLandingID
+      } else {
+        preferences.lastSelectedPlaylistID = nil
+      }
       detailService.clear()
     }
   }
 
   private func restoreSelection() {
     guard let raw = preferences.lastSelectedPlaylistID else { return }
-    if allSummaries.contains(where: { $0.id == raw }) {
-      // Launch restore must not create phantom Back history and must not
-      // touch `selectedGenre` — `navBackStack` is in-memory only and
-      // starts empty each session.
+    let isLanding = raw == Self.recentlyPlayedLandingID
+    if isLanding || allSummaries.contains(where: { $0.id == raw }) {
+      // Launch restore must not create phantom Back history and must
+      // not touch `selectedGenre` — `navBackStack` is in-memory only
+      // and starts empty each session. The Recently-Played-landing
+      // sentinel isn't a playlist but is still a legitimate restore
+      // target (the user explicitly picked it).
       suppressNavRecording = true
       selectedPlaylistID = raw
       suppressNavRecording = false
