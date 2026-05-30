@@ -5,6 +5,96 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Bug bundle: assistant playlist refresh, checkbox off-screen, scroll re-anchor
+
+Three small user-reported bugs from running the merged feature:
+
+### 1. Assistant-created playlists didn't appear in "My Playlists" until manual refresh
+
+The `create_playlist` and `add_tracks_to_playlist` tools (and
+similarly the genre tools) wrote to `LibraryStore` directly,
+bypassing `MusicController`'s observable refresh path. The sidebar's
+"My Playlists" section is driven by `controller.appPlaylists`, which
+is rebuilt by `rebuildDerivedSummaries()` — only called when a
+mutation routes through `MusicController`. Clicking the "+" button
+worked because the controller's own `createAppPlaylist` runs the
+rebuild after; the tool path silently skipped it.
+
+Fix: tools now route through the controller. New
+`autoSelect: Bool = true` parameter on `MusicController.createAppPlaylist`
+so the "+" button's existing "select + inline-rename" behaviour is
+preserved while the tool can call with `autoSelect: false`
+(creation only, no hijacking of the user's current view).
+`add_tracks_to_playlist` routes through
+`MusicController.addSongs(_:toAppPlaylist:)`. Genre tools route
+through `controller.addGenre(_:toSongs:)` and
+`controller.renameGenreTag(from:to:)` (the latter newly file-public).
+All four still fall back to direct-store calls when the controller
+is torn down. Live verified: "Create a playlist called 'Tool Test'
+and add 3 tracks from Pinback to it" → "Tool Test" with "3 tracks"
+appeared in the sidebar immediately.
+
+### 2. "Show tool calls" checkbox could land off-screen
+
+The toggle sat at the trailing edge after `Spacer()` and a
+right-aligned title `Text`. On a wide window the title pushed
+everything past the visible edge and the checkbox was completely
+invisible. Moved it to the LEFT of the `Spacer`, right after the
+"New Request" button, so it's reachable at every window width.
+
+### 3. Toggling the checkbox "cleared the conversation"
+
+User report: "the tool call button now clears the entire
+conversation, not just the tool calls!" Actual cause: the
+`ScrollView`'s scroll offset persisted across the filter change.
+With tool rows visible, the bottom-anchored scroll position sat
+near the end. Filtering them out shrank the content, leaving the
+scroll viewport pointing into the empty space below the now-shorter
+list — looking exactly like an emptied conversation.
+
+Fix: added `.onChange(of: showToolCalls)` inside the
+`ScrollViewReader` that re-anchors to the last visible message's
+id (`proxy.scrollTo(last, anchor: .bottom)`). Toggling either
+direction lands the bottom of the chat at the bottom of the
+viewport instead of mid-air.
+
+Live verified: toggle on → tool rows reveal AND the chat stays at
+the bottom; toggle off → tool rows hide AND user/assistant turns
+stay visible with the latest reply at the bottom.
+
+## 2026-05-29 — Fix: "no such table: contexts" on a fresh assistant.sqlite
+
+**Branch `feature/dj-roomba-shared-pane`.** User report: opening the
+app on a second Mac (existing `library.sqlite`, no `assistant.sqlite`
+yet) surfaced `no such table: contexts`.
+
+- **Root cause.** `SQLiteContextStore.initialize()` is the vendored
+  library's `CREATE TABLE IF NOT EXISTS contexts / records /
+  context_tools` ladder. `ContextWindow.init` calls it, but
+  `GPTService` opens the store and reads from it via two paths that
+  run **before** the window is built:
+  - `loadConversationsFromDisk()` — called on `AssistantPaneView`
+    appear, calls `contextStore.listContexts()` directly.
+  - `ensureSession()` — calls `pickInitialContextName(in:)` which
+    also reads `listContexts()` before passing the store to
+    `ContextWindow.init`.
+  On a fresh `assistant.sqlite` the table doesn't exist yet; the
+  read errors out. `loadConversationsFromDisk` swallows it silently,
+  but `ensureSession`'s error surfaces in `errorMessage` and
+  renders as the red banner above the composer the next time the
+  user sends a message — matching the report.
+- **Fix.** Call `try contextStore.initialize()` explicitly in both
+  paths, right after constructing the store. `initialize()` is
+  `CREATE TABLE IF NOT EXISTS` end-to-end, so it's safe to run on
+  an already-initialised file. `ContextWindow.init` further down
+  still calls `initialize()` itself — the explicit call is
+  defence-in-depth for the read-before-window paths.
+- **Live verified.** Stashed the local
+  `~/Library/Containers/org.sockpuppet.djroomba/Data/Library/
+  Application Support/DJRoomba/assistant.sqlite`, reinstalled, and
+  opened the DJ Roomba tab: the sidebar shows the "No conversations
+  yet" empty state with no error banner. Restored the stash after.
+
 ## 2026-05-29 — "All Recently Played Tracks" sidebar landing row
 
 **Branch `feature/dj-roomba-shared-pane`.** Per user direction: a

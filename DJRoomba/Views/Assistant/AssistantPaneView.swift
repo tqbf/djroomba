@@ -121,17 +121,20 @@ struct AssistantPaneView: View {
       .help("Archive this conversation and start a new one")
       .disabled(!gpt.isKeyConfigured)
 
-      Spacer()
-
-      // Subtle "Show tool calls" toggle. Native macOS `Toggle` with a
-      // `.checkbox` style + caption font reads as a quiet developer
-      // affordance, not a primary control — exactly the spec ("subtle
-      // checkbox somewhere in the interface").
+      // Subtle "Show tool calls" toggle sits to the LEFT of the
+      // Spacer so it's visible at every window width — when it lived
+      // on the trailing edge a wide window pushed it off-screen,
+      // hiding the affordance entirely. Caption font + secondary
+      // foreground keep it quiet (the "subtle checkbox" the spec
+      // called for).
       Toggle("Show tool calls", isOn: $showToolCalls)
         .toggleStyle(.checkbox)
         .font(.caption)
         .foregroundStyle(.secondary)
         .help("Show the model's tool calls + outputs in the transcript")
+        .padding(.leading, 8)
+
+      Spacer()
 
       Text(currentConversationTitle)
         .font(.subheadline)
@@ -208,6 +211,20 @@ struct AssistantPaneView: View {
         // sidebar switch lands on the latest message, not the top.
         if let last = gpt.messages.last?.id {
           proxy.scrollTo(last, anchor: .bottom)
+        }
+      }
+      .onChange(of: showToolCalls) { _, _ in
+        // Toggling the filter shrinks/grows the rendered transcript.
+        // The ScrollView keeps its old offset, which leaves the user
+        // staring at empty space below the new (shorter) content
+        // when toggling OFF — looking like the transcript got
+        // cleared (it didn't; `gpt.messages` is unchanged, only the
+        // filter result is). Re-anchor on the last visible message
+        // so the bottom of the chat stays the bottom.
+        if let last = visibleMessages.last?.id {
+          withAnimation(.easeOut(duration: 0.15)) {
+            proxy.scrollTo(last, anchor: .bottom)
+          }
         }
       }
     }

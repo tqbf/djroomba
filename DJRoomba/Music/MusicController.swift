@@ -882,17 +882,27 @@ final class MusicController {
     await playback.skipPrevious()
   }
 
-  /// Create a new user playlist and select it (the native "new untitled
-  /// item, ready to rename" flow). Returns its id so the sidebar can put
-  /// the row straight into inline-rename.
+  /// Create a new user playlist. The "+" sidebar button passes
+  /// `autoSelect: true` so the row lands in inline-rename mode
+  /// (matching the native "new untitled item, ready to rename" flow).
+  /// The assistant's `create_playlist` tool passes `autoSelect: false`
+  /// because the model is just minting the playlist — it shouldn't
+  /// hijack whatever the user is browsing. Either way the derived
+  /// observable summaries are rebuilt so the sidebar reflects the
+  /// new row immediately (the bug fix: the tool path used to call
+  /// the store directly and the sidebar stayed stale until the next
+  /// rebuild trigger).
   @discardableResult
-  func createAppPlaylist(named name: String = "New Playlist") async -> String? {
+  func createAppPlaylist(
+    named name: String = "New Playlist",
+    autoSelect: Bool = true,
+  ) async -> String? {
     let id = await appPlaylistService.create(named: name)
     // Rebuild BEFORE assigning selection: `selectedPlaylistID`'s `didSet`
     // resolves `selectedSummary` via `summariesByID`, which must already
     // contain the new playlist.
     rebuildDerivedSummaries()
-    if let id { selectedPlaylistID = id }
+    if autoSelect, let id { selectedPlaylistID = id }
     return id
   }
 
@@ -1111,6 +1121,36 @@ final class MusicController {
       detailService.selectGenre(g)
     }
     suppressNavRecording = false
+  }
+
+  /// Rename a genre tag `old → new` in place. This is an edit, not a
+  /// navigation. If `old` is the **currently browsed** genre, the Back
+  /// stack's `.genre(old)` entries are rewritten to `.genre(new)` (so
+  /// Back never lands on a now-empty genre) and the genre view re-points
+  /// to `new` WITHOUT pushing history; if `old` isn't the browsed genre
+  /// (the genre-map right-click case), only the tags + downstream
+  /// derivations change. No-op if the trimmed name is unchanged. Merge
+  /// is implicit in the store (literal-tag rewrite + dedupe). The
+  /// `reloadAfterGenreEdit` tail recomputes the genre map automatically.
+  /// Internal-callers entry point so the assistant's `rename_genre`
+  /// tool can drive the same store call + `reloadAfterGenreEdit`
+  /// refresh the menu-based rename uses. Was `private` until the
+  /// tool grew up; the file-private wrap above (`renameGenre(...)`
+  /// flows) stays the user-facing trigger and is unchanged.
+  func renameGenreTag(from old: String, to newName: String) async {
+    guard let store else { return }
+    let new = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !new.isEmpty, new != old else { return }
+    do {
+      _ = try await store.renameGenre(from: old, to: new)
+      if selectedGenre == old {
+        navBackStack.replacingGenre(old, with: new)
+        selectedGenre = new
+      }
+      await reloadAfterGenreEdit()
+    } catch {
+      storeError = error.localizedDescription
+    }
   }
 
   // MARK: Private
@@ -1336,31 +1376,6 @@ final class MusicController {
       maxPlaylistTracks: preferences.genreAnalysisMaxPlaylistTracks,
       maxPairsPerPlaylist: preferences.genreAnalysisMaxPairsPerPlaylist,
     )
-  }
-
-  /// Rename a genre tag `old → new` in place. This is an edit, not a
-  /// navigation. If `old` is the **currently browsed** genre, the Back
-  /// stack's `.genre(old)` entries are rewritten to `.genre(new)` (so
-  /// Back never lands on a now-empty genre) and the genre view re-points
-  /// to `new` WITHOUT pushing history; if `old` isn't the browsed genre
-  /// (the genre-map right-click case), only the tags + downstream
-  /// derivations change. No-op if the trimmed name is unchanged. Merge
-  /// is implicit in the store (literal-tag rewrite + dedupe). The
-  /// `reloadAfterGenreEdit` tail recomputes the genre map automatically.
-  private func renameGenreTag(from old: String, to newName: String) async {
-    guard let store else { return }
-    let new = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !new.isEmpty, new != old else { return }
-    do {
-      _ = try await store.renameGenre(from: old, to: new)
-      if selectedGenre == old {
-        navBackStack.replacingGenre(old, with: new)
-        selectedGenre = new
-      }
-      await reloadAfterGenreEdit()
-    } catch {
-      storeError = error.localizedDescription
-    }
   }
 
   /// A genre edit rewrites `song.genre_names` in place (never playlist/app

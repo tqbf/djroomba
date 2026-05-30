@@ -205,6 +205,16 @@ final class GPTService {
     do {
       let url = try Self.contextStoreURL()
       let contextStore = try SQLiteContextStore(path: url.path)
+      // Create the `contexts` / `records` / `context_tools` tables on
+      // first run (and migrate forward via the vendored library's
+      // `CREATE TABLE IF NOT EXISTS` ladder, idempotent on an
+      // already-initialised file). Without this, opening
+      // `assistant.sqlite` on a machine that's never had it before
+      // throws "no such table: contexts" the moment we call
+      // `listContexts()` — `ContextWindow.init` calls `initialize()`
+      // itself, but `loadConversationsFromDisk()` runs *before*
+      // `ensureSession()` builds the window, so we must do it here too.
+      try contextStore.initialize()
       let raw = try contextStore.listContexts()
         .filter { $0.name.hasPrefix(AssistantConversationStore.contextNamePrefix) }
       let titles = AssistantConversationStore.titles()
@@ -502,6 +512,14 @@ final class GPTService {
 
     let url = try Self.contextStoreURL()
     let contextStore = try SQLiteContextStore(path: url.path)
+    // Same first-run schema bootstrap as `loadConversationsFromDisk` —
+    // `pickInitialContextName` reads `contexts` via `listContexts()`,
+    // which 500s with "no such table" on a freshly-created
+    // `assistant.sqlite`. `initialize()` is `CREATE TABLE IF NOT
+    // EXISTS` end-to-end so this is idempotent on an existing file.
+    // (`ContextWindow.init` further down also calls `initialize()`,
+    // but we read the store before that, so explicit here.)
+    try contextStore.initialize()
     let initialContextName = try Self.pickInitialContextName(in: contextStore)
 
     let executor = LateBoundToolExecutor()
