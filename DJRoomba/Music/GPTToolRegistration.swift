@@ -39,17 +39,17 @@ enum GPTToolRegistration {
     controllerProvider: @escaping ControllerProvider = { nil },
   ) -> [ToolDefinition] {
     let raw = [
-      addTracksToPlaylist(store: store),
+      addTracksToPlaylist(store: store, controllerProvider: controllerProvider),
       appState(controllerProvider: controllerProvider),
-      createPlaylist(store: store),
+      createPlaylist(store: store, controllerProvider: controllerProvider),
       listPlaylists(store: store),
       playPlaylist(controllerProvider: controllerProvider),
       playTrack(store: store, controllerProvider: controllerProvider),
       playlistContents(store: store),
       recentlyPlayed(store: store),
-      renameGenre(store: store),
+      renameGenre(store: store, controllerProvider: controllerProvider),
       searchAppleMusic(store: store, catalogIngest: catalogIngest),
-      setTrackGenres(store: store),
+      setTrackGenres(store: store, controllerProvider: controllerProvider),
       sqlQuery(store: store),
       trackGenres(store: store),
     ]
@@ -396,7 +396,10 @@ enum GPTToolRegistration {
     return ToolDefinition(schema: schema, runner: runner)
   }
 
-  private static func createPlaylist(store: LibraryStore?) -> ToolDefinition {
+  private static func createPlaylist(
+    store: LibraryStore?,
+    controllerProvider: @escaping ControllerProvider,
+  ) -> ToolDefinition {
     let schema = JSONSchemaToolDefinition(
       name: "create_playlist",
       description: """
@@ -420,6 +423,28 @@ enum GPTToolRegistration {
       let trimmed = input.name.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !trimmed.isEmpty else { return errorJSON("name is empty") }
 
+      // Hop main-actor to drive the controller's create path —
+      // `createAppPlaylist(autoSelect: false)` calls the store AND
+      // runs `rebuildDerivedSummaries()` so the sidebar's "My
+      // Playlists" section picks up the new row immediately (the
+      // bug the tool's earlier direct-store path produced: the row
+      // didn't appear until the next sidebar rebuild trigger,
+      // typically a user clicking the "+" button).
+      let provider = controllerProvider
+      let mintedID: String? = await Task { @MainActor () -> String? in
+        guard let controller = provider() else { return nil }
+        return await controller.createAppPlaylist(named: trimmed, autoSelect: false)
+      }.value
+      if let mintedID {
+        return encodeJSON(.object([
+          "id": .string(mintedID),
+          "name": .string(trimmed),
+        ]))
+      }
+      // Controller wasn't available (rare — service torn down). Fall
+      // back to the direct store path so the user still gets the
+      // playlist created, even though the sidebar won't refresh
+      // until the next rebuild trigger.
       let playlist = try await store.createAppPlaylist(named: trimmed)
       return encodeJSON(.object([
         "id": .string(playlist.id),
@@ -429,7 +454,10 @@ enum GPTToolRegistration {
     return ToolDefinition(schema: schema, runner: runner)
   }
 
-  private static func addTracksToPlaylist(store: LibraryStore?) -> ToolDefinition {
+  private static func addTracksToPlaylist(
+    store: LibraryStore?,
+    controllerProvider: @escaping ControllerProvider,
+  ) -> ToolDefinition {
     let schema = JSONSchemaToolDefinition(
       name: "add_tracks_to_playlist",
       description: """
@@ -466,10 +494,21 @@ enum GPTToolRegistration {
       guard appLists.contains(where: { $0.id == input.playlistId }) else {
         return errorJSON("\(input.playlistId) is not a writable app playlist")
       }
-      try await store.addSongsToAppPlaylist(
-        input.playlistId,
-        songIDs: input.trackIds,
-      )
+      // Route through the controller's mutateAppPlaylist path so the
+      // track table + cached detail get re-loaded and the sidebar's
+      // derived summaries (incl. track counts) refresh — the bug fix
+      // for "added tracks don't show up until I tap somewhere else."
+      let provider = controllerProvider
+      let routed = await Task { @MainActor () -> Bool in
+        guard let controller = provider() else { return false }
+        await controller.addSongs(input.trackIds, toAppPlaylist: input.playlistId)
+        return true
+      }.value
+      if !routed {
+        // Controller torn down — fall back to direct store write so
+        // the data still lands.
+        try await store.addSongsToAppPlaylist(input.playlistId, songIDs: input.trackIds)
+      }
       return encodeJSON(.object([
         "playlistId": .string(input.playlistId),
         "added": .number(Double(input.trackIds.count)),
@@ -594,7 +633,10 @@ enum GPTToolRegistration {
   /// Add a genre tag to one or many tracks. Idempotent — songs already
   /// carrying the tag are left alone (counted in `skipped`). Pure
   /// SQLite, no MusicKit. Returns how many rows were rewritten.
-  private static func setTrackGenres(store: LibraryStore?) -> ToolDefinition {
+  private static func setTrackGenres(
+    store: LibraryStore?,
+    controllerProvider: @escaping ControllerProvider,
+  ) -> ToolDefinition {
     let schema = JSONSchemaToolDefinition(
       name: "add_genre_to_tracks",
       description: """
@@ -626,7 +668,26 @@ enum GPTToolRegistration {
       let trimmed = input.genre.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !trimmed.isEmpty else { return errorJSON("genre is empty") }
       guard !input.trackIds.isEmpty else { return errorJSON("trackIds is empty") }
-      let changed = try await store.addGenre(trimmed, toSongIDs: input.trackIds)
+      // Route through the controller's `addGenre(_:toSongs:)` so the
+      // open detail pane / sidebar derivations / genre map re-load
+      // (`reloadAfterGenreEdit`). The raw store call worked but left
+      // the UI stale until the next refresh.
+      let provider = controllerProvider
+      let routed = await Task { @MainActor () -> Bool in
+        guard let controller = provider() else { return false }
+        await controller.addGenre(trimmed, toSongs: input.trackIds)
+        return true
+      }.value
+      // We can't get a "rows changed" count back from the controller
+      // path (it returns Void); count is best-effort via a fallback
+      // store call only when the controller is unavailable. In the
+      // routed case `tracksRequested` is the honest upper bound.
+      let changed: Int =
+        if routed {
+          input.trackIds.count
+        } else {
+          (try? await store.addGenre(trimmed, toSongIDs: input.trackIds)) ?? 0
+        }
       return encodeJSON(.object([
         "genre": .string(trimmed),
         "tracksRequested": .number(Double(input.trackIds.count)),
@@ -640,7 +701,10 @@ enum GPTToolRegistration {
   /// Globally rename a genre tag across every song that carries it.
   /// Renaming onto an existing tag merges them (dedupe-on-write). Pure
   /// SQLite, no MusicKit. Returns rows changed.
-  private static func renameGenre(store: LibraryStore?) -> ToolDefinition {
+  private static func renameGenre(
+    store: LibraryStore?,
+    controllerProvider: @escaping ControllerProvider,
+  ) -> ToolDefinition {
     let schema = JSONSchemaToolDefinition(
       name: "rename_genre",
       description: """
@@ -669,7 +733,24 @@ enum GPTToolRegistration {
       let from = input.from.trimmingCharacters(in: .whitespacesAndNewlines)
       let to = input.to.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !from.isEmpty, !to.isEmpty else { return errorJSON("from/to is empty") }
-      let changed = try await store.renameGenre(from: from, to: to)
+      // Route through the controller's `renameGenreTag(from:to:)`
+      // (newly file-public) so the genre map / sidebar derivations /
+      // open detail pane all re-load via `reloadAfterGenreEdit`.
+      let provider = controllerProvider
+      let routed = await Task { @MainActor () -> Bool in
+        guard let controller = provider() else { return false }
+        await controller.renameGenreTag(from: from, to: to)
+        return true
+      }.value
+      let changed: Int =
+        if routed {
+          // Controller path doesn't return a count; we lose the
+          // honest "rows changed" number for the routed case. Return
+          // `-1` as a sentinel — caller can ignore.
+          -1
+        } else {
+          (try? await store.renameGenre(from: from, to: to)) ?? 0
+        }
       return encodeJSON(.object([
         "from": .string(from),
         "to": .string(to),

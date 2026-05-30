@@ -5,6 +5,63 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Bug bundle: assistant playlist refresh, checkbox off-screen, scroll re-anchor
+
+Three small user-reported bugs from running the merged feature:
+
+### 1. Assistant-created playlists didn't appear in "My Playlists" until manual refresh
+
+The `create_playlist` and `add_tracks_to_playlist` tools (and
+similarly the genre tools) wrote to `LibraryStore` directly,
+bypassing `MusicController`'s observable refresh path. The sidebar's
+"My Playlists" section is driven by `controller.appPlaylists`, which
+is rebuilt by `rebuildDerivedSummaries()` — only called when a
+mutation routes through `MusicController`. Clicking the "+" button
+worked because the controller's own `createAppPlaylist` runs the
+rebuild after; the tool path silently skipped it.
+
+Fix: tools now route through the controller. New
+`autoSelect: Bool = true` parameter on `MusicController.createAppPlaylist`
+so the "+" button's existing "select + inline-rename" behaviour is
+preserved while the tool can call with `autoSelect: false`
+(creation only, no hijacking of the user's current view).
+`add_tracks_to_playlist` routes through
+`MusicController.addSongs(_:toAppPlaylist:)`. Genre tools route
+through `controller.addGenre(_:toSongs:)` and
+`controller.renameGenreTag(from:to:)` (the latter newly file-public).
+All four still fall back to direct-store calls when the controller
+is torn down. Live verified: "Create a playlist called 'Tool Test'
+and add 3 tracks from Pinback to it" → "Tool Test" with "3 tracks"
+appeared in the sidebar immediately.
+
+### 2. "Show tool calls" checkbox could land off-screen
+
+The toggle sat at the trailing edge after `Spacer()` and a
+right-aligned title `Text`. On a wide window the title pushed
+everything past the visible edge and the checkbox was completely
+invisible. Moved it to the LEFT of the `Spacer`, right after the
+"New Request" button, so it's reachable at every window width.
+
+### 3. Toggling the checkbox "cleared the conversation"
+
+User report: "the tool call button now clears the entire
+conversation, not just the tool calls!" Actual cause: the
+`ScrollView`'s scroll offset persisted across the filter change.
+With tool rows visible, the bottom-anchored scroll position sat
+near the end. Filtering them out shrank the content, leaving the
+scroll viewport pointing into the empty space below the now-shorter
+list — looking exactly like an emptied conversation.
+
+Fix: added `.onChange(of: showToolCalls)` inside the
+`ScrollViewReader` that re-anchors to the last visible message's
+id (`proxy.scrollTo(last, anchor: .bottom)`). Toggling either
+direction lands the bottom of the chat at the bottom of the
+viewport instead of mid-air.
+
+Live verified: toggle on → tool rows reveal AND the chat stays at
+the bottom; toggle off → tool rows hide AND user/assistant turns
+stay visible with the latest reply at the bottom.
+
 ## 2026-05-29 — Fix: "no such table: contexts" on a fresh assistant.sqlite
 
 **Branch `feature/dj-roomba-shared-pane`.** User report: opening the
