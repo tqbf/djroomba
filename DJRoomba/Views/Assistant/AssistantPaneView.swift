@@ -190,12 +190,24 @@ struct AssistantPaneView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 32)
         } else {
+          // `.id(showToolCalls)` ties the LazyVStack's view identity
+          // to the filter flag so SwiftUI rebuilds it when the toggle
+          // changes. Without this, `@AppStorage`'s value change was
+          // not propagating into the LazyVStack's diff — its child
+          // ForEach kept rendering the pre-toggle set of rows. The
+          // user-observed symptom: toggling did nothing immediately,
+          // but switching conversations (which already changes the
+          // ForEach data shape) THEN flipping back showed the new
+          // filter state. Forcing a fresh identity here makes the
+          // toggle apply on the spot. Scroll re-anchor below keeps
+          // the bottom of the chat at the bottom of the viewport.
           LazyVStack(alignment: .leading, spacing: 14) {
             ForEach(visibleMessages) { message in
               MessageRow(message: message)
                 .id(message.id)
             }
           }
+          .id(showToolCalls)
           .padding(.horizontal, 16)
           .padding(.vertical, 16)
         }

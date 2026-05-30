@@ -5,6 +5,43 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Fix: "Show tool calls" toggle only applied after a conversation switch
+
+User report: "Clicking the checkbox does nothing immediately, but if
+i select a different conversation and then select back, the change
+is there."
+
+**Diagnosis.** `@AppStorage("djroomba.assistant.showToolCalls")`
+correctly updates UserDefaults when the toggle flips, but the
+`LazyVStack` inside the transcript was diffing against its old
+`ForEach` children without re-evaluating. SwiftUI's
+`@AppStorage` ⇄ Observation interop on this view didn't propagate
+the change down into the LazyVStack's child diff, so the
+transcript's rows kept rendering with the pre-toggle filter.
+Switching conversations changed `currentConversationID`, which
+rebuilt the LazyVStack's data shape and incidentally picked up the
+current `showToolCalls` value.
+
+**Fix.** Tie the LazyVStack's view identity to the toggle:
+
+```swift
+LazyVStack(...) {
+  ForEach(visibleMessages) { ... }
+}
+.id(showToolCalls)
+```
+
+Forces SwiftUI to rebuild the LazyVStack when the toggle flips —
+the new identity invalidates the cached diff and ForEach picks up
+`visibleMessages` filtered through the fresh `showToolCalls`
+value. The scroll re-anchor in the existing
+`.onChange(of: showToolCalls)` keeps the bottom of the chat at the
+bottom of the viewport.
+
+Live verified: toggle OFF immediately hides tool rows; toggle ON
+immediately reveals them. No conversation-switch round trip
+required.
+
 ## 2026-05-29 — Fix: clicking a previous conversation doesn't load its transcript
 
 User report: "when I open up the app and click on a previous
