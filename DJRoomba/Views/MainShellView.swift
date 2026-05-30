@@ -213,18 +213,28 @@ struct MainShellView: View {
         .help("Refresh playlists (⌘R)")
         .disabled(controller.isLibraryBusy)
       }
-      // Genre Tree — the default genre visualization, docked below the
-      // track list in the detail pane (replaces the older
-      // `GenreGraphPanel` ForceGraph). The button toggles the pane's
-      // collapse, mirroring the pane's own header chevron; both drive
-      // `controller.genreTreePaneCollapsed`.
+      // The bottom dock pane hosts two tabs — DJ Roomba (the AI chat)
+      // and the genre map — sharing the docked surface under the
+      // track list. Each toolbar button is a "show me this tab"
+      // affordance: if the pane is already open on that tab, it
+      // collapses; otherwise it opens to that tab. This is the same
+      // behaviour the menu commands (⌥⌘\, ⌥⇧⌘A) use, so all four
+      // entry points stay consistent.
       ToolbarItem(placement: .automatic) {
         Button {
-          controller.genreTreePaneCollapsed.toggle()
+          toggleBottomDockTab(.djroomba)
+        } label: {
+          Label("DJ Roomba", systemImage: "sparkles")
+        }
+        .help(bottomDockButtonHelp(for: .djroomba))
+      }
+      ToolbarItem(placement: .automatic) {
+        Button {
+          toggleBottomDockTab(.genreMap)
         } label: {
           Label("Genre Map", systemImage: "map")
         }
-        .help(controller.genreTreePaneCollapsed ? "Show the genre map" : "Hide the genre map")
+        .help(bottomDockButtonHelp(for: .genreMap))
       }
       // Standard macOS inspector toggle placement (trailing edge of the
       // toolbar, the side the panel slides from) — the native idiom
@@ -313,6 +323,26 @@ struct MainShellView: View {
   /// from the content type.
   private static func exportFilename() -> String {
     "DJ Roomba Library \(Date.now.ISO8601Format(.iso8601Date(timeZone: .current)))"
+  }
+
+  /// Each bottom-dock toolbar button: if the pane is already open on
+  /// `tab`, collapse it; otherwise open the pane on `tab` (switching
+  /// tabs if needed). One method drives both buttons so the rule stays
+  /// in one place.
+  private func toggleBottomDockTab(_ tab: BottomDockTab) {
+    if !controller.bottomDockCollapsed, controller.bottomDockTab == tab {
+      controller.bottomDockCollapsed = true
+    } else {
+      controller.bottomDockTab = tab
+      controller.bottomDockCollapsed = false
+    }
+  }
+
+  private func bottomDockButtonHelp(for tab: BottomDockTab) -> String {
+    let isShowing = !controller.bottomDockCollapsed && controller.bottomDockTab == tab
+    return isShowing
+      ? "Hide the \(tab.label.lowercased()) pane"
+      : "Show the \(tab.label.lowercased()) pane"
   }
 
 }

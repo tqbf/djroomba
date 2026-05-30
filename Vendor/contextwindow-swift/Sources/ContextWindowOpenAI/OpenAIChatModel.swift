@@ -38,6 +38,14 @@ public final class OpenAIChatModel: Model, @unchecked Sendable {
     private let maxToolRoundTrips: Int
     private let temperature: Double?
 
+    /// DJROOMBA PATCH 2 (2026-05-29): OpenAI's `service_tier` request field
+    /// selects a pricing/latency tier. `"flex"` opts into the cheaper,
+    /// higher-latency pool for batch-style or background workloads (DJ
+    /// Roomba is one — the assistant is user-initiated but not latency-
+    /// sensitive). `nil` ⇒ omit the field, server default applies
+    /// (`"auto"`).
+    private let serviceTier: String?
+
     /// - Parameters:
     ///   - model: the model name (e.g. `gpt-4.1`, `gpt-4.1-mini`).
     ///   - apiKey: API key. Defaults to the `OPENAI_API_KEY` environment
@@ -49,6 +57,9 @@ public final class OpenAIChatModel: Model, @unchecked Sendable {
     ///   - baseURL: API base. Defaults to the public OpenAI endpoint.
     ///   - maxToolRoundTrips: safety cap on tool-call iterations.
     ///   - temperature: optional sampling temperature.
+    ///   - serviceTier: optional `service_tier` for the request (DJROOMBA
+    ///     PATCH 2, 2026-05-29). Pass `"flex"` for the cheaper /
+    ///     higher-latency pool; `nil` omits the field (server default).
     public init(
         model: String,
         apiKey: String? = nil,
@@ -56,7 +67,8 @@ public final class OpenAIChatModel: Model, @unchecked Sendable {
         transport: OpenAITransport = URLSessionOpenAITransport(),
         baseURL: URL = URL(string: "https://api.openai.com/v1")!,
         maxToolRoundTrips: Int = 8,
-        temperature: Double? = nil
+        temperature: Double? = nil,
+        serviceTier: String? = nil
     ) throws {
         guard let key = apiKey ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !key.isEmpty else {
             throw OpenAIError.missingAPIKey
@@ -68,6 +80,7 @@ public final class OpenAIChatModel: Model, @unchecked Sendable {
         self.baseURL = baseURL
         self.maxToolRoundTrips = maxToolRoundTrips
         self.temperature = temperature
+        self.serviceTier = serviceTier
     }
 
     // MARK: Model
@@ -161,7 +174,8 @@ public final class OpenAIChatModel: Model, @unchecked Sendable {
             model: model,
             messages: messages,
             tools: tools.isEmpty ? nil : tools,
-            temperature: temperature
+            temperature: temperature,
+            service_tier: serviceTier
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -308,6 +322,9 @@ struct ChatCompletionRequest: Encodable, Sendable {
     var messages: [ChatMessage]
     var tools: [ChatToolWire]?
     var temperature: Double?
+    /// DJROOMBA PATCH 2: omitted from the wire when `nil`; `"flex"` opts
+    /// into the cheaper/higher-latency tier.
+    var service_tier: String?
 }
 
 struct ChatMessage: Codable, Sendable, Equatable {

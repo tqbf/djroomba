@@ -1,16 +1,17 @@
 import SwiftUI
 
-/// The **OpenAI** settings pane: store an API key and open the assistant.
+/// The **OpenAI** settings pane: store an API key and point the user
+/// at the assistant.
 ///
-/// Single concern — credential management. The chat happens in its own
-/// **Assistant** window (⌥⌘\ / Window menu), not crammed into a Settings
-/// tab; this pane just gates "key configured" status and tells the user
-/// where to actually talk to the model.
+/// Single concern — credential management. The chat happens in the
+/// **DJ Roomba** tab of the main window's bottom dock pane (⌥⌘\), not
+/// crammed into a Settings tab; this pane just gates "key configured"
+/// status and tells the user where to actually talk to the model.
 ///
 /// Reads `MusicController` from the environment (the app injects it on the
 /// `Settings` root so this scene has access). Binding to the controller's
 /// shared `GPTService` means a key change here is immediately visible in
-/// the Assistant window — no second instance, no second state.
+/// the DJ Roomba pane — no second instance, no second state.
 struct OpenAISettingsPane: View {
 
   // MARK: Internal
@@ -26,7 +27,6 @@ struct OpenAISettingsPane: View {
   // MARK: Private
 
   @Environment(MusicController.self) private var controller
-  @Environment(\.openWindow) private var openWindow
 
   @State private var keyDraft = ""
 
@@ -71,17 +71,18 @@ struct OpenAISettingsPane: View {
 
   private var assistantSection: some View {
     Section {
-      Button("Open Assistant Window") {
-        openWindow(id: AssistantWindowID)
+      Button("Show DJ Roomba") {
+        controller.showAssistant()
       }
       .disabled(!gpt.isKeyConfigured)
     } header: {
       Text("Assistant")
     } footer: {
       Text("""
-        The assistant lives in its own window (⌥⌘\\ / Window ▸ DJ Roomba \
-        Assistant). It can list playlists, search Apple Music, read your \
-        recently played, and create new playlists for you.
+        DJ Roomba lives in a tab of the bottom dock pane in the main \
+        window (⌥⌘\\ / Playback ▸ Show DJ Roomba). It can list \
+        playlists, search Apple Music, read your recently played, and \
+        create new playlists for you.
         """)
     }
   }

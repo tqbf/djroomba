@@ -147,15 +147,26 @@ struct PlaylistPlayerApp: App {
         }
         .keyboardShortcut("a", modifiers: [.command, .option])
 
-        // ⌥⇧⌘A reveals the genre-tree pane docked below the track
-        // list (per user direction 2026-05-22 it's an inline pane, not
-        // a sheet). Setting `collapsed = false` expands it; the pane's
-        // own header chevron + the toolbar button toggle the same
-        // shared `genreTreePaneCollapsed` flag.
+        // ⌥⇧⌘A reveals the bottom dock pane on the Genre Map tab.
+        // Per user direction 2026-05-22 the genre map is an inline
+        // pane (not a sheet); per user direction 2026-05-29 it shares
+        // that pane with the DJ Roomba assistant via tabs, so this
+        // command both expands the pane AND selects the genre-map
+        // tab via the controller's `showGenreMap()` funnel.
         Button("Show Genre Map") {
-          controller.genreTreePaneCollapsed = false
+          controller.showGenreMap()
         }
         .keyboardShortcut("a", modifiers: [.command, .option, .shift])
+
+        // ⌥⌘\ used to open a standalone Assistant window; the
+        // assistant moved into the shared bottom dock pane on
+        // 2026-05-29, so the same shortcut now expands the dock onto
+        // the DJ Roomba tab (the mirror of "Show Genre Map" above,
+        // same `MusicController` funnel).
+        Button("Show DJ Roomba") {
+          controller.showAssistant()
+        }
+        .keyboardShortcut("\\", modifiers: [.command, .option])
 
         // A `Toggle` in a menu is the native checkmark-menu-item idiom.
         // Bound through `Bindable` (the modern Observation binding —
@@ -238,17 +249,10 @@ struct PlaylistPlayerApp: App {
         .environment(controller)
     }
 
-    // The Assistant chat window — `plans/openai-gpt.md` Phase 1. Its own
-    // top-level `Window` scene (not a sheet) because chat is a foreground
-    // surface, not a modal preference, and the user wants it open while
-    // they browse the library. SwiftUI auto-adds it to the Window menu;
-    // the keyboard shortcut here drives that auto-item.
-    Window("DJ Roomba Assistant", id: AssistantWindowID) {
-      AssistantWindowView()
-        .environment(controller)
-    }
-    .defaultSize(width: 620, height: 720)
-    .keyboardShortcut("\\", modifiers: [.command, .option])
+    // (The standalone "DJ Roomba Assistant" `Window` scene retired
+    // 2026-05-29 — the assistant now shares the bottom dock pane with
+    // the genre map via tabs. ⌥⌘\ is wired as a Playback-menu command
+    // above and routes through `MusicController.showAssistant()`.)
   }
 
   // MARK: Private

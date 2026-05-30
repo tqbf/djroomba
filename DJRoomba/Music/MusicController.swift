@@ -43,6 +43,10 @@ final class MusicController {
     if openedStore == nil {
       storeError = "The local library database could not be opened."
     }
+    // Late-bind the controller into GPTService so the assistant's
+    // playback/state tools can dispatch back here. Weakly held inside
+    // GPTService — controller owns the service, not vice versa.
+    gpt.attach(controller: self)
   }
 
   // MARK: Internal
@@ -162,14 +166,25 @@ final class MusicController {
   /// app-level sheet state under `@Observable`).
   var catalogSearchPresented = false
 
-  /// Collapse state of the genre-tree pane docked below the track
+  /// Collapse state of the bottom dock pane docked below the track
   /// list in the detail column. `false` ⇒ expanded (visible). Lives
-  /// on the controller (not `@SceneStorage`) so the menu command, the
-  /// toolbar button, and the pane's own header chevron all drive one
-  /// shared value. Phase B of `plans/son-of-genre-map.md` first shipped
-  /// the tree as a sheet; per user direction (2026-05-22) it now lives
-  /// inline as a docked pane, matching the retired ForceGraph's home.
-  var genreTreePaneCollapsed = false
+  /// on the controller (not `@SceneStorage`) so the menu commands, the
+  /// toolbar buttons, and the pane's own header chevron all drive one
+  /// shared value. The pane hosts two tabs — the DJ Roomba assistant
+  /// chat and the genre map — switched by `bottomDockTab`; previously
+  /// the pane was genre-map-only (the genre tree first shipped here as
+  /// a sheet, then inline per user direction 2026-05-22, then shared
+  /// with the assistant via tabs per user direction 2026-05-29 — the
+  /// assistant moved out of its old standalone Window scene at the
+  /// same time).
+  var bottomDockCollapsed = false
+
+  /// Which surface is showing in the bottom dock pane right now. Set
+  /// by the segmented picker in the pane header, the two toolbar
+  /// buttons (Genre Map / DJ Roomba), and the menu commands. Defaults
+  /// to `.genreMap` because the genre map is the older + still-primary
+  /// surface; users opt into the assistant explicitly.
+  var bottomDockTab = BottomDockTab.genreMap
 
   /// Derived summary collections — **stored, input-driven state**, not
   /// per-`body` computed properties (Phase A spry fix; see
@@ -447,6 +462,23 @@ final class MusicController {
         startSongID: activePlayContext.startSongID,
       )
     return PlaybackResolver.storedSongID(in: activePlayContext.songIDs, at: index)
+  }
+
+  /// Expand the bottom dock pane and switch to the DJ Roomba tab.
+  /// Single entry point for the ⌥⌘\ menu command, the toolbar button,
+  /// and Settings → "Open DJ Roomba" — keeps the show-the-assistant
+  /// intent in one place so the three call sites can't drift.
+  func showAssistant() {
+    bottomDockTab = .djroomba
+    bottomDockCollapsed = false
+  }
+
+  /// Expand the bottom dock pane and switch to the Genre Map tab.
+  /// Mirror of `showAssistant()` for the genre-map side. Used by the
+  /// "Show Genre Map" menu command (⌥⇧⌘A) and the toolbar button.
+  func showGenreMap() {
+    bottomDockTab = .genreMap
+    bottomDockCollapsed = false
   }
 
   func requestSidebarFocus() {

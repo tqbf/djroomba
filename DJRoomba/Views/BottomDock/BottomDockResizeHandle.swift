@@ -1,14 +1,15 @@
 import AppKit
 import SwiftUI
 
-/// The drag strip on the genre-tree pane's top edge. Dragging up grows
+/// The drag strip on the bottom dock pane's top edge. Dragging up grows
 /// the body, down shrinks it (the pane is bottom-docked, so the top edge
 /// is the resizable one), clamped to `range`. Shows the standard macOS
 /// up/down resize cursor on hover and is VoiceOver-adjustable.
 ///
-/// Self-contained copy of the docked-pane resize idiom so the tree views
-/// don't depend on the retiring `Views/GenreGraph/` directory.
-struct GenreTreePaneResizeHandle: View {
+/// Originally `GenreTreePaneResizeHandle` (genre-map-only); when the
+/// genre map began sharing the docked pane with the DJ Roomba assistant
+/// tab (2026-05-29) this generalised to `BottomDockResizeHandle`.
+struct BottomDockResizeHandle: View {
 
   // MARK: Internal
 
@@ -46,7 +47,7 @@ struct GenreTreePaneResizeHandle: View {
       }
     }
     .accessibilityElement()
-    .accessibilityLabel("Resize genre map")
+    .accessibilityLabel("Resize bottom pane")
     .accessibilityValue("\(Int(height)) points tall")
     .accessibilityAdjustableAction { direction in
       switch direction {

@@ -6,10 +6,18 @@ implementation depth.
 
 ## What's in the app today
 
-**One feature — the in-app GPT assistant.** A chat window
-(⌥⌘\, separate `Window` scene) where the user talks to an OpenAI
+**One feature — the in-app GPT assistant.** A chat surface
+(⌥⌘\, the **DJ Roomba** tab of the main window's bottom dock pane,
+shared with the Genre Map tab) where the user talks to an OpenAI
 model that can read their library, search Apple Music, and make
-app-owned playlists by calling tools.
+app-owned playlists by calling tools. Multi-conversation: a left
+sidebar lists every past conversation; **New Request** archives the
+current one (kicks off a `gpt-5.4-mini` summarization for the
+sidebar label) and starts a fresh one; conversations persist across
+launches via SQLite. The assistant first shipped 2026-05-29 morning
+in a separate `Window` scene; the same day the user asked it to
+share the docked pane with the genre map via tabs (window retired)
+and the multi-conversation sidebar landed in the evening.
 
 That's it. There is intentionally no ambient "AI" sprinkled into other
 surfaces — no auto-generated playlist art, no inferred-mood badges, no
@@ -47,29 +55,66 @@ the per-record `.toolOutput` → `ChatMessage` mapping was losing
 the second turn. Fixed with a sequential walker that pairs each tool
 output to its preceding tool call. See `openai-gpt.md` for the depth.
 
-Model: hardcoded `gpt-4.1-mini` today. Pulling model choice into
-Settings (and considering the `OpenAIResponsesModel` adapter) is a
-deferred phase.
+Models in play:
+
+- **`gpt-5.4`** — the live chat model (hardcoded in `GPTService`).
+  Pulling this into Settings is still deferred. Sends
+  `service_tier: "flex"` on every request (the cheaper /
+  higher-latency tier — assistant is user-initiated but not
+  latency-sensitive, so flex is a straight cost win).
+- **`gpt-5.4-mini`** — the summarizer behind sidebar titles
+  (`AssistantSummarizer.modelName`). Same flex tier; shares the
+  bumped-timeout `URLSession` with the main model so neither hits
+  the default 60 s timeout under a queued flex request. Separate
+  ephemeral `OpenAIChatModel(toolExecutor: nil)` instance per
+  archive event; no second `ContextWindow` (we feed it ad-hoc
+  `Record`s).
 
 ## Tools the assistant has
 
-Read + write a single surface area — the local SQLite library + a
-catalog search hop through MusicKit. Each is one
+Read + write the local SQLite library + a catalog search hop through
+MusicKit + playback dispatch through `MusicController`. Each is one
 `JSONSchemaToolDefinition` + a `ClosureToolRunner`, wrapped in
 `LoggedToolRunner` for uniform observability. Cap on every list-shaped
 response so the model never sees a 200-row blob.
 
+Read-only:
+
 - `list_playlists` — every playlist or scoped to `library` / `app`.
-- `playlist_contents` — tracks in a playlist, capped at 200 with
-  `truncated: true` past that.
+- `playlist_contents` — tracks in a playlist, capped at 200.
 - `track_genres` — empty args → distinct genres list; with `trackIds`
   → per-track genres.
+- `recently_played` — distinct-by-song, default 25, max 100.
+- `app_state` — the currently-selected playlist + the currently-
+  playing song. Lets the model answer "what's playing" / "play this"
+  without guessing.
+- `sql_query` — arbitrary read-only `SELECT` / `WITH … SELECT` against
+  `library.sqlite`. GRDB's `dbQueue.read` block plus a pre-flight
+  string check (multi-statement / DDL / DML rejected) is the
+  defence. Capped at 200 rows. Schema hint inline in the tool
+  description plus `SELECT sql FROM sqlite_master` for full DDL.
+
+Write (local-only — never round-trips to Apple Music):
+
+- `create_playlist` — `LibraryStore.createAppPlaylist(named:)`.
+- `add_tracks_to_playlist` — refuses library (read-only) playlists.
+- `add_genre_to_tracks` — appends a genre tag to a track list
+  (idempotent).
+- `rename_genre` — globally renames a tag across the library
+  (auto-merges when the target tag already exists).
+
+Catalog (read-then-ingest):
+
 - `search_apple_music` — `MusicCatalogSearchRequest` + ingest via
   `CatalogIngestService`, returns internal `song.id`s so the output
   feeds straight into `add_tracks_to_playlist`.
-- `recently_played` — distinct-by-song, default 25, max 100.
-- `create_playlist` — `LibraryStore.createAppPlaylist(named:)`.
-- `add_tracks_to_playlist` — refuses library (read-only) playlists.
+
+Playback (dispatches back into `MusicController`):
+
+- `play_playlist` — `MusicCommand.playPlaylist(id)`.
+- `play_track` — resolves internal `song.id` → MusicKit `musicItemID`
+  and dispatches `MusicCommand.playTrack(_:playlistID:)`. Falls back
+  to the currently-selected playlist when no `playlistId` is given.
 
 Read details live in `openai-gpt.md`.
 
@@ -159,10 +204,10 @@ so the umbrella stays useful.
 - **Streaming + model picker.** Surface model choice in Settings;
   consider `OpenAIResponsesModel` (already in the vendored package).
   Stream the assistant turn so the transcript reveals progressively.
-- **Surface polish.** The assistant lives in its own `Window` today;
-  an inspector column on the main library window is a plausible
-  future home (per `macos-design`), driven by user feedback rather
-  than speculation.
+- **Surface polish.** The assistant lives in the shared bottom dock
+  pane (DJ Roomba tab) since 2026-05-29 — that's where the user
+  asked for it. Further polish (e.g. tear-off-to-its-own-window) is
+  driven by user feedback rather than speculation.
 - **A second provider.** No active need. If/when, the
   `contextwindow-swift` `Model` protocol is the seam; nothing in
   `GPTService` is OpenAI-shaped.

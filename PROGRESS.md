@@ -5,6 +5,278 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Delete conversations (swipe-left + right-click)
+
+**Branch `feature/openai-gpt-spike`.** Per user direction: "in the
+sidebar, swipe left to delete previous conversations." Sidebar
+conversion + a new delete path on `GPTService`.
+
+- **`GPTService.deleteConversation(_ id:)`** — dispatches through
+  `ContextWindow.deleteContext(name:)` (which drops the context's
+  records from `assistant.sqlite`), clears the app-side title +
+  last-activity caches (`AssistantConversationStore`), and when the
+  deleted conversation was the current one, reads
+  `await session.window.currentContext.name` (the library's
+  auto-switch picks the earliest remaining, or mints a fresh one)
+  and adopts that as the new current — re-applying the system
+  prompt + reloading the transcript. Sidebar refresh at the tail
+  keeps the visible state in sync.
+- **`AssistantConversationSidebar`** swapped from
+  `ScrollView + LazyVStack` to `List` so `.swipeActions(edge:
+  .trailing, allowsFullSwipe: false)` can hang a destructive
+  `Delete` button off each row — native trackpad two-finger swipe
+  is the canonical macOS gesture for this. `.listStyle(.plain)` +
+  `.scrollContentBackground(.hidden)` + zeroed row insets keep the
+  custom row treatment (avatar + initial + relative time) and the
+  gradient background intact.
+- **Parallel `.contextMenu`** with the same Delete action so mouse
+  users + accessibility users have a path to the same action
+  without a trackpad — also the only path verifiable via
+  computer-use, since `left_click_drag` doesn't simulate a
+  two-finger trackpad swipe.
+- **Verification (computer-use on signed/installed build).**
+  1. Right-click on "GPT Mix Playlist Summary" → context menu
+     showed "Delete Conversation" with the trash icon. Click →
+     entry vanished, count chip dropped 3 → 2, sidebar feed
+     refreshed.
+  2. Right-click the currently-selected "Untitled" → Delete → the
+     entry was removed, count chip 2 → 1, the remaining "Untitled"
+     became current automatically, its historical transcript
+     (the playback + SQL + flex-tier test turns) loaded.
+- **`AssistantPaneView`** carries the `onDelete: { id in Task {
+  await gpt.deleteConversation(id) } }` callback into the sidebar.
+
+## 2026-05-29 — gpt-5.4 + service_tier:"flex", DJROOMBA PATCH 2, tool-call display toggle
+
+**Branch `feature/openai-gpt-spike`.** Per user direction: main chat
+model bumped to `gpt-5.4`, OpenAI `service_tier: "flex"` enabled on
+every request (cheaper / higher-latency, fine — assistant isn't
+latency-sensitive), and the transcript's tool-call rows became
+optional via a subtle checkbox.
+
+- **`DJROOMBA PATCH 2`** in `Vendor/contextwindow-swift/Sources/
+  ContextWindowOpenAI/OpenAIChatModel.swift` — `OpenAIChatModel.init`
+  gains a `serviceTier: String?` parameter; the `ChatCompletionRequest`
+  wire struct gains a `service_tier: String?` field. `nil` ⇒ omitted
+  from the JSON, server default applies; `"flex"` opts in. Sequenced
+  alongside PATCH 1 (the multi-turn tool_call_id fix); same vendoring
+  + future upstream story.
+- **`GPTService`** chat model bumped from `gpt-4.1-mini` to **`gpt-5.4`**.
+  New `nonisolated static let serviceTier = "flex"` + `static let
+  urlSession` (with `timeoutIntervalForRequest = 900s`,
+  `timeoutIntervalForResource = 1800s`) so the flex tier's longer
+  queue waits don't trip the default 60 s `URLSession` timeout. Both
+  the chat model AND `AssistantSummarizer` (gpt-5.4-mini) share the
+  session + the flex tier.
+- **`@AppStorage("djroomba.assistant.showToolCalls") = true`** drives
+  a small `.checkbox`-style `Toggle` in the per-tab header (caption
+  font, secondary foreground — quiet but present). When off,
+  `visibleMessages` filters tool turns out of the rendered transcript;
+  underlying records are untouched so the model still sees them on
+  the next turn. Default `true` because the visibility IS the trust
+  affordance for a first-time user.
+- **Verification (computer-use on signed/installed build).**
+  1. "Hi! Just say 'hello' so I can confirm gpt-5.4 + flex tier is
+     working." → DJ Roomba replied "hello" — gpt-5.4 + flex round
+     trip succeeded against the live API.
+  2. Unchecked "Show tool calls" → transcript collapses to user +
+     assistant turns only (tool / SQL JSON rows hidden); checking
+     again restores them. `@AppStorage`-persisted so the preference
+     survives relaunch.
+- **Cost posture documented.** `plans/openai-gpt.md` "Costs" section
+  + `plans/AI.md` provider boundary updated to mention the flex
+  tier.
+
+## 2026-05-29 — DJ Roomba grows playback, genre-edit, app-state, and SQL tools
+
+**Branch `feature/openai-gpt-spike`.** Per user direction, added five
+more tools to the assistant: **play a track**, **play a playlist**,
+**add a genre to tracks**, **rename a genre globally**, **read-only
+SQL SELECT against `library.sqlite`** (with schema hint inline +
+discoverable via `sqlite_master`), and an **`app_state`** read so the
+model can answer "what's selected / playing right now" without
+guessing.
+
+- **Controller wiring.** `GPTService` now holds a
+  `weak var hostController: MusicController?` set by a new
+  `attach(controller:)` method called from `MusicController.init`
+  (gpt → controller is weak, controller → gpt is `let`). A
+  `ControllerProvider = @Sendable @MainActor () -> MusicController?`
+  closure typealias plumbs this through `GPTToolRegistration.tools`
+  so playback / state tools can hop to `Task { @MainActor … }.value`
+  before reading the controller.
+- **`play_playlist`** dispatches `MusicCommand.playPlaylist(id)`
+  through the existing `handle(_:)` path — same code as the sidebar's
+  Play button. Returns the playlist's name.
+- **`play_track`** resolves the internal `song.id` to its MusicKit
+  `musicItemID` via `LibraryStore.song(id:)`, then dispatches
+  `MusicCommand.playTrack(_:playlistID:)`. If no `playlistId` arg is
+  passed it falls back to `controller.selectedPlaylistID`; with no
+  playlist context at all it errors with guidance so the model can
+  fix it itself (a one-shot arbitrary-song queue is a future hook).
+- **`add_genre_to_tracks`** wraps `LibraryStore.addGenre(_:toSongIDs:)`
+  (idempotent, returns rows changed). **`rename_genre`** wraps
+  `LibraryStore.renameGenre(from:to:)` (auto-merges when `to` already
+  exists). Both are pure SQLite, no MusicKit.
+- **`sql_query`** runs read-only `SELECT` / `WITH … SELECT` against
+  `library.sqlite` via `database.dbQueue.read { db in Row.fetchAll … }`
+  — GRDB's read block prevents writes at the engine level, and a
+  pre-flight `validateSelectOnly(_:)` rejects multi-statement strings
+  + DDL/DML keywords with a clean error before round-tripping. Rows
+  serialize to `{ columns, rows: [{col: value}], rowCount, truncated }`
+  via a `DatabaseValue → JSONValue` mapper (blobs base64). Capped at
+  200 rows. The tool description embeds a one-paragraph schema
+  summary + tells the model to call `SELECT sql FROM sqlite_master
+  WHERE type IN ('table','view') ORDER BY name` for the full DDL.
+- **`app_state`** reads `selectedPlaylistID` / `selectedSummary` /
+  `playback.snapshot.{title, artist, playlistContextID}` /
+  `currentStoredSongID` from the controller and returns
+  `{ selectedPlaylist: {id, name, source}?, nowPlaying: {songId,
+  title, artist, playlistId}? }`. Lets the model answer "what's
+  playing" or "play this" without guessing.
+- **Verification (computer-use on signed/installed build).**
+  1. "What playlist is selected, and play it." → tools chain:
+     `app_state` returned `{ selectedPlaylist: { id, name: "Rob Crow
+     Music", source: "library" } }`, then `play_playlist` started
+     playback. Now-playing bar moved to "Proceed to Memory / Pinback"
+     within the wait window.
+  2. "Using sql_query, what are my top 5 most-played artists?" → the
+     model wrote `SELECT artist_name, SUM(play_count) AS total_plays
+     FROM song_stat JOIN song ON song_stat.song_id = song.id GROUP
+     BY artist_name ORDER BY total_plays DESC LIMIT 5`, ran it,
+     returned R.E.M. (40), Smiths (16), Pixies (16), Tom Petty (12),
+     The New Pornographers (12). Schema hint in the tool description
+     was sufficient — no `sqlite_master` round-trip needed.
+- **Tool count is now 13** (the original seven + `app_state`,
+  `play_playlist`, `play_track`, `add_genre_to_tracks`,
+  `rename_genre`, `sql_query`). Order in the system list stays
+  alphabetical for stability.
+
+## 2026-05-29 — Multi-conversation DJ Roomba (sidebar + New Request + gpt-5.4-mini titles)
+
+**Branch `feature/openai-gpt-spike`.** Per user direction: "the DJ
+Roomba tab should have a sidebar with past conversations (hideable /
+revealable), save the conversation on restart, have a New Request
+button that archives the previous one off and adds it to the sidebar,
+and use gpt-5.4-mini to summarize for the label." All four landed.
+
+- **Library multi-context is the substrate.** `contextwindow-swift`
+  already supports `listContexts` / `switchContext` / `createContext`
+  on a single `ContextWindow` actor sharing one `SQLiteContextStore`.
+  Each conversation = one library `Context`. No second SQLite file,
+  no schema migration. App-side title storage (the library has no
+  title concept) lives in `UserDefaults` under
+  `djroomba.assistant.titles` keyed by context name. Last-activity
+  + current-conversation pointer use sibling keys
+  (`AssistantConversationStore` is the consolidated reader/writer).
+- **`gpt-5.4-mini` summarizer** (confirmed available via WebFetch
+  against `developers.openai.com/api/docs/models` 2026-05-29). A
+  separate `OpenAIChatModel(toolExecutor: nil)` instance — no second
+  `ContextWindow` needed because `model.call([Record])` accepts
+  ad-hoc records built on the stack. Synthetic system prompt asks
+  for a 3–6-word title; `clean(_:)` strips quotes / trailing
+  punctuation; result writes to UserDefaults and `refreshConversations()`
+  surfaces the new title in the sidebar.
+- **`GPTService` shape change.** New `conversations:
+  [ConversationListEntry]` + `currentConversationID: String?` on the
+  `@Observable`; new `newConversation()` / `switchConversation(to:)`
+  / `loadConversationsFromDisk()` methods. `ensureSession()` now
+  picks an initial context by priority: UserDefaults pointer →
+  most-recent existing → legacy `djroomba-assistant` →
+  freshly-minted UUID. Tool dispatch unchanged (window-level
+  in-memory dict survives context switches).
+- **`AssistantPaneView` reshape.** Now an `HStack` with a hideable
+  left sidebar (`AssistantConversationSidebar`, 220pt, sidebar-
+  background) and a per-tab header strip carrying
+  `sidebar.left` toggle + `square.and.pencil` New Request + the
+  current conversation's title at the trailing edge. Sidebar
+  visibility is `@SceneStorage("djroomba.assistant.sidebarVisible")`
+  (default `true` — the sidebar IS the multi-conversation
+  affordance, hiding it on first run buries the feature). New
+  `AssistantConversationSidebar` view, scrollable, click-to-switch,
+  selected-row highlight in `Color.accentColor.opacity(0.18)`.
+- **Restart behavior.** Existing `ContextWindow` SQLite persistence
+  carries every conversation's records. New: a `currentContextName`
+  UserDefaults key resumes the same conversation on launch; titles
+  + last-activity caches likewise survive a restart. The sidebar
+  populates BEFORE first send via `loadConversationsFromDisk()` —
+  a no-API-key-required read against the `SQLiteContextStore`'s
+  `listContexts()` — so the user sees their history even when
+  nothing has been queried this launch.
+- **Verification (computer-use on signed/installed build).**
+  1. Sidebar shows two existing conversations on launch (one with
+     a `gpt-5.4-mini`-generated title "Playlist Count And GPT Mix"
+     visible in the log: `← summary[djroomba-assistant]: Playlist
+     Count And GPT Mix`).
+  2. Clicking the second entry loads the historical transcript
+     from SQLite.
+  3. Clicking **New Request** archives the current conversation,
+     mints a fresh "New Conversation" entry at the top of the
+     sidebar (selected), and re-summarizes the archived one
+     (`Playlist Count And GPT Mix` → `GPT Mix Playlist Summary`).
+  4. Quit + relaunch: sidebar feed + titles + selected current
+     conversation all persist.
+  5. Sidebar toggle hides + restores the column.
+- **Known minor:** the summarizer re-runs whenever an already-titled
+  conversation is archived; a future refinement is to skip when
+  the cached title is newer than the most recent record. Tracked
+  in `plans/openai-gpt.md` deferred section.
+
+## 2026-05-29 — Assistant moves into a shared bottom dock pane with the genre map
+
+**Branch `feature/openai-gpt-spike`.** Per user direction: "the AI
+conversation and the genre map share a pane in this UI; use tabs to
+flip between them. Label the AI conversation 'DJ Roomba'; the DJ is
+the AI." The standalone Assistant `Window` scene retired; the same
+shortcut (⌥⌘\) now opens the docked bottom pane on the DJ Roomba tab.
+
+- **New `BottomDockPane`** at `DJRoomba/Views/BottomDock/` owns the
+  collapse + resize + shared header (chevron + segmented `Picker`
+  over `BottomDockTab`). Replaces the standalone `GenreTreeMapPanel`
+  in `DetailPaneView`. Picker auto-expands the pane when clicked
+  while collapsed — the segmented control is the primary "show me
+  this" affordance, the chevron is the hide control. Plain
+  `switch` over `TabView` because we want the dock's chrome, not
+  `TabView`'s.
+- **Body extractions.** `AssistantWindowView` →
+  `AssistantPaneView` (transcript + composer, no frame sizing).
+  `GenreTreeMapPanel` → `GenreTreeMapBody` (header strip / canvas /
+  footer / side inspector — outer collapse/resize/title moved up
+  into the shared dock). `GenreTreePaneResizeHandle` →
+  `BottomDockResizeHandle`. Three `GenreTreeMapPanel.*` static
+  references in `GenreTreeInspector` + `BranchEdge` updated.
+- **Controller state.** `genreTreePaneCollapsed` →
+  `bottomDockCollapsed`; new `bottomDockTab: BottomDockTab` (default
+  `.genreMap`); new `showAssistant()` / `showGenreMap()` funnels so
+  the menu commands, toolbar buttons, segmented picker, and Settings
+  pane all route through one place each.
+- **Toolbar.** The single "Genre Map" toolbar button became two —
+  "DJ Roomba" (sparkles) and "Genre Map" (map). Each is a smart
+  toggle: collapses if its tab is already showing, otherwise opens
+  the pane on its tab.
+- **Menu commands.** `Show Genre Map` (⌥⇧⌘A) now calls
+  `controller.showGenreMap()`; new `Show DJ Roomba` (⌥⌘\) calls
+  `controller.showAssistant()`. The standalone `Window("DJ Roomba
+  Assistant", id: AssistantWindowID)` scene + the
+  `AssistantWindowID` constant + `openWindow(id:)` in
+  `OpenAISettingsPane` all deleted.
+- **Settings.** "Open Assistant Window" button → "Show DJ Roomba"
+  (still gated on a configured key); footer copy updated to point at
+  the bottom dock + the new shortcut. No `@Environment(\.openWindow)`
+  needed anymore.
+- **Verification.** `make check` (367 tests / 53 suites green),
+  `swiftformat --lint` clean on the 130-file tree, `make install`
+  signed + installed. Live verified via computer-use on the
+  signed/installed build: tab picker renders in the shared header
+  with both segments, click-DJ-Roomba shows the assistant empty
+  state + "Message DJ Roomba…" composer, click-Genre-Map shows the
+  84-genre tree, ⌥⌘\ flips to DJ Roomba, ⌥⇧⌘A flips to Genre Map,
+  chevron collapse hides the body and reclaims the height for the
+  track list while keeping the picker visible for re-expansion.
+- **Predecessor history.** `plans/AI.md` + `plans/openai-gpt.md` +
+  `PLAN.md` updated to drop the "standalone Window" framing
+  everywhere it appeared.
+
 ## 2026-05-29 — OpenAI GPT Phase 1 — persistent context + 7 tools + Assistant window + vendored patch
 
 **Branch `feature/openai-gpt-spike`** (still — never PR'd). The user
