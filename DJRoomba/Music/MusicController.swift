@@ -116,6 +116,21 @@ final class MusicController {
   private(set) var favoriteIDs = Set<String>()
   private(set) var recentIDs = [String]()
 
+  /// Change-gated mirrors of the two bits of `playback.snapshot` the detail
+  /// **header** needs: which playlist context is currently loaded
+  /// (`activePlaybackContextID` — equal to a detail's `id` when it's the one
+  /// playing/paused) and whether the player is playing (`isPlaying`).
+  ///
+  /// Exposed separately from `snapshot` on purpose. `snapshot` is reassigned
+  /// on every ~0.5 s monitor tick, so a view body that read it would recompute
+  /// every tick — the coupling `PlaybackService` / `plans/memory-and-laziness.md`
+  /// / swiftui-pro explicitly warn against. These are written from the same
+  /// `onSnapshotRefresh` hook the auto-advance detector uses, but only when the
+  /// value actually changes (`refreshPlaybackHeaderFlags`), so a view reading
+  /// them invalidates only on a real play / pause / stop / context change.
+  private(set) var activePlaybackContextID: String?
+  private(set) var isPlaying = false
+
   /// Bumped by the ⌘L / ⌘1 commands; the sidebar observes this to take
   /// keyboard focus (commands are app-scoped, so this bridges to the view).
   private(set) var focusSidebarRequest = 0
@@ -1146,6 +1161,7 @@ final class MusicController {
     // `body` (swiftui-pro / memory-and-laziness).
     playback.onSnapshotRefresh = { [weak self] in
       self?.detectAndRecordAdvance()
+      self?.refreshPlaybackHeaderFlags()
     }
     playback.startMonitoring()
 
@@ -1549,6 +1565,20 @@ final class MusicController {
         storeError = error.localizedDescription
       }
     }
+  }
+
+  /// Refresh the header's play-state mirrors from the current snapshot,
+  /// assigning **only on change** so observers (the detail header's Play
+  /// button) invalidate on a real play/pause/stop/context change rather than
+  /// on every 0.5 s tick. `activePlaybackContextID` is `nil` when nothing is
+  /// loaded (stopped / queue empty) — `hasContent` is the load-bearing guard,
+  /// since a *paused* playlist keeps its content + context and should still
+  /// read as the active context (so its header offers "Play" = resume).
+  private func refreshPlaybackHeaderFlags() {
+    let snap = playback.snapshot
+    let context = snap.hasContent ? snap.playlistContextID : nil
+    if activePlaybackContextID != context { activePlaybackContextID = context }
+    if isPlaying != snap.isPlaying { isPlaying = snap.isPlaying }
   }
 
   /// The local-first round trip: stored ids → re-resolved MusicKit songs →

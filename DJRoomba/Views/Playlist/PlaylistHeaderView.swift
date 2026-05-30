@@ -33,14 +33,28 @@ struct PlaylistHeaderView: View {
 
         HStack(spacing: 10) {
           Button {
-            Task { await controller.playSelectedPlaylist() }
+            Task {
+              // Active context → it's a transport toggle (pause / resume);
+              // otherwise → start this playlist from the top.
+              if isActiveContext {
+                await controller.togglePlayPause()
+              } else {
+                await controller.playSelectedPlaylist()
+              }
+            }
           } label: {
-            Label("Play", systemImage: "play.fill")
-              .frame(minWidth: 72)
+            Label(
+              isPlayingThis ? "Pause" : "Play",
+              systemImage: isPlayingThis ? "pause.fill" : "play.fill",
+            )
+            .frame(minWidth: 72)
           }
           .buttonStyle(.borderedProminent)
           .controlSize(.large)
-          .disabled(detail.isEmpty || !controller.canAttemptPlayback)
+          // When this playlist is the playing/paused context the button is a
+          // transport toggle and stays available; otherwise it's "start this
+          // playlist", gated as before (empty / no playback capability).
+          .disabled(!isActiveContext && (detail.isEmpty || !controller.canAttemptPlayback))
 
           // Rename the browsed genre. Header-level (same tier as Play),
           // not buried in a context menu — discoverable, and the natural
@@ -96,6 +110,21 @@ struct PlaylistHeaderView: View {
   // MARK: Private
 
   @Environment(MusicController.self) private var controller
+
+  /// This detail is the player's current playback context (playing OR paused).
+  /// `contextID` is set to `detail.id` whenever a playlist/genre is played
+  /// (`MusicController.resolveAndPlay`), so the comparison is exact. Reads the
+  /// change-gated `activePlaybackContextID` mirror, NOT `snapshot`, so the
+  /// header doesn't recompute on the 0.5 s now-playing tick.
+  private var isActiveContext: Bool {
+    controller.activePlaybackContextID == detail.id
+  }
+
+  /// This detail is the active context AND the player is playing → the button
+  /// shows Pause. Active-but-paused shows Play (resume).
+  private var isPlayingThis: Bool {
+    isActiveContext && controller.isPlaying
+  }
 
   /// The playlist's distinct genres as a single quiet, horizontally
   /// scrollable row of capsule tags — secondary metadata, not a
