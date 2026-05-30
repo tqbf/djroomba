@@ -51,6 +51,18 @@ struct UpNextLandingRow: View {
     }
     .padding(.vertical, 2)
     .accessibilityLabel("Up Next")
+    // Songs dragged from the track table carry their `songID`; a drop
+    // here appends them to the Up Next queue — the drag-drop peer of
+    // the "Add to Up Next" track-context-menu item, both funnelling
+    // through `controller.addToUpNext(songIDs:)`. The native `List`
+    // drop hover provides the highlight feedback (same as
+    // `AppPlaylistRowItem`); no explicit overlay required.
+    .dropDestination(for: SongDragItem.self) { items, _ in
+      let ids = items.map(\.songID)
+      guard !ids.isEmpty else { return false }
+      Task { await controller.addToUpNext(songIDs: ids) }
+      return true
+    }
   }
 
   // MARK: Private

@@ -5,6 +5,156 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Up Next queue — Phase 3: track-list "Add to Up Next" + sidebar drop target
+
+Phase 3 of `plans/up-next-queue.md` lands on `feature/up-next-queue`
+(NOT merged). The Up Next queue becomes user-reachable through the
+ordinary track-table affordances for the first time: an "Add to Up
+Next" item in the track context menu (peer of "Add to Playlist" /
+"Add to Genre"), and a drop target on the sidebar `UpNextLandingRow`
+that mirrors the existing `AppPlaylistRowItem` drag-into-playlist
+behaviour. Both routes funnel through one new controller method so
+context-menu adds and drag-drop adds are observationally identical.
+
+**Files changed.**
+- `DJRoomba/Music/MusicController.swift` — new
+  `addToUpNext(songIDs:insertAt:) async` convenience funnel on top of
+  the Phase-1 paired-array `addToUpNext(_:musicItemIDs:insertAt:)`.
+  Takes the songID list the menu / drag payload both carry, batches
+  one `store.songs(byIDs:)` fetch
+  (`[[djroomba-sqlite-batch-idioms]]`, never per-row), re-pairs each
+  resolved `Song` with its own `musicItemID`, and forwards through
+  the existing controller funnel so the dominance hook + Phase 5
+  auto-fill bookkeeping see one canonical event. Input order is
+  preserved; missing ids are silently dropped (a song deleted out
+  from under a stale selection shouldn't crash the menu).
+  `seedUpNextFromCurrentSelection` refactored to delegate to the new
+  overload (cuts ~20 lines of duplicated paired-array build).
+- `DJRoomba/Views/Playlist/TrackContextMenu.swift` — new "Add to Up
+  Next" `Button` (SF Symbol = `text.line.first.and.arrowtriangle.forward`,
+  matching the sidebar landing-row glyph) placed between Play and
+  "Add to Playlist ▸". macos-design call: queue is the transient /
+  immediate destination, the longer-term "Add to Playlist" / "Add to
+  Genre" submenus sit below. Flat menu item (NOT a submenu) — Up Next
+  is a flat append, not a pick-one-of-many surface. Multi-select fan-out
+  via the existing `rows: [TrackRow]` plumbing — `addSelectedToUpNext()`
+  hands `rows.map(\.songID)` to the controller in one call.
+- `DJRoomba/Views/Sidebar/UpNextLandingRow.swift` — one
+  `.dropDestination(for: SongDragItem.self)` modifier (5 lines)
+  mirroring the existing `AppPlaylistRowItem` pattern. The native
+  `List` drop-hover affordance provides the highlight + count badge
+  (visible "1" / "2" badge on the row during a single- / multi-drag);
+  no explicit overlay required.
+- `DJRoomba/App/PlaylistPlayerApp.swift` — Debug menu's "Seed Up Next
+  from Current Selection (3 tracks)" entry retained as a permanent
+  developer / computer-use affordance per the Phase 3 brief's
+  hand-off note. Inline comment rewritten to drop the "PHASE 2 SEED
+  — remove after Phase 3 lands" wording and document why it stays
+  (debug affordances are cheap; the user-facing routes are now the
+  context-menu item and the drop target).
+
+**Tests count delta.** 410/54 → **410/54** (+0 / +0). No new test
+warranted: the new menu item is a one-line dispatch through the
+controller; the controller funnel is exercised by the same code paths
+the Phase 2 seed helper used (and which the existing
+`UpNextServiceTests` already covers at the service layer). Drop-target
+behaviour is a SwiftUI modifier with no testable logic outside the
+two-line closure that forwards to the same funnel.
+
+**Verification gates.**
+- `make check` clean.
+- `swift test` 410/54 green.
+- `swiftformat --lint` clean across `DJRoomba/` + `Tests/`
+  (0/192 files require formatting).
+- `swiftlint --strict` clean across `DJRoomba/` + `Tests/`
+  (pre-existing Vendor/ violations untouched).
+- `make` (signed Apple Development cert build) clean.
+- Live computer-use verification end-to-end (see below).
+
+**Live verification via computer-use (all steps PASS).** Path per the
+plan's verification gates:
+1. Right-click row 1 (Proceed to Memory) in Rob Crow Music. Context
+   menu shows Play → **Add to Up Next** → Add to Playlist ▸ → Add to
+   Genre ▸ in that order, with the new item's Up Next glyph rendered
+   correctly: `/tmp/upnext-phase3-step-2.png`.
+2. Click **Add to Up Next**. Sidebar chip on the Up Next row
+   immediately reads **1**. Open Up Next detail: "1 track", row 1 =
+   Proceed to Memory: `/tmp/upnext-phase3-step-3.png`.
+3. Cmd-click rows 2/3/4 (Seville, O.B. 1, From Nothing to Nowhere).
+   Right-click → context menu shows Add to Up Next (no Play, since
+   multi-select), Add to Playlist ▸, Add to Genre ▸. Click Add to Up
+   Next. Chip increments from 1 to **4**; detail shows rows 1-4 in
+   selection-order append.
+4. Single-track drag-drop append: drag row 1 from track table onto
+   the Up Next sidebar landing. macOS shows the native "1" drop
+   badge on the row while hovering (the standard
+   `.dropDestination` hover highlight, same affordance
+   `AppPlaylistRowItem` uses): `/tmp/upnext-phase3-step-5.png`.
+   Drop. Chip ticks from 4 to **5**.
+5. Multi-track drag-drop append: Cmd-click rows 2 and 3, drag both
+   onto the landing. Native "2" drop badge visible during hover.
+   Drop. Chip ticks from 5 to **7** — the multi-row drag carries
+   one `SongDragItem` per selected row, the drop closure maps
+   `items.map(\.songID)` through the same controller funnel.
+6. Open Up Next detail: 7 rows visible in append order across all
+   four paths (single context-menu, multi context-menu, single drag,
+   multi drag). Each path's contribution is sequential and lands at
+   the tail.
+
+**Phase 1 + 2 regression re-verification (both PASS).**
+- Phase 2 queue-row context menu: right-click any Up Next row → Play
+  / Move to Top / Remove from Up Next still present with the correct
+  destructive styling.
+- Phase 2 Clear flow: header Clear button + confirmation dialog
+  ("Clear Up Next? / This removes every track from the queue. The
+  queue can't be undone." + red Clear / Cancel) still mounted at the
+  VStack root, fires correctly, drops chip to 0.
+- Phase 1 playback dominance: with Rob Crow Music playing (track #4
+  From Nothing to Nowhere at 0:11) and queue head = From Nothing to
+  Nowhere (added via the new Phase 3 context-menu path), press ⌘→.
+  Chip drops 3 → **2** and now-playing restarts From Nothing to
+  Nowhere at 0:09 — the queue head preempted the playlist's natural
+  advance to track #5 (Paper Doll Parts). The dominance hook fires
+  identically whether the queue was seeded via the Phase 2 debug
+  affordance, the new Phase 3 context menu, or the new Phase 3 drop
+  target — exactly what the unified controller funnel design buys us.
+
+**Skills.** `swiftui-pro` pre-pass: confirmed the `.dropDestination`
+modifier on the `HStack`'s `body` is the right shape (no `@State`
+needed since the macOS drop-hover affordance handles its own
+highlight overlay), that the SF Symbol on a `Button(_:systemImage:)`
+in a context menu uses the menu's native icon slot. Post-pass clean.
+`macos-design` pass made two decisions: (1) "Add to Up Next" goes
+between Play and "Add to Playlist ▸" — queue = transient / immediate,
+playlist = longer-term destination, the natural ordering for a music
+app's context menu; (2) drop highlight = native `List` hover
+affordance (which macOS renders as the row receiving focus + a count
+badge near the cursor), matching `AppPlaylistRowItem` exactly so
+"My Playlists" and "Up Next" drop targets read as one consistent
+gesture vocabulary. `airbnb-swift-style`: lint clean
+(`swiftformat --lint` + `swiftlint --strict` both 0 violations across
+`DJRoomba/` + `Tests/`). `toms-laws` final cleanup: the
+`addToUpNext(songIDs:)` overload paid its freight by killing the
+~20-line paired-array duplication in `seedUpNextFromCurrentSelection`;
+no further extraction warranted (the menu's `addSelectedToUpNext`
+helper is two lines and reads better at its callsite than threaded
+inline).
+
+**PR.** https://github.com/tqbf/djroomba/pull/13 (draft, NOT merged).
+Phase 3 checkbox ticked.
+
+**Phase 4 next.** Four `up_next_*` GPT tools (`up_next_count`,
+`up_next_get`, `up_next_add`, `up_next_remove`) registered in
+`GPTToolRegistration.tools(...)`. The controller funnel
+`addToUpNext(songIDs:)` is the natural seam for `up_next_add` — the
+tool runner can hand a `[Int]` of trackIds → resolve to
+`[songID: String]` via `store.songs(byIDs:)` → call the funnel,
+exact same path the menu / drop already use. System prompt
+paragraph in `GPTService.swift` teaches the model the queue's
+semantics and naming. Live-verified: "Add five Pinback tracks to up
+next" → tool calls land → queue populates → first plays
+automatically when current song ends.
+
 ## 2026-05-30 — Up Next queue — Phase 2: sidebar landing row + UpNextView detail surface
 
 Phase 2 of `plans/up-next-queue.md` lands on `feature/up-next-queue`

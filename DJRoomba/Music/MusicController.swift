@@ -1129,6 +1129,38 @@ final class MusicController {
     }
   }
 
+  /// Convenience funnel for the Phase-3 user-facing add paths
+  /// (track-context-menu "Add to Up Next" and the sidebar landing's
+  /// `SongDragItem` drop target). Caller hands over `song.id`s — the
+  /// only stable identity the track-table selection and the drag payload
+  /// both carry; this method does the batched store fetch
+  /// (`[[djroomba-sqlite-batch-idioms]]`, never per-row) and re-pairs
+  /// each `Song` with its own `musicItemID`. Input order is preserved;
+  /// missing ids are silently dropped (a song deleted out from under a
+  /// stale selection shouldn't crash the menu). No-op on empty input.
+  func addToUpNext(songIDs: [String], insertAt position: Int? = nil) async {
+    guard let store, !songIDs.isEmpty else { return }
+    let songsByID: [String: Song]
+    do {
+      let songs = try await store.songs(byIDs: songIDs)
+      songsByID = Dictionary(uniqueKeysWithValues: songs.map { ($0.id, $0) })
+    } catch {
+      storeError = error.localizedDescription
+      return
+    }
+    var orderedSongs = [Song]()
+    var orderedIDs = [MusicItemID]()
+    orderedSongs.reserveCapacity(songIDs.count)
+    orderedIDs.reserveCapacity(songIDs.count)
+    for id in songIDs {
+      guard let song = songsByID[id] else { continue }
+      orderedSongs.append(song)
+      orderedIDs.append(MusicItemID(song.musicItemID))
+    }
+    guard !orderedSongs.isEmpty else { return }
+    addToUpNext(orderedSongs, musicItemIDs: orderedIDs, insertAt: position)
+  }
+
   func removeFromUpNext(positions: [Int]) {
     upNext.remove(at: positions)
   }
@@ -1145,18 +1177,15 @@ final class MusicController {
     upNext.moveToTop(positions: positions)
   }
 
-  /// PHASE 2 SEED — remove after Phase 3 lands. Developer/computer-use
-  /// affordance for the Debug menu while the user-facing routes to
-  /// add to Up Next (track-context-menu in Phase 3, GPT tools in Phase
-  /// 4) don't exist yet. Picks the first `count` tracks of whichever
+  /// Debug-menu affordance: pick the first `count` tracks of whichever
   /// surface the user is looking at — the selected playlist's detail
   /// (already loaded), or the Recently Played landing's rows — and
-  /// funnels them through `addToUpNext`. Looks up the full `Song`
-  /// snapshots in one batched store fetch (NOT a per-row loop;
-  /// `[[djroomba-sqlite-batch-idioms]]`). No-op if there's no source
-  /// to seed from.
+  /// append them to the Up Next queue. Kept past Phase 3 as a permanent
+  /// developer / computer-use convenience (Phase 3's "Add to Up Next"
+  /// context-menu and the landing-row drop target are the user-facing
+  /// routes). No-op if there's no source to seed from.
   func seedUpNextFromCurrentSelection(count: Int = 3) async {
-    guard let store, count > 0 else { return }
+    guard count > 0 else { return }
     let sourceRows: [TrackRow]
     if let detail = detailService.detail, !detail.tracks.isEmpty {
       sourceRows = Array(detail.tracks.prefix(count))
@@ -1165,25 +1194,7 @@ final class MusicController {
     } else {
       return
     }
-    let songIDs = sourceRows.map(\.songID)
-    let songsByID: [String: Song]
-    do {
-      let songs = try await store.songs(byIDs: songIDs)
-      songsByID = Dictionary(uniqueKeysWithValues: songs.map { ($0.id, $0) })
-    } catch {
-      storeError = error.localizedDescription
-      return
-    }
-    var orderedSongs = [Song]()
-    var orderedIDs = [MusicItemID]()
-    orderedSongs.reserveCapacity(sourceRows.count)
-    orderedIDs.reserveCapacity(sourceRows.count)
-    for row in sourceRows {
-      guard let song = songsByID[row.songID] else { continue }
-      orderedSongs.append(song)
-      orderedIDs.append(MusicItemID(row.musicItemID))
-    }
-    addToUpNext(orderedSongs, musicItemIDs: orderedIDs)
+    await addToUpNext(songIDs: sourceRows.map(\.songID))
   }
 
   /// Click-to-play on a queue row: consume everything above `position`

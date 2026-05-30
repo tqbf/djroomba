@@ -218,13 +218,14 @@ struct PlaylistPlayerApp: App {
         Button("Catalog Access Probe (Phase 0)") {
           Task { await controller.runCatalogAccessProbe() }
         }
-        // PHASE 2 SEED — remove after Phase 3 lands. Computer-use
-        // affordance for verifying the Up Next surface before the
-        // track-context-menu route (Phase 3) and the GPT tools (Phase
-        // 4) make the queue user-reachable for real. Pulls the first
-        // three tracks from the currently-selected playlist's detail
-        // (already loaded) or, if nothing's selected, from the
-        // Recently Played landing.
+        // Developer / computer-use affordance for quickly populating
+        // the Up Next queue without right-clicking individual tracks.
+        // Pulls the first three tracks from the currently-selected
+        // playlist's detail (already loaded) or, if nothing's selected,
+        // from the Recently Played landing. Kept past Phase 3 as a
+        // permanent debug convenience; the user-facing routes are the
+        // track-context-menu "Add to Up Next" item and the sidebar
+        // landing's drop target.
         Button("Seed Up Next from Current Selection (3 tracks)") {
           Task { await controller.seedUpNextFromCurrentSelection(count: 3) }
         }
