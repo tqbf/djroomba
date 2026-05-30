@@ -920,6 +920,15 @@ final class MusicController {
     await playback.skipNext()
   }
 
+  /// Seek the playhead to `seconds` within the current entry. Thin
+  /// passthrough to `PlaybackService.seek(to:)` — exists so views call
+  /// the controller (the single transport facade), not the service
+  /// directly. Synchronous + non-throwing: a `player.playbackTime`
+  /// assignment doesn't go through MusicKit's async transport surface.
+  func seek(to seconds: TimeInterval) {
+    playback.seek(to: seconds)
+  }
+
   /// "Back" pressed. Same capture-before-delegate ordering as
   /// `skipNext()`; a press past halfway counts as a replay (Phase 3,
   /// ask #3). The transport is unchanged — whatever MusicKit then does

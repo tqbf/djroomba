@@ -250,6 +250,30 @@ final class PlaybackService {
     refreshSnapshot()
   }
 
+  /// Seek the playhead to `seconds` within the current entry. Clamped to
+  /// `[0, duration]` so a wild slider drag past the end can't write a
+  /// nonsense value into `player.playbackTime`. `refreshSnapshot()` is
+  /// called immediately so the now-playing bar reflects the new position
+  /// without waiting for the ~0.5 s monitor tick. Idempotent w.r.t.
+  /// playback state — a seek while paused stays paused, a seek while
+  /// playing stays playing (`player.playbackTime` is just an assignment;
+  /// it does not toggle the engine).
+  ///
+  /// Caller responsibility: only invoke while there's a current entry
+  /// (the now-playing bar gates this on `snapshot.hasContent` + a
+  /// known `duration`). A seek with no current entry is a no-op.
+  func seek(to seconds: TimeInterval) {
+    guard player.queue.currentEntry != nil else { return }
+    let clamped: TimeInterval = {
+      guard let duration = snapshot.duration, duration > 0 else {
+        return max(0, seconds)
+      }
+      return min(max(0, seconds), duration)
+    }()
+    player.playbackTime = clamped
+    refreshSnapshot()
+  }
+
   // MARK: Private
 
   /// F1a sequential-sub-queue state.

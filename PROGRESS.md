@@ -5,6 +5,140 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Grace note: scrub bar for play position
+
+Lands on `feature/grace-notes` (branched off
+`feature/up-next-queue`; first of three grace notes that will share a
+single combined PR). Replaces the read-only "elapsed / total" text in
+the now-playing bar with a draggable scrub bar in Music.app's compact
+shape: elapsed label · stock `Slider(.controlSize(.small))` · total
+label · existing prev/play/next.
+
+**Files added.**
+- `DJRoomba/Views/Player/ScrubBar.swift` (new) — single `View` struct
+  carrying two `@State` locals (`displayPosition`, `isDragging`) and
+  reading `MusicController` from `@Environment`. The dragging-vs-
+  snapshot dance is the only non-trivial bit: `Slider` binds to the
+  local `displayPosition`, and `.onChange(of: snapshot.elapsed)` only
+  copies the snapshot tick into `displayPosition` **when
+  `!isDragging`**. The 0.5 s now-playing tick can therefore never yank
+  the slider thumb out from under the user's cursor mid-drag. On
+  `Slider.onEditingChanged: false` (drag end, or single click on the
+  track) we call `controller.seek(to: displayPosition)` and drop the
+  drag flag so the next snapshot tick re-syncs cleanly. The elapsed
+  label tracks `displayPosition` while dragging (so the user sees the
+  *destination* time, not the still-playing source time). `M:SS`
+  format via the existing `TimeInterval.musicTimeText` (re-used, not
+  re-implemented).
+
+**Files changed.**
+- `DJRoomba/Music/PlaybackService.swift` — added
+  `func seek(to seconds: TimeInterval)`. Clamps to `[0, duration]`
+  (so a wild drag past the end can't write nonsense to
+  `player.playbackTime`), writes the assignment, calls
+  `refreshSnapshot()` immediately so the now-playing bar reflects
+  the new playhead within one tick. Idempotent w.r.t. engine state
+  — a seek while paused stays paused (`playbackTime =` is just an
+  assignment, not a transport call), a seek while playing stays
+  playing. No-ops with no `currentEntry`.
+- `DJRoomba/Music/MusicController.swift` — added `func seek(to:)`
+  thin passthrough so views call the controller (the single
+  transport facade), not `PlaybackService` directly. Synchronous +
+  non-throwing: assignment to `player.playbackTime` doesn't go
+  through MusicKit's async transport surface.
+- `DJRoomba/Views/Player/NowPlayingBar.swift` — replaced the
+  inline `Text("\(elapsed) / \(duration)")` with `ScrubBar()`. Net
+  -5 / +1 line.
+
+**Design choices.**
+- Inline strip (Music.app compact-window shape), NOT a tall second
+  row stacked above the transport. macos-design call: the existing
+  60 pt now-playing bar is the right height; adding a row would
+  feel heavy on a bottom dock. Slider lives in the middle of the
+  row, framed with `minWidth: 160, maxWidth: 320` so it expands
+  gracefully when the window is wide and never collapses below the
+  thumb-grabbable threshold.
+- Time labels use the project's established now-playing tokens
+  (`.caption2 + .monospacedDigit() + .secondary` — see
+  `plans/typography.md`). typography-designer call: differentiating
+  elapsed as primary would break the established token and the
+  slider thumb already provides the primary visual signal for
+  "where am I"; keep both labels symmetric.
+- swiftui-pro call: a single `@State var displayPosition: Double`
+  + `.onChange(of: snapshot.elapsed)` gate, **not** a
+  `Binding(get:set:)`. The `Binding(get:set:)` pattern is
+  explicitly flagged in the project's swiftui-pro data-flow
+  reference; `@State` + `onChange` is cleaner and easier to
+  maintain. The drag flag is the second `@State`.
+
+**Edge cases (live-verified).**
+- No song playing → `isScrubbable == false`, slider disabled, both
+  labels show `—:——` placeholder.
+- Duration unknown / zero → slider disabled, total label shows
+  `—:——`. Observed live during a chunk-swap transition where
+  `queue.currentEntry` was momentarily present but its item
+  carried no duration — the gate held and the slider stayed
+  disabled rather than rendering a nonsensical thumb.
+- Live scrub while paused → seek runs, engine stays paused; Play
+  resumes from the new position (verified `1:53` paused-drag →
+  `1:55` after a 2 s resume = clean continuation).
+
+**No new tests.** The reused helper (`musicTimeText`) is already
+covered; the drag gate is pure SwiftUI view state that would need a
+SwiftUI host to test meaningfully; the seek clamp is a one-line
+`min(max(...))` whose semantics are trivially obvious. toms-laws
+call: phase already at minimal complexity; no extractable pure
+unit worth shipping a test for.
+
+**Verification gates (all PASS).**
+- `make check` clean.
+- `swift test` **414/55** green (no regression).
+- `swiftformat --lint DJRoomba/ Tests/` clean (one
+  `organizeDeclarations` violation caught + auto-fixed during the
+  format pass; final state clean across all 195 files).
+- `swiftlint lint --strict DJRoomba/ Tests/` clean (0 violations,
+  195/195 files).
+- `make build` (signed Apple Development cert) clean.
+
+**Live computer-use verification (all 8 steps PASS).**
+1. Launched the signed build. Now-playing bar visible with scrub
+   bar between metadata and transport. Initial state: "Not
+   Playing", slider disabled, labels `—:——`.
+2. Clicked "Play" on Rob Crow Music playlist → "Proceed to Memory"
+   started. Scrub bar populated: `0:30 | thumb · slider · track |
+   3:51` with the prev/pause/next icons on the right.
+3. Screenshot of the polished now-playing bar saved to
+   `/tmp/grace-1-step-3.png`.
+4. **Click-to-seek**: clicked the slider track at ~75% position →
+   elapsed jumped `0:48 → 2:53` and the thumb moved to that
+   position. Same track, no jank.
+5. **Drag forward**: dragged thumb from x=980 to x=1200 → elapsed
+   went `0:31 → 3:43`. Slider followed the cursor cleanly.
+6. **Drag backward**: dragged from x=1150 to x=980 → elapsed went
+   `2:53 → 0:31`. Same clean behavior.
+7. **Pause + scrub + resume**: paused at `0:11` (Play button
+   visible) → dragged thumb forward to `1:53`, Play button stayed
+   (engine paused throughout) → clicked Play → resumed at `1:55`
+   (2 s of resume latency, then ticking forward normally).
+8. **No snap-back during drag**: held the mouse button down on the
+   thumb at x=1080 → moved to x=1200 → **waited 2 seconds with the
+   button held** (long enough for multiple 0.5 s snapshot ticks to
+   fire) → screenshot showed the thumb at x=1196 with label `3:34`,
+   exactly where the cursor was, no snap-back. Released → label
+   read `3:35` one second later (clean continuation from the
+   released position, no visible jump back).
+
+Final screenshot of the polished now-playing bar with a song
+mid-play saved to `/tmp/grace-1-final.png`.
+
+**App-quit confirmation.** `osascript -e 'tell app "DJRoomba" to
+quit'` → `pgrep -lf DJRoomba` returned empty.
+
+**Branch state.** `feature/grace-notes` carries one commit on top
+of `feature/up-next-queue`: "Grace note: scrub bar for play
+position". Pushed to origin. NO PR opened — grace note 3 will open
+the single combined PR after all three grace notes land.
+
 ## 2026-05-30 — Up Next queue — Phase 5: auto-fill on queue drain + Settings toggle (FEATURE COMPLETE)
 
 Phase 5 of `plans/up-next-queue.md` lands on `feature/up-next-queue`

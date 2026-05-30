@@ -29,11 +29,7 @@ struct NowPlayingBar: View {
 
       Spacer(minLength: 12)
 
-      if snapshot.hasContent {
-        Text("\(snapshot.elapsed.musicTimeText) / \(snapshot.duration?.musicTimeText ?? "—")")
-          .font(.caption2.monospacedDigit())
-          .foregroundStyle(.secondary)
-      }
+      ScrubBar()
 
       TransportControls()
     }
