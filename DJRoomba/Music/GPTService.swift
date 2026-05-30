@@ -239,9 +239,45 @@ final class GPTService {
           currentConversationID = mostRecent.name
         }
       }
+      // Pre-populate the visible transcript for whichever conversation
+      // the sidebar is pointing at — same SQLite store, no API key
+      // required, so the chat surface reflects the user's last state
+      // the moment the pane appears (without this, the transcript
+      // stays empty until they pick the conversation explicitly OR
+      // send a message that builds the session).
+      if let id = currentConversationID {
+        loadTranscriptFromDisk(contextName: id, store: contextStore)
+      }
     } catch {
       // First launch / file not yet created — sidebar stays empty,
       // which is the correct empty-state, not an error.
+    }
+  }
+
+  /// Read records for `contextName` directly out of the SQLite store
+  /// and project them into `messages`, bypassing the `ContextWindow`
+  /// session. Used in two places: at view-appear from
+  /// `loadConversationsFromDisk` (no API key needed), and as the fast
+  /// path inside `switchConversation` so a sidebar click updates the
+  /// transcript immediately even when `ensureSession()` would block
+  /// on a missing key or a transient build error. Quiet on every
+  /// error: leaves `messages` as a sensible empty list rather than
+  /// throwing into the UI.
+  func loadTranscriptFromDisk(contextName: String, store: SQLiteContextStore? = nil) {
+    do {
+      let contextStore: SQLiteContextStore
+      if let store {
+        contextStore = store
+      } else {
+        let url = try Self.contextStoreURL()
+        contextStore = try SQLiteContextStore(path: url.path)
+        try contextStore.initialize()
+      }
+      let context = try contextStore.getContext(name: contextName)
+      let records = try contextStore.listRecords(contextID: context.id)
+      messages = records.compactMap { Self.message(from: $0) }
+    } catch {
+      messages = []
     }
   }
 
@@ -332,27 +368,33 @@ final class GPTService {
   /// Switch the visible chat to `id` (a library context name). Reads
   /// the transcript from disk and updates `messages`.
   func switchConversation(to id: String) async {
-    guard id != currentConversationID else { return }
-    let session: Session
+    // Update the visible pointer + load the transcript directly out of
+    // SQLite right away. The previous code bailed when `id ==
+    // currentConversationID`, but on launch `loadConversationsFromDisk`
+    // sets `currentConversationID` from UserDefaults WITHOUT loading
+    // the transcript (the session is lazy), so clicking the "already
+    // selected" row in the sidebar did nothing — the chat stayed
+    // empty even though the conversation had content. The disk read
+    // is cheap and idempotent: re-clicking just re-reads the same
+    // records into `messages`.
+    currentConversationID = id
+    AssistantConversationStore.setCurrentContextName(id)
+    loadTranscriptFromDisk(contextName: id)
+    refreshConversations()
+
+    // Then build / switch the session for future sends. Skipping
+    // this when no API key is configured: the disk-load already
+    // surfaced the visible state; we just can't send into it yet.
+    guard isKeyConfigured else { return }
     do {
-      session = try await ensureSession()
-    } catch {
-      AssistantLog.logger.error("! switchConversation prereq: \(String(describing: error), privacy: .public)")
-      errorMessage = "\(error)"
-      return
-    }
-    do {
+      let session = try await ensureSession()
       try await session.window.switchContext(name: id)
       try await session.window.setSystemPrompt(Self.systemPrompt)
+      await refreshTranscript(window: session.window)
     } catch {
       AssistantLog.logger.error("! switchContext: \(String(describing: error), privacy: .public)")
       errorMessage = "\(error)"
-      return
     }
-    currentConversationID = id
-    AssistantConversationStore.setCurrentContextName(id)
-    await refreshTranscript(window: session.window)
-    refreshConversations()
   }
 
   /// Re-render the sidebar feed from the library + the title /

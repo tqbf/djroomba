@@ -5,6 +5,123 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Fix (round 2): tool-calls toggle still wedged on macOS 14
+
+User report: "I can see this clearly working here, but when I copy
+the binary over to my macOS 14 host, the checkbox still has the old
+bug." Round 1's `.id(showToolCalls)` invalidation worked on
+macOS 26 (SwiftUI 6) but not on macOS 14 (SwiftUI 5.4).
+
+**Diagnosis.** SwiftUI 5.4 has two distinct rough edges this view
+was tripping:
+1. `LazyVStack`'s child diff doesn't reliably drop rows that
+   disappear from its `ForEach` source — even with `.id(...)`
+   forcing a fresh parent identity, the lazy materialiser keeps
+   showing the cached children.
+2. `@AppStorage` invalidation buried in nested computed
+   view-properties (`paneHeader`, `transcript`, `visibleMessages`)
+   sometimes doesn't propagate to body — the parent body never
+   re-renders, so the LazyVStack never gets a new source array.
+
+**Fix.** Two complementary changes:
+
+- **`LazyVStack` → `VStack`** in the transcript. Eager rendering
+  bypasses the lazy diff bug entirely. The enclosing `ScrollView`
+  still virtualises bitmaps for off-screen rows, so the perf cost
+  is negligible at our transcript scale (worst case a few hundred
+  message rows, all cheap View structs). macOS 26 unaffected; the
+  change is neutral there.
+- **Body-level read of `showToolCalls`** at the top of
+  `AssistantPaneView.body` (`let _ = showToolCalls`). Hoists the
+  `@AppStorage` dependency to the body root so SwiftUI 5.4's
+  invalidation tracking captures it as a top-level dependency
+  instead of one buried four computed properties deep. Semantically
+  a no-op; SwiftUI just sees the read at a level where its diff
+  pipeline acts on it.
+
+Round 1's `.id(showToolCalls)` removed (redundant now that VStack
+re-renders fully).
+
+Live verified on dev (macOS 26): toggle still flips instantly both
+directions. macOS 14 verification pending the user's binary copy.
+
+## 2026-05-29 — Fix: "Show tool calls" toggle only applied after a conversation switch
+
+User report: "Clicking the checkbox does nothing immediately, but if
+i select a different conversation and then select back, the change
+is there."
+
+**Diagnosis.** `@AppStorage("djroomba.assistant.showToolCalls")`
+correctly updates UserDefaults when the toggle flips, but the
+`LazyVStack` inside the transcript was diffing against its old
+`ForEach` children without re-evaluating. SwiftUI's
+`@AppStorage` ⇄ Observation interop on this view didn't propagate
+the change down into the LazyVStack's child diff, so the
+transcript's rows kept rendering with the pre-toggle filter.
+Switching conversations changed `currentConversationID`, which
+rebuilt the LazyVStack's data shape and incidentally picked up the
+current `showToolCalls` value.
+
+**Fix.** Tie the LazyVStack's view identity to the toggle:
+
+```swift
+LazyVStack(...) {
+  ForEach(visibleMessages) { ... }
+}
+.id(showToolCalls)
+```
+
+Forces SwiftUI to rebuild the LazyVStack when the toggle flips —
+the new identity invalidates the cached diff and ForEach picks up
+`visibleMessages` filtered through the fresh `showToolCalls`
+value. The scroll re-anchor in the existing
+`.onChange(of: showToolCalls)` keeps the bottom of the chat at the
+bottom of the viewport.
+
+Live verified: toggle OFF immediately hides tool rows; toggle ON
+immediately reveals them. No conversation-switch round trip
+required.
+
+## 2026-05-29 — Fix: clicking a previous conversation doesn't load its transcript
+
+User report: "when I open up the app and click on a previous
+conversation, it is not loaded into the conversation view, even
+though I know it has associated content."
+
+**Cause.** Two layered issues:
+
+1. **Launch-state mismatch.** `loadConversationsFromDisk()` (called
+   from `AssistantPaneView.task` on appear) sets
+   `currentConversationID` from `UserDefaults` but never loads the
+   transcript — the session is lazy and only builds on first send.
+   So the chat surface shows the empty placeholder while the
+   sidebar highlights the "last used" conversation as if it were
+   active.
+2. **Bail-out guard.** `switchConversation(to:)` had
+   `guard id != currentConversationID else { return }`. The user
+   clicks the already-highlighted row hoping to load it — the
+   guard fires, nothing happens.
+
+**Fix.** Two complementary changes:
+
+- New `loadTranscriptFromDisk(contextName:store:)` reads records for
+  a context directly out of the `SQLiteContextStore` and projects
+  them through the existing `Self.message(from:)` mapper into
+  `messages`. No API key required, no `ContextWindow` needed.
+- `loadConversationsFromDisk` now calls it for the current
+  conversation, so the transcript appears on launch.
+- `switchConversation` drops the bail-out, sets the pointer +
+  loads from disk first (instant, no key required), then builds /
+  switches the session for future sends. When no key is configured
+  we skip the session entirely — disk-load already surfaced what's
+  there; we just can't send into it yet.
+
+Live verified on the signed/installed build: launching the app
+shows the prior conversation's full transcript ("Top 300 Most
+Played…", "Tell me how many tracks…", "Your GPT Mix playlist has 5
+tracks") immediately, with no clicks. Clicking the highlighted
+sidebar row also re-loads cleanly.
+
 ## 2026-05-29 — Fix: instant crash on macOS 14.4 (ArtworkProvider concurrency bound)
 
 User report: signed app on a second MacBook (macOS 14.4) crashed
