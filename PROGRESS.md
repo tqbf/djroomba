@@ -5,6 +5,46 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Grace note: Up Next auto-advances at end-of-track
+
+Second of the grace notes on `feature/grace-notes`. User report: "Playing
+from Up Next stops at the end of the track — I don't just roll to the
+next track, I have to hit Play again."
+
+**Cause.** Phase 1's playback-dominance hook keyed off the 0.5 s
+`detectAndRecordAdvance` tick, which triggers on `queueIndex` advance.
+A single-song `ApplicationMusicPlayer.Queue` never advances at natural
+end-of-song — the player stops or wraps without incrementing
+`queueIndex` — so the queue head was never popped. ⌘→ (user Next) worked
+because MusicKit synthesises a brief queueIndex bump before stopping;
+natural end-of-song doesn't.
+
+**Fix.** Extends the existing `currentEntry == nil` signal in
+`PlaybackService.refreshSnapshot` with a queue-emptied watermark
+(`previousPlaybackStatus`) and fires a new `onQueueEmptied` callback
+wired to `MusicController.dispatchUpNextIfNeeded` (Phase 1's existing
+single-flight-guarded "pop head + start" path). Same
+`upNextDispatchInFlight` guard reused, so the new trigger and the
+existing `skipNext` / chunk-swap triggers can't double-pop. The pure
+`shouldSignalQueueEmptied(...)` predicate is extracted to file-scope
+and unit-tested (`PlaybackServiceQueueEmptiedTests`, +8 tests / +1
+suite) covering the playbackTime-wrap edge case (~0.138 s residue
+seen live; threshold pinned at 0.5 s).
+
+**v1 limitation stands.** When the queue drains completely the player
+still stops — no restoration of the prior playlist context. That was
+called out in `plans/up-next-queue.md` §"Open / deferred" and is
+unchanged here. This fix only restores within-queue advance.
+
+`make check` clean · `swift test` 414/55 → **422/56** green · signed
+`make` clean. Computer-use verified: scrub-to-near-end on three queued
+tracks let two advance naturally and the third correctly land in the
+"queue empty, player stops" v1 state; ⌘→ regression check passed;
+scrub-bar grace note (commit `738ef9f`) unaffected.
+
+Commit `d68d855` on `feature/grace-notes`. No PR yet — the final grace
+note will open the combined PR.
+
 ## 2026-05-30 — Grace note: scrub bar for play position
 
 Lands on `feature/grace-notes` (branched off
