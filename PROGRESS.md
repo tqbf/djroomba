@@ -5,6 +5,39 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — Fix: "no such table: contexts" on a fresh assistant.sqlite
+
+**Branch `feature/dj-roomba-shared-pane`.** User report: opening the
+app on a second Mac (existing `library.sqlite`, no `assistant.sqlite`
+yet) surfaced `no such table: contexts`.
+
+- **Root cause.** `SQLiteContextStore.initialize()` is the vendored
+  library's `CREATE TABLE IF NOT EXISTS contexts / records /
+  context_tools` ladder. `ContextWindow.init` calls it, but
+  `GPTService` opens the store and reads from it via two paths that
+  run **before** the window is built:
+  - `loadConversationsFromDisk()` — called on `AssistantPaneView`
+    appear, calls `contextStore.listContexts()` directly.
+  - `ensureSession()` — calls `pickInitialContextName(in:)` which
+    also reads `listContexts()` before passing the store to
+    `ContextWindow.init`.
+  On a fresh `assistant.sqlite` the table doesn't exist yet; the
+  read errors out. `loadConversationsFromDisk` swallows it silently,
+  but `ensureSession`'s error surfaces in `errorMessage` and
+  renders as the red banner above the composer the next time the
+  user sends a message — matching the report.
+- **Fix.** Call `try contextStore.initialize()` explicitly in both
+  paths, right after constructing the store. `initialize()` is
+  `CREATE TABLE IF NOT EXISTS` end-to-end, so it's safe to run on
+  an already-initialised file. `ContextWindow.init` further down
+  still calls `initialize()` itself — the explicit call is
+  defence-in-depth for the read-before-window paths.
+- **Live verified.** Stashed the local
+  `~/Library/Containers/org.sockpuppet.djroomba/Data/Library/
+  Application Support/DJRoomba/assistant.sqlite`, reinstalled, and
+  opened the DJ Roomba tab: the sidebar shows the "No conversations
+  yet" empty state with no error banner. Restored the stash after.
+
 ## 2026-05-29 — "All Recently Played Tracks" sidebar landing row
 
 **Branch `feature/dj-roomba-shared-pane`.** Per user direction: a
