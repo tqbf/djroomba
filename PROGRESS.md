@@ -5,6 +5,140 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-29 — OpenAI GPT Phase 1 — persistent context + 7 tools + Assistant window + vendored patch
+
+**Branch `feature/openai-gpt-spike`** (still — never PR'd). The user
+asked for tool calls covering playlists / playlist contents / track
+genres / Apple Music search / recently played / playlist creation. That
+landed, plus the persistent `ContextWindow`, plus an Assistant window,
+plus a real fix for a multi-turn replay bug in the underlying library
+(see `plans/openai-gpt.md` for the full breakdown).
+
+- **`MusicController.gpt: GPTService`** — one canonical instance, built
+  in `MusicController.init` with the `LibraryStore` + `CatalogIngestService`
+  it needs. Settings → OpenAI and the Assistant window both bind to it
+  via `@Environment(MusicController.self)`.
+- **Persistent chat.** `GPTService` now holds a `SQLiteContextStore` at
+  `~/Library/Application Support/DJRoomba/assistant.sqlite` (separate
+  file from `library.sqlite`). Session built lazily on first send via
+  the canonical `LateBoundToolExecutor` → `OpenAIChatModel` → `ContextWindow`
+  → `executor.bind(window)` dance. System prompt set via
+  `setSystemPrompt` so re-launches reattach cleanly.
+- **Seven tools** registered in `DJRoomba/Music/GPTToolRegistration.swift`,
+  each a `JSONSchemaToolDefinition` + a `ClosureToolRunner` capturing the
+  `LibraryStore` value: `list_playlists` / `playlist_contents` /
+  `track_genres` / `search_apple_music` (does catalog search + ingest
+  in one tool so the returned ids slot straight into the next tool) /
+  `recently_played` / `create_playlist` / `add_tracks_to_playlist`
+  (refuses library playlists). Response sizes capped at 200 rows with
+  `truncated: true` past that.
+- **Assistant window** (⌥⌘\\, separate `Window` scene): transcript +
+  composer, role-iconified rows (user / assistant / tool), tool JSON
+  truncated to 320 chars in the view, error banner above the divider.
+- **Settings reshape.** The Phase-0 "Connection Test" section is gone;
+  the Assistant window IS the test. Settings → OpenAI keeps the API key
+  field + an "Open Assistant Window" button.
+- **Unified logging** under `subsystem = org.sockpuppet.djroomba`,
+  `category = openai`. `→ user`, `← assistant`, `→ tool`, `← tool`, `!`
+  all at `.info` (so they persist on disk and replay via `log show`,
+  not just `log stream`). `LoggedToolRunner` wraps every tool at
+  registration time so the per-tool boundary is uniform. The API key,
+  the full system prompt, and the un-truncated tool outputs are never
+  logged. `PLAN.md` → Observability documents the predicate and commands.
+- **`tqbf/contextwindow-swift` vendored + patched** at
+  `Vendor/contextwindow-swift` (mirroring the `Vendor/ForceGraph`
+  pattern). The Phase-0 spike used the remote `0.1.0` tag; live-running
+  a multi-turn conversation immediately hit
+  ```
+  OpenAI HTTP 400: Missing parameter 'tool_call_id': messages with role
+  'tool' must have a 'tool_call_id'.
+  ```
+  Root cause: `OpenAIChatModel.message(for:)` mapping `.toolOutput`
+  records to `ChatMessage(role: "tool", tool_call_id: nil, …)`. The
+  in-loop tool-call branch sets the id locally so the first turn
+  succeeds, but the next `cw.callModel()` reloads every live record and
+  re-runs the per-record mapper — and that path drops the id. `DJROOMBA
+  PATCH 1` (in `Vendor/contextwindow-swift/Sources/ContextWindowOpenAI/
+  OpenAIChatModel.swift`) adds `Self.messages(from:)`, a sequential
+  walker that pairs each `.toolOutput` with its preceding `.toolCall` and
+  emits the same synthetic `call_<recordID>` on both sides. Adjacency
+  is sufficient — the in-loop persistence path always writes a
+  `.toolCall` immediately followed by its `.toolOutput`. `Package.swift`
+  switched to `.package(path: "Vendor/contextwindow-swift")`; the
+  remote dep is gone. The legacy `message(for:)` is preserved for
+  callers that still want it.
+- **Verification.** `swift build` clean, `swiftformat --lint` clean,
+  `swiftlint --strict` clean, signed `make build` clean. Two-turn live
+  exercise on the real library through the patched library, replayed
+  from `log show`:
+  ```
+  → user: Create a playlist called "GPT Mix" and add my 5 most recently played tracks…
+  → tool recently_played args={"limit":5}
+  ← tool recently_played out={"tracks":[…5 rows…]}
+  → tool create_playlist args={"name":"GPT Mix"}
+  ← tool create_playlist out={"id":"889EAED8-…","name":"GPT Mix"}
+  → tool add_tracks_to_playlist args={"playlistId":"889EAED8-…","trackIds":[…]}
+  ← tool add_tracks_to_playlist out={"added":5,"playlistId":"889EAED8-…"}
+  ← assistant: I created the playlist "GPT Mix" and added your 5 most recently played tracks…
+  → user: What's actually in that GPT Mix playlist now? Just the song titles.
+  → tool playlist_contents args={"playlistId":"889EAED8-…"}
+  ← tool playlist_contents out={"playlistId":"889EAED8-…","source":"app","tracks":[…]}
+  ← assistant: - Dancing Queen / - This Is a Low / - '12 I Won`t Back Down' / - '02 Breakdown' / - Running Up That Hill (A Deal With God)
+  ```
+  The sidebar reflects the new "GPT Mix · 5 tracks" playlist; the
+  second turn (the one that previously failed) now replays cleanly.
+
+## 2026-05-29 — OpenAI GPT Phase 0 — feature spike landed
+
+**Branch `feature/openai-gpt-spike`.** Smallest end-to-end proof that the
+app can talk to a GPT model: a Keychain-backed API key + a Settings pane
+that sends one message and shows the reply. New workstream, separate from
+the music functionality; ground-laying for tool-call wiring later. See
+[`plans/openai-gpt.md`](plans/openai-gpt.md) for the full phase plan.
+
+- **Dependency.** Added `tqbf/contextwindow-swift` pinned at `0.1.0` —
+  products `ContextWindow` + `ContextWindowOpenAI`. Only transitive dep is
+  GRDB, which we already pull in (library floors it at 7.10.0, compatible
+  with our existing `from: 7.0.0`).
+- **"Signin" reality.** OpenAI does **not** offer an OAuth → API-key flow
+  for a native desktop app; keys are minted by hand at
+  platform.openai.com. The honest equivalent is paste-once into Keychain,
+  and the pane's footer says exactly that.
+- **New files.**
+  - `DJRoomba/Support/KeychainItem.swift` — `Sendable` value
+    (`service`/`account`) wrapping `SecItemCopyMatching` /
+    `SecItemUpdate` / `SecItemAdd` / `SecItemDelete` for one
+    generic-password item, `kSecAttrAccessibleWhenUnlocked`. Sandboxed
+    apps get a default keychain access group keyed to the
+    application-identifier — no `keychain-access-groups` entitlement
+    required.
+  - `DJRoomba/Music/GPTService.swift` — `@MainActor @Observable`
+    matching the project's state rules. `send(prompt:)` builds an
+    `OpenAIChatModel(model: "gpt-4.1-mini", apiKey: …)` and `await`s
+    `model.call([Record])` with one `.prompt` record. The model's
+    `call(_:)` is non-isolated, so the network I/O hops off the
+    `MainActor` and the result republishes back; no Tasks-on-Tasks
+    gymnastics. No `ContextWindow` / SQLite context store yet — the
+    spike doesn't need persistence.
+  - `DJRoomba/Views/Settings/OpenAISettingsPane.swift` — new **OpenAI**
+    tab in the existing tabbed `Settings` scene (alongside **Advanced**).
+    Two `Form` `Section`s: API Key (`SecureField` + Save when empty;
+    `Label` + Remove once stored) and Connection Test (prompt prefilled
+    `"Hi"`, `Send`, response area, error label). Owns its own
+    `GPTService` via `@State` — `Settings` doesn't get the
+    `MusicController` environment, matching `GenreAnalysisAdvancedPane`'s
+    self-contained pattern. `SettingsView` frame bumped `520 × 320` →
+    `520 × 440` to comfortably show a response.
+- **No entitlement change.** `com.apple.security.network.client` was
+  already present (MusicKit / artwork). Keychain in a sandboxed app
+  needs no extra entitlement.
+- **Verification.** `swift build`, `swiftformat --lint`, `swiftlint
+  --strict`, signed `make build` all clean. Live round-trip confirmed on
+  the real app via computer-use: opened **Settings → OpenAI**, pasted a
+  real key, clicked **Send** with the prefilled `"Hi"`, saw GPT's reply
+  render in the Response area (user-confirmed). Disabled-state logic also
+  observed live — **Save Key** stays disabled until something is typed,
+  and **Send** stays disabled until a key is configured.
 ## 2026-05-22 — Detail-header Play button reflects + toggles play state
 
 **Branch context:** on `main` (working tree; not committed). User report: the
