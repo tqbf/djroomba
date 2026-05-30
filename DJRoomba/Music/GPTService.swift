@@ -45,6 +45,45 @@ final class GPTService {
 
   // MARK: Internal
 
+  /// Per-turn reasoning-effort override for the chat model.
+  ///
+  /// Maps 1:1 to OpenAI's `reasoning_effort` wire values (DJROOMBA
+  /// PATCH 3 in `OpenAIChatModel`). `.default` aliases `.medium` —
+  /// the server default — and is special-cased to OMIT the wire
+  /// field entirely so a default-effort turn produces the cleanest
+  /// possible request body (and avoids implying intent the user
+  /// didn't express). Higher = slower + more deliberate.
+  enum ReasoningEffort: String, CaseIterable, Sendable {
+    case minimal
+    case low
+    case medium
+    case high
+
+    // MARK: Internal
+
+    /// Alias for the user-visible "default" state — sends nothing on
+    /// the wire and lets the server pick (medium).
+    static let `default` = ReasoningEffort.medium
+
+    /// Wire representation for `OpenAIChatModel.reasoningEffort`.
+    /// `.default` returns `nil` so the field is omitted from the
+    /// request body entirely; non-default values send their literal
+    /// raw string.
+    var wireValue: String? {
+      self == .default ? nil : rawValue
+    }
+
+    /// Compact label for the segmented picker chrome.
+    var shortLabel: String {
+      switch self {
+      case .minimal: "Min"
+      case .low: "Low"
+      case .medium: "Med"
+      case .high: "High"
+      }
+    }
+  }
+
   /// One rendered turn in the chat transcript.
   struct Message: Identifiable, Equatable, Sendable {
     enum Role: Sendable, Equatable {
@@ -102,6 +141,16 @@ final class GPTService {
     I'm likely to want next, then add 11 tracks via `up_next_add` \
     in a single call. Don't ask follow-up questions — just queue them.
     """
+
+  /// Per-turn reasoning effort override for the chat model. Drives
+  /// OpenAI's `reasoning_effort` request field on gpt-5.x (DJROOMBA
+  /// PATCH 3). The assistant pane's segmented picker writes here
+  /// before each `sendMessage`; the turn body applies the value to
+  /// `chatModel.reasoningEffort` and unconditionally resets this
+  /// property back to `.default` in `defer` so cancellations and
+  /// errors snap back too. `.default` ⇒ omit the wire field
+  /// entirely, server default (medium) applies.
+  var pendingReasoningEffort = ReasoningEffort.default
 
   /// Whether an API key is stored in the Keychain.
   private(set) var isKeyConfigured: Bool
@@ -191,14 +240,28 @@ final class GPTService {
 
     AssistantLog.logger.info("→ user: \(AssistantLog.truncate(trimmed), privacy: .public)")
 
+    // DJROOMBA PATCH 3 wiring: snapshot the user's pending choice so the
+    // turn body can apply it independently of any later mutation; the
+    // `defer` snap-back fires on success, cancel, AND throw so the
+    // segmented picker always returns to its default position after the
+    // turn settles. Snap-back happens BEFORE `isSending` flips false so
+    // the UI sees the reset and the spinner disappear in one frame.
+    let effortForTurn = pendingReasoningEffort
     let turn = Task { @MainActor [weak self] in
       guard let self else { return }
       defer {
+        self.pendingReasoningEffort = .default
         self.isSending = false
         self.inFlightTurn = nil
       }
       do {
         let session = try await ensureSession()
+        // Apply the per-turn effort to the shared chat model right
+        // before driving the loop. The model is a value-typed `var`
+        // on `OpenAIChatModel`; we're on the main actor and so are
+        // any other writers (`@MainActor`-isolated `GPTService`), so
+        // no separate synchronisation is needed.
+        session.chatModel.reasoningEffort = effortForTurn.wireValue
         try Task.checkCancellation()
         try await session.window.addPrompt(trimmed)
         // Optimistic refresh so the user sees their own message immediately.
@@ -411,6 +474,12 @@ final class GPTService {
       defer { self?.autoFillTask = nil }
       guard let self else { return }
       await newConversation()
+      // Auto-fill should never inherit whatever per-turn effort the
+      // user had pending on the chat surface — it's a background
+      // refill, not a user turn. Force `.default` for the duration
+      // of the seed send; `sendMessage`'s own `defer` will also reset
+      // afterwards, which is fine (idempotent).
+      pendingReasoningEffort = .default
       await sendMessage(Self.autoFillSeed)
     }
   }
@@ -527,6 +596,11 @@ final class GPTService {
     let window: ContextWindow
     let executor: LateBoundToolExecutor
     let contextStore: SQLiteContextStore
+    /// Held so per-turn mutations (`reasoningEffort`) land on the same
+    /// instance the `ContextWindow` is driving — re-instantiating
+    /// would require also re-binding through `ContextWindow`'s
+    /// `Model`-typed init parameter, which we don't expose.
+    let chatModel: OpenAIChatModel
   }
 
   /// The chat model. Bumped from `gpt-4.1-mini` to `gpt-5.4` on
@@ -719,7 +793,12 @@ final class GPTService {
       try await window.registerTool(tool)
     }
 
-    let session = Session(window: window, executor: executor, contextStore: contextStore)
+    let session = Session(
+      window: window,
+      executor: executor,
+      contextStore: contextStore,
+      chatModel: model,
+    )
     self.session = session
     currentConversationID = initialContextName
     AssistantConversationStore.setCurrentContextName(initialContextName)

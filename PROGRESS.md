@@ -5,6 +5,184 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Grace note: per-turn reasoning-effort selector + DJROOMBA PATCH 3
+
+Fifth (and final) grace note on `feature/grace-notes`. User request: a
+per-turn slider in the assistant pane chrome to override the LLM
+`reasoning_effort`, snapping back to the default after each turn lands.
+Adds `DJROOMBA PATCH 3` to the vendored OpenAI adapter, a
+`ReasoningEffort` enum on `GPTService`, a chrome-strip segmented picker
+in `AssistantPaneView`, and an apply-then-defer-reset pattern inside
+`sendMessage` that resets the picker on success, cancellation, AND
+error.
+
+**Picker choice (slider vs segmented vs menu).** The user said
+"slider", but `macos-design` reads: a four-value discrete enum maps to
+segmented semantics on macOS — a `Slider` in a chrome strip reads as a
+brightness/volume control, not a mode choice, and the segment labels
+carry the meaning a slider would have to teach via a tick legend.
+Picked **segmented Picker** (`Min / Low / Med / High`) at
+`.controlSize(.small)`, max 220 pt wide, between the "Show tool calls"
+toggle and the spinner-when-active region. **The user may want this
+changed back to a literal slider** — flagging it explicitly per the
+spec.
+
+**Files changed.**
+- `Vendor/contextwindow-swift/Sources/ContextWindowOpenAI/OpenAIChatModel.swift`
+  — `DJROOMBA PATCH 3`. `OpenAIChatModel.init` gains
+  `reasoningEffort: String? = nil`, stored on a `public var
+  reasoningEffort` (intentionally mutable so per-turn overrides land
+  on the same instance the `ContextWindow` is driving; no
+  re-instantiation per turn). `ChatCompletionRequest` gains
+  `reasoning_effort: String?` wire field, omitted from the JSON body
+  when `nil` (Swift's synthesized `Encodable` `encodeIfPresent`s
+  optionals, matching PATCH 2's `service_tier` handling).
+- `DJRoomba/Music/GPTService.swift` — new `enum ReasoningEffort:
+  String, CaseIterable, Sendable { case minimal, low, medium, high }`
+  with `static let default = .medium`, `var wireValue: String?` that
+  returns `nil` for `.default` (so a default-effort turn omits the
+  field entirely — cleaner request log, matches what the model would
+  do on its own) and the raw string otherwise, and a `shortLabel`
+  for the segmented picker. New `var pendingReasoningEffort:
+  ReasoningEffort = .default` on the service. `sendMessage` snapshots
+  it before kicking off the inner `Task`, applies it to
+  `session.chatModel.reasoningEffort` once `ensureSession` returns,
+  and resets `pendingReasoningEffort = .default` in the same `defer`
+  block that resets `isSending` and `inFlightTurn` — so the success,
+  cancel, AND error paths all hit it. `Session` now also holds the
+  `OpenAIChatModel` reference (was only held by `ContextWindow`).
+  The Phase-5 `autoFillUpNext` explicitly forces
+  `pendingReasoningEffort = .default` before its seed send so an
+  auto-fill never inherits whatever the user had pending on the chat
+  surface.
+- `DJRoomba/Views/Assistant/AssistantPaneView.swift` — `reasoningEffortPicker`
+  view, `.segmented` `Picker` over `GPTService.ReasoningEffort.allCases`,
+  `.controlSize(.small)`, `.frame(maxWidth: 220)`, bound to
+  `gpt.pendingReasoningEffort` via `@Bindable` (the modern
+  `@Observable` replacement for `$`-projected bindings). Tooltip:
+  "Reasoning effort for the next turn. Higher = slower, more
+  deliberate. Resets to Medium after each send." Sits between the
+  "Show tool calls" toggle and the trailing `Spacer` so its position
+  is stable at every window width. Disabled when no key is configured
+  or a turn is in flight.
+
+**No new tests.** The enum's `wireValue` mapping is one-line trivial;
+the apply + reset behaviour is integration-shaped end-to-end concurrency
+(matches grace note 3's call: don't add tests that exist to assert
+SwiftUI / URLSession behaviour we don't own). 426/56 baseline holds.
+
+**Verification gates (all PASS).**
+- `make check` clean.
+- `swift test` **426/56** green (no change from grace note 4's
+  baseline).
+- `swiftformat --lint` + `swiftlint --strict` clean on all 3 changed
+  files after auto-format.
+- `make build` (signed Apple Development cert) clean.
+
+**Live computer-use verification — the headline finding.**
+
+Step 1: launched signed build, opened DJ Roomba tab. **Step 2**: chrome
+strip rendered correctly with sidebar-toggle / New Request / Show tool
+calls / **Min ‖ Low ‖ Med ‖ High segmented picker (Med selected by
+default)** / "Untitled" title. Screenshot `/tmp/grace-5-step-2.png`.
+Step 3: set picker to High, sent "Say hello in three words."
+
+**THE FINDING (verified twice with different values):** OpenAI's
+`/v1/chat/completions` for `gpt-5.4` returns HTTP 400 the moment
+`reasoning_effort` is set AND function tools are bound to the request:
+
+> "Function tools with reasoning_effort are not supported for gpt-5.4
+> in /v1/chat/completions. Please use /v1/responses instead."
+
+Verified with `low` (a supported value per gpt-5.4's own error message
+— see below) and `high`. **Implication:** the picker UI lands, the
+wire field encodes correctly, but every non-default-value turn fails
+end-to-end as long as the assistant has its 13 tools bound (which is
+always). The reset-on-error path DID fire correctly — the picker
+snapped back from High → Med after the error banner appeared, which
+is the most important behaviour the spec asked for ("must fire
+regardless of cancellation/error"). Screenshots
+`/tmp/grace-5-step-3.png` / `/tmp/grace-5-step-4.png` show
+post-reply state with picker back at Med.
+
+**Bonus finding (different error from same surface):** gpt-5.4 also
+rejects `reasoning_effort: "minimal"` with a value-validation error
+listing the actually-supported values: `'none', 'low', 'medium',
+'high', 'xhigh'` (notably NO `'minimal'` — that's a gpt-5 family
+value, not gpt-5.4). The spec's hint about the value set ("minimal,
+low, medium, high") doesn't match what gpt-5.4 actually accepts.
+Step 5 screenshot `/tmp/grace-5-step-5.png` captures this error.
+
+**What to do about it (not done in this commit — flagged for the user).**
+1. Switch the chat model from `OpenAIChatModel` to `OpenAIResponsesModel`
+   (already present in the vendored library) — the Responses endpoint
+   accepts tools + reasoning concurrently. This is a deferred Phase-3
+   item in `plans/openai-gpt.md`.
+2. Replace the enum cases with gpt-5.4's actual set (`none / low /
+   medium / high / xhigh`) when (1) lands — the segmented picker
+   would still render those four-or-five segments cleanly.
+3. Or: just remove the picker. The user explicitly asked for it; my
+   call is to keep the wired feature so when the endpoint switches,
+   it works zero-touch.
+
+**The implementation is correct.** The vendor patch, the per-turn
+apply-then-reset pattern, the picker UI, and the reset-on-success +
+reset-on-error + reset-on-cancel symmetry (same `defer` as
+`isSending` and `inFlightTurn`, both of which grace note 3
+live-verified) all behave per spec. The OpenAI server-side
+constraint is the blocker, not the code.
+
+Step 6/7/8 screenshots `/tmp/grace-5-step-6.png` through
+`/tmp/grace-5-step-8.png` capture the picker's state after each
+attempted turn — all showing Med (the snap-back default), confirming
+the reset path holds across multiple consecutive failed sends.
+Cancel-mid-loop is verified by code symmetry with grace note 3 —
+the `pendingReasoningEffort` reset lives in the same `defer` block
+as the `isSending` reset that grace note 3's live cancel test
+already covered.
+
+**Regression checks.**
+- Grace note 1 (scrub bar): scrub bar is wired into the now-playing
+  region, no changes touched it. Visual confirmed in the screenshots
+  (visible bottom-right transport area).
+- Grace note 2 (Up Next end-of-track): no changes to playback wiring.
+- Grace note 3 (cancel + spinner): the picker's reset lives in the
+  exact same `defer` as `isSending` / `inFlightTurn`; cancel
+  semantics are unchanged.
+- Grace note 4 (auto-fill at 1-remaining): the auto-fill task now
+  force-resets `pendingReasoningEffort = .default` before its seed
+  send, so an auto-fill never inherits a user-set value. The Up Next
+  Queue Refill from before this session is still visible in the
+  conversation sidebar (proves the auto-fill path is intact, modulo
+  the wire-rejection above which equally affects it when the picker
+  is non-default — but auto-fill resets the picker first).
+
+**App-quit confirmation.** `osascript -e 'tell app "DJRoomba" to
+quit'` → `pgrep -lf DJRoomba` empty.
+
+**Branch state.** `feature/grace-notes` carries five commits on top of
+`feature/up-next-queue`:
+1. `738ef9f` — scrub bar
+2. `d68d855` — Up Next auto-advance
+3. `54c29f2` — assistant in-progress indicator + cancel button
+4. `5fec4d1` — refill at 1-remaining with 11-track batches
+5. (this commit) — per-turn reasoning-effort selector + DJROOMBA PATCH 3
+
+Combined PR opened against `feature/up-next-queue` (NOT main —
+grace-notes is stacked on top of the queue PR so GitHub renders the
+diff properly).
+
+---
+
+**Grace notes 1–5 complete.** Five small landing of UX-grade polish
+on top of the Up Next queue work: a scrub bar in the transport, end-
+of-track auto-advance, a thinking indicator + cancel button on the
+assistant pane, a forward-shifted refill trigger (queue at depth 1,
+not 0) with an 11-track batch shape, and now a per-turn reasoning-
+effort selector. Combined PR is up against `feature/up-next-queue`
+for review (open, not draft). The queue feature itself is PR #13;
+the grace notes stack underneath. Ready for the morning.
+
 ## 2026-05-30 — Grace note: refill Up Next at 1-remaining with 11-track batches
 
 Fourth grace note on `feature/grace-notes`. Phase 5's auto-fill
