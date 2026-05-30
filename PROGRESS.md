@@ -5,6 +5,172 @@
 > is the live risk register. Newest status on top.
 > Open-issue index: `PROBLEMS.md`.
 
+## 2026-05-30 — Grace note: assistant in-progress indicator + cancel button
+
+Third of the grace notes on `feature/grace-notes`. User report: "While
+DJ Roomba is thinking the pane is silent — no indicator, no escape
+hatch. On `gpt-5.4` + `flex` a turn can sit for 20-60 s and I have no
+way to bail."
+
+**Cause.** `GPTService.isSending` was observable but only surfaced
+inside the composer's send button (spinner inside the arrow-up).
+Nothing in the pane chrome announced "turn in progress"; no UI ever
+called `Task.cancel()` on the in-flight model loop. The model loop
+itself was kicked off by the view's `Task { await gpt.sendMessage(text) }`
+— a fire-and-forget unstructured task the service didn't hold a handle
+to.
+
+**Fix.**
+- `GPTService.sendMessage(_:)` now wraps the model-loop body in a
+  service-owned `Task<Void, Never>` stored on
+  `private var inFlightTurn`. The outer `sendMessage` coroutine
+  awaits `turn.value` so callers (the view's `Task { … }`) still
+  block until the turn finishes, but the wrapped inner task is the
+  cancellation target. Three `Task.checkCancellation()` checkpoints
+  bracket the three suspension points inside the loop body
+  (`ensureSession` / `addPrompt` / `callModel`) so a cancel between
+  hops lands without paying for the next round-trip.
+- `func cancelTurn()` (`@MainActor`) calls `inFlightTurn?.cancel()`
+  and clears the handle. Swift structured concurrency propagates the
+  cancellation through `ContextWindow.callModel()` — the cancel lands
+  at the next suspension point (the in-flight URLSession await, or a
+  tool-call dispatch). The HTTP request may complete on the server
+  side; we just stop waiting on it.
+- On cancellation the turn body appends a synthetic `.assistant` row
+  ("Turn cancelled.") via `appendCancelledMarker()`. Synthetic ids
+  are negative (epoch microseconds × -1) so they never collide with
+  SQLite-minted positive record ids; the marker is in-memory only —
+  the next `refreshTranscript` (or session reload) drops it, which
+  is the intended ephemerality. The cancel branch catches both
+  `CancellationError` and `Task.isCancelled` post-throw so an URLSession
+  cancellation that surfaces as a transport error also routes to the
+  marker path, not the red error banner.
+- `defer { isSending = false; inFlightTurn = nil }` inside the inner
+  task body guarantees state cleanup on every exit path (success,
+  cancel, throw).
+
+**View.** `AssistantPaneView.paneHeader` grew one conditional `HStack`
+sitting to the left of the conversation title:
+- Stock `ProgressView().controlSize(.small)` indeterminate spinner.
+- "Thinking…" caption-font / secondary-foreground label.
+- Borderless "Cancel" button wired to `gpt.cancelTurn()`.
+
+The group only exists in the view tree when `gpt.isSending == true` —
+no `.opacity(0)` placeholder. The header gains a `.frame(minHeight: 28)`
+so the divider below it doesn't jump as the spinner appears /
+disappears (the borderless buttons are ~22 pt, the spinner row is
+~18 pt, so 28 covers the taller of the two with breathing room).
+`.animation(.easeInOut(duration: 0.12), value: gpt.isSending)` smooths
+the transition.
+
+**Cancellation propagation latency — observed live.** Click-to-marker
+latency was ~2 s on the `gpt-5.4` + `flex` queue. The cancellation
+lands at the **next suspension point** — for a queued flex request
+that's whenever `URLSession`'s async data task next yields (or the
+server-side response arrives), not immediately on click. For a tool
+loop already mid-iteration the next checkpoint can come within
+hundreds of milliseconds. The marker only commits AFTER the inner
+task's `catch is CancellationError` runs, so the user sees the
+"Turn cancelled." row as confirmation. **NOT immediate** is the
+right user-mental-model — the docstring on `cancelTurn` says so.
+
+**Files changed.**
+- `DJRoomba/Music/GPTService.swift` — `+74 / -16`. `inFlightTurn`,
+  `cancelTurn`, refactored `sendMessage`, `appendCancelledMarker`.
+- `DJRoomba/Views/Assistant/AssistantPaneView.swift` — `+23 / -0`.
+  Spinner + label + Cancel button in the chrome strip; stable
+  minHeight on the header HStack.
+
+**No new tests.** The cancellation glue is end-to-end concurrency
+behaviour — it needs a fake `ContextWindow` + fake transport to test
+meaningfully, and the existing `LiveOpenAITests` are skip-by-default
+opt-in suites. The pure logic added is one one-liner negative-id
+generation (`-Int64(Date().timeIntervalSince1970 * 1_000_000)`),
+which doesn't deserve a unit. Live-verified the propagation end-to-end
+via computer-use (next paragraph). toms-laws call: don't add a test
+that exists only to assert SwiftUI / URLSession behaviour we don't
+own.
+
+**Verification gates (all PASS).**
+- `make check` clean.
+- `swift test` **422/56** green (no regression vs. grace note 2's
+  baseline).
+- `swiftformat --lint DJRoomba/ Tests/` clean on the two changed files
+  (one unrelated pre-existing `PlaybackService.swift` `organizeDeclarations`
+  violation predates this branch — `git stash` baseline check
+  confirmed; not touched here).
+- `swiftlint lint --strict` clean on the two changed files (0
+  violations).
+- `make build` (signed Apple Development cert) clean.
+
+**Live computer-use verification (all 9 steps PASS).**
+1. Launched signed build. Bottom dock → DJ Roomba tab → assistant
+   pane visible.
+2. Typed "List all my playlists, then for each one count its tracks."
+   → sent.
+3. Spinner + "Thinking…" + Cancel button appeared in the pane chrome
+   at the moment `isSending` flipped. Screenshot `/tmp/grace-3-step-3.png`.
+4. (Side observation, not a verification step) — the model decided to
+   answer "I have 270 playlists, do you want the SQL path?" instead
+   of looping; turn completed cleanly and the indicator group
+   disappeared on its own as `isSending` flipped back. Tried a more
+   tool-heavy variant ("for each of the first 15 playlists call
+   playlist_contents one at a time…") — that hit the 8-round-trip
+   cap, surfaced the cap error in the red banner, and the indicator
+   disappeared cleanly. Both the success-finish and the error-finish
+   paths land in the indicator-off state.
+5. Sent "Write me a 2000 word essay about jazz music history. Take
+   your time." → spinner + Cancel appeared.
+6. Clicked Cancel at +3s. Within ~2 s the spinner / Cancel disappeared
+   from the chrome, a "DJ Roomba: Turn cancelled." synthetic row
+   appeared in the transcript, and the composer input was re-enabled.
+   Screenshot `/tmp/grace-3-step-6.png`. Cancellation latency =
+   next-suspension-point, NOT immediate; observed ~2 s on the flex
+   tier waiting on the initial URLSession yield.
+7. Typed "Just say hello." and sent → fresh turn ran normally,
+   replied "Hello!" The cancelled marker disappeared (negative-id,
+   in-memory only, dropped at the next transcript refresh — intended
+   ephemerality). Screenshot `/tmp/grace-3-step-7.png`.
+8. **Regression** — clicked the "Show tool calls" checkbox → unchecked
+   correctly, transcript filter applied (no tool rows to hide in this
+   conversation, but the toggle state flipped without sticking, same
+   as commit `b51dc53`'s fix).
+9. **Regression** — Up Next: right-clicked "Proceed to Memory" in Rob
+   Crow Music → "Add to Up Next" → Up Next landing row shows count 1
+   and the track appears. Phase 1-5 Up Next still works. Cleared
+   queue via the Clear-with-confirm dialog. The natural end-of-track
+   advance from grace note 2 wasn't exercised in this round (would
+   require a 3:51 wait); the queue-mutation hook is the same code
+   path that grace note 2 verified, so this is a regression check by
+   proxy.
+
+**App-quit confirmation.** `osascript -e 'tell app "DJRoomba" to quit'`
+→ `pgrep -lf DJRoomba` returned empty.
+
+**Branch state.** `feature/grace-notes` carries three commits on top
+of `feature/up-next-queue`:
+1. `738ef9f` — scrub bar
+2. `d68d855` — Up Next auto-advance
+3. (this commit) — assistant in-progress indicator + cancel button
+
+Pushed to origin. NO PR opened — grace notes 4 + 5 still to land
+before the combined PR.
+
+**toms-laws insights to note (NOT acted on — going into DESIGN-TODO).**
+- The negative-id synthetic-marker pattern works but is a one-off; if
+  we ever want a persistent "this turn was cancelled" trace in
+  `assistant.sqlite`, we'd want a proper `.system` Record source
+  upstream rather than a magic negative-id local row. Today the
+  ephemerality is the right call (the cancel is a transient user
+  intent, not chat history worth keeping).
+- Three explicit `Task.checkCancellation()` calls is slightly
+  defensive — Swift's structured concurrency would propagate the
+  cancel through the awaits anyway, the explicit calls just ensure
+  we don't enter the next phase after a cancel landed during a prior
+  one. Acceptable cost (six lines, no runtime overhead on the happy
+  path); flagged as a "could be removed if the vendor library adopts
+  explicit cooperative cancellation checkpoints" item.
+
 ## 2026-05-30 — Grace note: Up Next auto-advances at end-of-track
 
 Second of the grace notes on `feature/grace-notes`. User report: "Playing

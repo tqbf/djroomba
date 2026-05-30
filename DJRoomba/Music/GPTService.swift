@@ -172,35 +172,79 @@ final class GPTService {
   /// Append `text` to the conversation and drive `callModel()`. Tool
   /// calls fire inside the model's loop and are persisted as records;
   /// the transcript refresh at the tail surfaces everything.
+  ///
+  /// Cancellable: the actual model loop runs inside `inFlightTurn` so
+  /// `cancelTurn()` can drop the wait via Swift structured concurrency.
+  /// `Task.checkCancellation()` lands at the next suspension inside the
+  /// `ContextWindow.callModel()` loop (HTTP request, tool-call dispatch,
+  /// or the loop's own `await`s). The in-flight HTTP request may
+  /// complete on the server side after we cancel — we just stop waiting
+  /// on it and surface a synthetic "Turn cancelled." row in the
+  /// transcript so the user sees what happened.
   func sendMessage(_ text: String) async {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
+    guard inFlightTurn == nil else { return }
 
     isSending = true
     errorMessage = nil
-    defer { isSending = false }
 
     AssistantLog.logger.info("→ user: \(AssistantLog.truncate(trimmed), privacy: .public)")
 
-    do {
-      let session = try await ensureSession()
-      try await session.window.addPrompt(trimmed)
-      // Optimistic refresh so the user sees their own message immediately.
-      await refreshTranscript(window: session.window)
-      let reply = try await session.window.callModel()
-      AssistantLog.logger.info("← assistant: \(AssistantLog.truncate(reply), privacy: .public)")
-      await refreshTranscript(window: session.window)
-      if let currentID = currentConversationID {
-        AssistantConversationStore.setLastActivity(.now, for: currentID)
+    let turn = Task { @MainActor [weak self] in
+      guard let self else { return }
+      defer {
+        self.isSending = false
+        self.inFlightTurn = nil
       }
-      refreshConversations()
-    } catch {
-      AssistantLog.logger.error("! send failed: \(String(describing: error), privacy: .public)")
-      errorMessage = "\(error)"
-      if let session {
+      do {
+        let session = try await ensureSession()
+        try Task.checkCancellation()
+        try await session.window.addPrompt(trimmed)
+        // Optimistic refresh so the user sees their own message immediately.
         await refreshTranscript(window: session.window)
+        try Task.checkCancellation()
+        let reply = try await session.window.callModel()
+        try Task.checkCancellation()
+        AssistantLog.logger.info("← assistant: \(AssistantLog.truncate(reply), privacy: .public)")
+        await refreshTranscript(window: session.window)
+        if let currentID = currentConversationID {
+          AssistantConversationStore.setLastActivity(.now, for: currentID)
+        }
+        refreshConversations()
+      } catch is CancellationError {
+        AssistantLog.logger.info("✕ turn cancelled by user")
+        appendCancelledMarker()
+      } catch {
+        if Task.isCancelled {
+          AssistantLog.logger.info("✕ turn cancelled by user (post-throw)")
+          appendCancelledMarker()
+        } else {
+          AssistantLog.logger.error("! send failed: \(String(describing: error), privacy: .public)")
+          errorMessage = "\(error)"
+          if let session {
+            await refreshTranscript(window: session.window)
+          }
+        }
       }
     }
+    inFlightTurn = turn
+    await turn.value
+  }
+
+  /// Cancel the in-flight model turn, if any. Swift structured
+  /// concurrency propagates cancellation through `ContextWindow.callModel`
+  /// — `Task.checkCancellation()` lands at the next suspension point
+  /// (the in-flight HTTP request, the next tool-call dispatch, or one of
+  /// the loop's `await`s). The server-side completion isn't aborted;
+  /// we just stop waiting for it and discard the reply. A synthetic
+  /// "Turn cancelled." marker is appended to the transcript inside the
+  /// turn's cancel branch so the user sees what happened.
+  func cancelTurn() {
+    guard let task = inFlightTurn else { return }
+    AssistantLog.logger.info("→ user cancelled turn")
+    task.cancel()
+    inFlightTurn = nil
   }
 
   /// Re-pull the transcript from the underlying context window. Cheap
@@ -518,6 +562,14 @@ final class GPTService {
   @ObservationIgnored private var session: Session?
   @ObservationIgnored private let store: LibraryStore?
   @ObservationIgnored private let catalogIngest: CatalogIngestService?
+  /// Grace-note-3 cancel handle. Set when `sendMessage` begins driving a
+  /// turn, cleared in the task body's `defer` on completion *or*
+  /// cancellation. The outer `await turn.value` in `sendMessage` keeps the
+  /// caller's coroutine alive across cancellation so the synthetic
+  /// "Turn cancelled." marker lands before `sendMessage` returns. A
+  /// second `sendMessage` while a turn is in flight no-ops (matches the
+  /// existing `isSending`-disabled composer).
+  @ObservationIgnored private var inFlightTurn: Task<Void, Never>?
   /// Phase-5 single-flight guard. Holds the in-flight auto-fill task so
   /// a second drain-detector dispatch (e.g. the user pounding Clear
   /// twice while the first refill is still resolving) no-ops instead
@@ -669,6 +721,25 @@ final class GPTService {
     await refreshTranscript(window: window)
     refreshConversations()
     return session
+  }
+
+  /// Append a synthetic "Turn cancelled." row to the visible transcript
+  /// (only — not persisted to `assistant.sqlite`). Real records carry
+  /// positive `Int64` ids minted by SQLite; synthetic markers use a
+  /// negative id derived from the epoch microsecond so they never
+  /// collide with a real record and `ForEach`'s `Identifiable` diff is
+  /// happy across the next transcript refresh (the negative-id row
+  /// simply disappears on the next disk reload — that's the intended
+  /// behaviour, the user has the visible confirmation and any
+  /// subsequent send rebuilds from records).
+  private func appendCancelledMarker() {
+    let marker = Message(
+      id: -Int64(Date().timeIntervalSince1970 * 1_000_000),
+      role: .assistant,
+      content: "Turn cancelled.",
+      timestamp: .now,
+    )
+    messages.append(marker)
   }
 
   private func refreshTranscript(window: ContextWindow) async {
